@@ -1,0 +1,48 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://cori.do/schemas/ActionDefinition.schema.json",
+    "title": "ActionDefinition",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "kind", "resource_kind", "cerbos_action", "input_schema"],
+    "properties": {
+      "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "description": { "type": "string", "minLength": 1, "maxLength": 4096 },
+  
+      "kind": { "type": "string", "enum": ["query", "mutation", "control"] },
+  
+      "resource_kind": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Logical resource kind (e.g., customer, ticket)."
+      },
+  
+      "cerbos_action": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Action name used in Cerbos policy checks (e.g., soft_delete, anonymize)."
+      },
+  
+      "input_schema": {
+        "type": "object",
+        "description": "JSON Schema describing the action inputs. Runtime should validate step.inputs against this.",
+        "additionalProperties": true
+      },
+  
+      "effects": {
+        "type": "array",
+        "description": "Optional human-readable list of intended effects for preview/reporting.",
+        "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+  
+      "meta": {
+        "type": "object",
+        "description": "Free-form extension metadata (non-authoritative).",
+        "additionalProperties": true
+      }
+    }
+  }
+  

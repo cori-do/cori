@@ -1,0 +1,104 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://cori.do/schemas/AuditEvent.schema.json",
+    "title": "AuditEvent",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "event_id",
+      "occurred_at",
+      "tenant_id",
+      "intent_id",
+      "principal_id",
+      "step_id",
+      "event_type",
+      "action",
+      "allowed",
+      "decision",
+      "outcome"
+    ],
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Unique event identifier."
+      },
+  
+      "occurred_at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "UTC timestamp."
+      },
+  
+      "sequence": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Optional monotonic sequence number per intent (useful for replay ordering)."
+      },
+  
+      "tenant_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "intent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+  
+      "principal_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "step_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+  
+      "event_type": {
+        "type": "string",
+        "enum": [
+          "intent_received",
+          "plan_validated",
+          "policy_checked",
+          "approval_required",
+          "approved",
+          "action_previewed",
+          "action_executed",
+          "verification_failed",
+          "committed",
+          "compensated",
+          "failed"
+        ]
+      },
+  
+      "action": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "description": "ActionDefinition.name (or control step name)."
+      },
+  
+      "resource_kind": { "type": "string", "minLength": 0, "maxLength": 128 },
+      "resource_id": { "type": "string", "minLength": 0, "maxLength": 256 },
+  
+      "allowed": { "type": "boolean" },
+      "preview": { "type": "boolean" },
+  
+      "decision": {
+        "type": "object",
+        "description": "Policy decision payload (Cerbos decision + obligations + explanation metadata).",
+        "additionalProperties": true
+      },
+  
+      "outcome": {
+        "type": "object",
+        "description": "Execution/preview outcome (affected_count, diff summary, errors).",
+        "additionalProperties": true
+      },
+  
+      "integrity": {
+        "type": "object",
+        "description": "Optional tamper-evident fields for enterprise/WORM storage.",
+        "additionalProperties": false,
+        "properties": {
+          "hash": { "type": "string", "minLength": 16, "maxLength": 256 },
+          "prev_hash": { "type": "string", "minLength": 16, "maxLength": 256 }
+        }
+      },
+  
+      "meta": {
+        "type": "object",
+        "description": "Free-form extension metadata (non-authoritative).",
+        "additionalProperties": true
+      }
+    }
+  }
+  

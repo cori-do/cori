@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/cori-core",
+  "crates/cori-policy",
+  "crates/cori-runtime",
+  "crates/cori-adapter-pg",
+  "crates/cori-planner",
+  "crates/cori-cli",
+  "crates/cori-server",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+version = "0.1.0"
+authors = ["Cori Contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+jsonschema = { version = "0.18" , features = ["draft202012"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace"] }
+
+# Cerbos client will likely be gRPC (tonic). We'll stub the client for now.
+tonic = "0.12"
+
+# DB (Postgres) adapter
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Strict JSON schema validation can be added later (jsonschema crate).
