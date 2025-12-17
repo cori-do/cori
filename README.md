@@ -30,15 +30,27 @@ You define safe actions, Cori executes them with guardrails.
 
 ## Install (takes 10 seconds)
 
+This repository currently ships Cori as a Rust CLI.
+
 ```sh
-curl -fsSL https://cli.cori.do/install.sh | bash
+cargo build --release
+./target/release/cori --help
 ```
 
-Verify:
+Alternatively, install from the workspace:
 
 ```sh
+cargo install --path crates/cori-cli
 cori --help
 ```
+
+---
+
+## v0.1.0 (OSS Alpha) limitations (read this first)
+
+- **Postgres execution is stubbed**: generated actions do **not** run SQL yet. `execute` produces results + audit artifacts, but does not mutate a database in this release.
+- **Preview diffs are placeholders**: `plan preview` / `apply --preview` return a structured report, but not row-level before/after diffs yet.
+- **Cerbos is not enforced yet**: `cori generate policy-stubs --engine cerbos` generates files, but the runtime policy client is currently an allow-all stub.
 
 ---
 
@@ -77,7 +89,7 @@ cori actions list
 Describe one action:
 
 ```sh
-cori actions describe SoftDeleteCustomers
+cori actions describe <ActionNameFromList>
 ```
 
 Validate the generated artifacts:
@@ -96,12 +108,14 @@ Create a file named `plan.yaml`:
 steps:
   - id: delete_customer
     kind: mutation
-    action: SoftDeleteCustomers
+    action: <ActionNameFromCatalog>
     inputs:
+      # Tip: copy/paste the required inputs from:
+      #   cori actions describe <ActionNameFromCatalog>
+      # The input keys are schema-driven (e.g. your PK might be customer_id, not id).
       tenant_id: acme
-      id: "11111111-1111-1111-1111-111111111111"
-      deleted_by: "ops@acme.com"
-      reason: "Customer request"
+      <primary_key_field>: "<primary_key_value>"
+      reason: "Why this change is needed"
 ```
 
 ### Validate the plan
@@ -184,6 +198,8 @@ policies/cerbos/resources/
 
 Start with permissive rules in dev, tighten them in prod — on your timeline.
 
+> Note: in v0.1.0, Cerbos policies are generated but **not enforced** at runtime yet.
+
 ---
 
 ## Schema drift? Cori is built for it
@@ -227,8 +243,8 @@ cori actions validate
 If you have a Postgres database URL, you can try Cori immediately:
 
 ```sh
-curl -fsSL https://cli.cori.do/install.sh | bash
-cori init --from-db "<DATABASE_URL>" --project my-super-app
+cargo build --release
+./target/release/cori init --from-db "<DATABASE_URL>" --project my-super-app
 cd my-super-app
 export DATABASE_URL="<DATABASE_URL>"
 cori generate actions

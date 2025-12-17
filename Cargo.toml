@@ -22,8 +22,8 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-jsonschema = { version = "0.18" , features = ["draft202012"] }
-thiserror = "1"
+jsonschema = "0.37.4"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -35,7 +35,9 @@ tower = "0.5"
 tower-http = { version = "0.5", features = ["trace"] }
 
 # Cerbos client will likely be gRPC (tonic). We'll stub the client for now.
-tonic = "0.12"
+tonic = "0.14"
+cerbos = "0.4.7"
+prost-types = "0.13"
 
 # DB (Postgres) adapter
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }

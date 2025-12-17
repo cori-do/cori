@@ -1,0 +1,11 @@
+services:
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:latest
+    command: ["server", "--set=storage.disk.directory=/policies"]
+    ports:
+      - "3592:3592" # HTTP (optional)
+      - "3593:3593" # gRPC (Cori uses this)
+    volumes:
+      # Mount generated demo policies into Cerbos' disk store.
+      - ./demo-crm-project/policies/cerbos/resources:/policies:ro
+

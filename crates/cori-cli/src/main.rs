@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use cori_adapter_pg::PostgresAdapter;
 use cori_core::{MutationIntent, Plan, Principal, Step, StepKind};
-use cori_policy::AllowAllPolicyClient;
+use cori_policy::{AllowAllPolicyClient, PolicyClient};
 use cori_runtime::{audit::StdoutAuditSink, orchestrator::Orchestrator};
 
 use serde::{Deserialize, Serialize};
@@ -59,7 +59,7 @@ enum Command {
         cmd: ActionsCommand,
     },
 
-    /// Plan operations (validate/preview/apply later)
+    /// Plan operations (validate/preview)
     Plan {
         #[command(subcommand)]
         cmd: PlanCommand,
@@ -203,6 +203,25 @@ async fn main() -> anyhow::Result<()> {
             preview,
             database_url,
         } => {
+            // Smoke intentionally runs outside a Cori project directory, so we don't have
+            // access to `actions/catalog.json` or `cori.yaml`. Use a minimal built-in action
+            // definition and allow-all policy to verify wiring.
+            let mut actions = BTreeMap::new();
+            actions.insert(
+                "SoftDeleteCustomer".to_string(),
+                cori_core::ActionDefinition {
+                    name: "SoftDeleteCustomer".to_string(),
+                    kind: StepKind::Mutation,
+                    resource_kind: "customers".to_string(),
+                    cerbos_action: "soft_delete".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["customer_id"],
+                        "properties": { "customer_id": { "type": "string" } }
+                    }),
+                },
+            );
+
             let intent = MutationIntent {
                 intent_id: "smoke-0001".to_string(),
                 tenant_id: tenant,
@@ -226,10 +245,10 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let adapter = PostgresAdapter::new(&database_url).await?;
-            let policy = AllowAllPolicyClient;
+            let policy: Arc<dyn PolicyClient> = Arc::new(AllowAllPolicyClient);
             let audit = StdoutAuditSink;
 
-            let orchestrator = Orchestrator::new(policy, adapter, audit);
+            let orchestrator = Orchestrator::new(policy, adapter, audit, actions);
             let result = orchestrator.run(&intent).await?;
 
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -285,8 +304,12 @@ adapter: postgres
 # Do not store credentials here. Provide DATABASE_URL via env or secret mount.
 database_url_env: DATABASE_URL
 
-# Cerbos PDP endpoint (edit as needed)
-cerbos_url: http://localhost:3592
+# Policy engine (extensible). Supported: allow_all, cerbos
+policy_engine: allow_all
+
+# Cerbos PDP endpoint (gRPC). Set when policy_engine=cerbos.
+# Example: cerbos_grpc_hostport: "localhost:3593"
+cerbos_grpc_hostport: ""
 
 # Default environment for runs (prod/staging/dev)
 environment: dev
@@ -427,7 +450,7 @@ These files are **starting points**. Review and harden them before using in prod
 
 ## How to use
 - Run Cerbos PDP (locally or in-cluster)
-- Point Cori to it via `cori.yaml` (`cerbos_url`)
+- Point Cori to it via `cori.yaml` (`policy_engine=cerbos` + `cerbos_grpc_hostport`)
 - Edit resource policies in `resources/`
 
 ## Notes
@@ -473,7 +496,7 @@ resourcePolicy:
       condition:
         match:
           # TODO: Harden this. Example: only allow in non-prod by default.
-          expr: request.context.environment != "prod"
+          expr: request.principal.attr.context.environment != "prod"
 "#,
             resource_kind = resource_kind,
             actions_list = actions_list
@@ -483,7 +506,7 @@ resourcePolicy:
     }
 
     println!("Generated Cerbos policy stubs in: {}", base.display());
-    println!("Edit the files under policies/cerbos/resources/ and start Cerbos PDP.");
+    println!("Edit the files under policies/cerbos/resources/");
     Ok(())
 }
 
@@ -944,7 +967,7 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
     let tenant_id = infer_tenant_id(&plan_json).unwrap_or_else(|| "default".to_string());
 
     // Environment from config (default dev)
-    let environment = cfg.environment.unwrap_or_else(|| "dev".to_string());
+    let environment = cfg.environment.clone().unwrap_or_else(|| "dev".to_string());
 
     // Build cori-core Plan from plan_json steps
     let core_plan = plan_json_to_core_plan(&plan_json)?;
@@ -964,14 +987,14 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
         plan: core_plan,
     };
 
-    // Use stub policy client for now (later: real Cerbos client)
-    let policy = AllowAllPolicyClient;
+    let policy = build_policy_client(&cfg).await?;
+    let core_actions = build_core_action_map(&action_map)?;
 
     // Memory audit sink to include in report
     let audit = MemoryAuditSink::new();
     let audit_handle = audit.clone();
 
-    let orchestrator = Orchestrator::new(policy, adapter, audit);
+    let orchestrator = Orchestrator::new(policy, adapter, audit, core_actions);
     let result = orchestrator.run(&intent).await?;
 
     // Build preview report
@@ -1093,7 +1116,10 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
     // If not preview: do NOT execute now (GitOps flow). Save status + exit.
     if !preview {
         status.message = Some(
-            "Pending approval. Run: cori approve <intent_id> --reason \"...\"".to_string(),
+            format!(
+                "Pending approval. Run: cori approve {} --reason \"...\"",
+                intent_id
+            ),
         );
         write_status(&status)?;
         println!("✔ Created intent (pending approval): {}", intent_id);
@@ -1111,14 +1137,14 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
     let db_url = resolve_database_url(&cfg)?;
     let adapter = PostgresAdapter::new(&db_url).await?;
 
-    // Policy (MVP stub)
-    let policy = AllowAllPolicyClient;
+    let policy = build_policy_client(&cfg).await?;
+    let core_actions = build_core_action_map(&action_map)?;
 
     // Capture audit events for report
     let audit = MemoryAuditSink::new();
     let audit_handle = audit.clone();
 
-    let orchestrator = Orchestrator::new(policy, adapter, audit);
+    let orchestrator = Orchestrator::new(policy, adapter, audit, core_actions);
 
     let run_res = orchestrator.run(&intent).await;
 
@@ -1184,6 +1210,11 @@ async fn run_status(intent_id: &str) -> anyhow::Result<()> {
 
     let status = read_status(intent_id)?;
     let approval = read_approval(intent_id)?;
+    let has_intent = intent_path(intent_id).exists();
+    let has_plan = intent_dir(intent_id).join("plan.json").exists();
+    let has_meta = intent_dir(intent_id).join("meta.json").exists();
+    let has_status = status_path(intent_id).exists();
+    let has_approval = approval_path(intent_id).exists();
     let has_result = result_path(intent_id).exists();
     let has_audit = audit_path(intent_id).exists();
 
@@ -1221,9 +1252,13 @@ async fn run_status(intent_id: &str) -> anyhow::Result<()> {
     }
 
     println!("Artifacts:");
-    println!("  intent.json:  {}", intent_path(intent_id).exists());
-    println!("  result.json:  {}", has_result);
-    println!("  audit.json:   {}", has_audit);
+    println!("  intent.json:   {}", has_intent);
+    println!("  plan.json:     {}", has_plan);
+    println!("  meta.json:     {}", has_meta);
+    println!("  status.json:   {}", has_status);
+    println!("  approval.json: {}", has_approval);
+    println!("  result.json:   {}", has_result);
+    println!("  audit.json:    {}", has_audit);
 
     if has_result {
         println!("Tip: open {}", result_path(intent_id).display());
@@ -1322,18 +1357,19 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
         failed_at_ms: None,
     });
 
-    if matches!(status.state, IntentState::Executed) && result_path(intent_id).exists() {
-        println!("✔ Intent already executed. Showing existing result:");
-        let v = read_json(&result_path(intent_id))?;
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
-    }
-
     let intent = read_intent(intent_id)?;
     if intent.preview {
         return Err(anyhow::anyhow!(
             "This intent was created as preview=true; it cannot be executed."
         ));
+    }
+
+    // Idempotency: if a result exists, show it and exit (even if status.json is missing/out-of-date).
+    if result_path(intent_id).exists() {
+        println!("✔ Result already exists. Showing existing result:");
+        let v = read_json(&result_path(intent_id))?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
     }
 
     // Require approval
@@ -1348,14 +1384,19 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
     write_status(&status)?;
 
     // Execute via orchestrator
+    let catalog = load_actions_catalog()?;
+    let action_map: BTreeMap<String, ActionDefinition> =
+        catalog.actions.into_iter().map(|a| (a.name.clone(), a)).collect();
+    let core_actions = build_core_action_map(&action_map)?;
+
     let db_url = resolve_database_url(&cfg)?;
     let adapter = PostgresAdapter::new(&db_url).await?;
-    let policy = AllowAllPolicyClient;
+    let policy = build_policy_client(&cfg).await?;
 
     let audit = MemoryAuditSink::new();
     let audit_handle = audit.clone();
 
-    let orchestrator = Orchestrator::new(policy, adapter, audit);
+    let orchestrator = Orchestrator::new(policy, adapter, audit, core_actions);
 
     let run_res = orchestrator.run(&intent).await;
 
@@ -1555,23 +1596,20 @@ fn validate_instance_against_schema(
     schema: &serde_json::Value,
     instance: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    use jsonschema::{Draft, JSONSchema};
-
-    let compiled = JSONSchema::options()
-        .with_draft(Draft::Draft202012)
-        .compile(schema)
+    let validator = jsonschema::draft202012::options()
+        .build(schema)
         .map_err(|e| anyhow::anyhow!("Invalid action input_schema: {}", e))?;
 
-    let result = compiled.validate(instance);
-    if let Err(errors) = result {
-        // Keep output readable: show up to 10 errors
-        let mut msgs = Vec::new();
-        for (idx, e) in errors.take(10).enumerate() {
-            msgs.push(format!("{}: {}", idx + 1, e));
-        }
-        return Err(anyhow::anyhow!(msgs.join("; ")));
+    if validator.is_valid(instance) {
+        return Ok(());
     }
-    Ok(())
+
+    // Keep output readable: show up to 10 errors
+    let mut msgs = Vec::new();
+    for (idx, e) in validator.iter_errors(instance).take(10).enumerate() {
+        msgs.push(format!("{}: {}", idx + 1, e));
+    }
+    Err(anyhow::anyhow!(msgs.join("; ")))
 }
 
 
@@ -1580,11 +1618,16 @@ fn validate_instance_against_schema(
 // -----------------------------
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CoriConfig {
+    #[allow(dead_code)]
     project: Option<String>,
     adapter: Option<String>,
     database_url_env: Option<String>,
-    cerbos_url: Option<String>,
+    #[allow(dead_code)]
+    policy_engine: Option<String>,
+    #[allow(dead_code)]
+    cerbos_grpc_hostport: Option<String>,
     environment: Option<String>,
 }
 
@@ -1629,6 +1672,71 @@ fn resolve_database_url(cfg: &CoriConfig) -> anyhow::Result<String> {
 fn read_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     let bytes = fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+async fn build_policy_client(cfg: &CoriConfig) -> anyhow::Result<Arc<dyn PolicyClient>> {
+    let engine = cfg.policy_engine.as_deref().unwrap_or("allow_all");
+
+    match engine {
+        "allow_all" => Ok(Arc::new(AllowAllPolicyClient)),
+        "cerbos" => {
+            let hp = cfg
+                .cerbos_grpc_hostport
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if hp.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "policy_engine=cerbos requires `cerbos_grpc_hostport`, e.g. \"localhost:3593\""
+                ));
+            }
+            let (host, port) = split_hostport(&hp)?;
+            let client = cori_policy::CerbosGrpcPolicyClient::connect_hostport(&host, port).await?;
+            Ok(Arc::new(client))
+        }
+        other => Err(anyhow::anyhow!(
+            "Unknown policy_engine '{}'. Supported: allow_all, cerbos",
+            other
+        )),
+    }
+}
+
+fn split_hostport(s: &str) -> anyhow::Result<(String, u16)> {
+    let s = s.trim();
+    let (host, port) = s
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Invalid hostport '{}', expected host:port", s))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid port in '{}'", s))?;
+    Ok((host.to_string(), port))
+}
+
+fn build_core_action_map(
+    action_map: &BTreeMap<String, ActionDefinition>,
+) -> anyhow::Result<BTreeMap<String, cori_core::ActionDefinition>> {
+    let mut out = BTreeMap::new();
+    for (name, def) in action_map {
+        let kind = match def.kind.as_str() {
+            "query" => StepKind::Query,
+            "mutation" => StepKind::Mutation,
+            "control" => StepKind::Control,
+            other => return Err(anyhow::anyhow!("Invalid action kind '{}' for {}", other, name)),
+        };
+
+        out.insert(
+            name.clone(),
+            cori_core::ActionDefinition {
+                name: def.name.clone(),
+                kind,
+                resource_kind: def.resource_kind.clone(),
+                cerbos_action: def.cerbos_action.clone(),
+                input_schema: def.input_schema.clone(),
+            },
+        );
+    }
+    Ok(out)
 }
 
 // -----------------------------
@@ -1740,6 +1848,7 @@ struct Snapshot {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct TableEntry {
     schema: String,
     name: String,
@@ -1747,6 +1856,7 @@ struct TableEntry {
     #[serde(default)]
     primary_key: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     foreign_keys: Vec<ForeignKeyEntry>,
 }
 
@@ -1760,22 +1870,32 @@ struct ColumnEntry {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct ForeignKeyEntry {
+    #[allow(dead_code)]
     name: String,
     #[serde(default)]
+    #[allow(dead_code)]
     mappings: Vec<ForeignKeyMapping>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct ForeignKeyMapping {
+    #[allow(dead_code)]
     column: String,
+    #[allow(dead_code)]
     references: ForeignKeyRef,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct ForeignKeyRef {
+    #[allow(dead_code)]
     schema: String,
+    #[allow(dead_code)]
     table: String,
+    #[allow(dead_code)]
     column: String,
 }
 
