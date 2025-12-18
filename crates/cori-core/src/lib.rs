@@ -31,7 +31,7 @@ pub struct Step {
     pub inputs: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StepKind {
     Query,
@@ -48,4 +48,6 @@ pub struct ActionDefinition {
     pub resource_kind: String,
     pub cerbos_action: String,
     pub input_schema: serde_json::Value, // JSON Schema (later enforced)
+    #[serde(default)]
+    pub meta: serde_json::Value,
 }

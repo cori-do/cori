@@ -512,7 +512,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cori"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -531,21 +531,23 @@ dependencies = [
 
 [[package]]
 name = "cori-adapter-pg"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "cori-core",
  "cori-runtime",
  "serde_json",
  "sqlx",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "cori-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -555,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "cori-planner"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -565,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "cori-policy"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -581,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "cori-runtime"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -595,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "cori-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

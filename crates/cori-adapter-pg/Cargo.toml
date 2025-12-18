@@ -12,5 +12,7 @@ tracing.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 
 cori-runtime = { path = "../cori-runtime" }
+cori-core = { path = "../cori-core" }

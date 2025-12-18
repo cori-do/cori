@@ -208,16 +208,35 @@ async fn main() -> anyhow::Result<()> {
             // definition and allow-all policy to verify wiring.
             let mut actions = BTreeMap::new();
             actions.insert(
-                "SoftDeleteCustomer".to_string(),
+                "ListCustomers".to_string(),
                 cori_core::ActionDefinition {
-                    name: "SoftDeleteCustomer".to_string(),
-                    kind: StepKind::Mutation,
+                    name: "ListCustomers".to_string(),
+                    kind: StepKind::Query,
                     resource_kind: "customers".to_string(),
-                    cerbos_action: "soft_delete".to_string(),
+                    cerbos_action: "list".to_string(),
                     input_schema: json!({
                         "type": "object",
-                        "required": ["customer_id"],
-                        "properties": { "customer_id": { "type": "string" } }
+                        "required": ["limit"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                            "cursor": { "anyOf": [ { "type": "null" }, { "type": "string" } ], "default": null }
+                        }
+                    }),
+                    meta: json!({
+                        "generated": false,
+                        "pg": {
+                            "schema": "public",
+                            "table": "customers",
+                            "primary_key": [],
+                            "tenant_column": null,
+                            "version_column": null,
+                            "deleted_at_column": null,
+                            "deleted_by_column": null,
+                            "delete_reason_column": null,
+                            "columns": [],
+                            "updatable_columns": []
+                        }
                     }),
                 },
             );
@@ -235,16 +254,17 @@ async fn main() -> anyhow::Result<()> {
                 plan: Plan {
                     steps: vec![Step {
                         id: "s1".to_string(),
-                        kind: StepKind::Mutation,
-                        action: "SoftDeleteCustomer".to_string(),
+                        kind: StepKind::Query,
+                        action: "ListCustomers".to_string(),
                         inputs: json!({
-                            "customer_id": "11111111-1111-1111-1111-111111111111"
+                            "limit": 1,
+                            "cursor": null
                         }),
                     }],
                 },
             };
 
-            let adapter = PostgresAdapter::new(&database_url).await?;
+            let adapter = PostgresAdapter::new(&database_url, cori_adapter_pg::PostgresAdapterOptions::default()).await?;
             let policy: Arc<dyn PolicyClient> = Arc::new(AllowAllPolicyClient);
             let audit = StdoutAuditSink;
 
@@ -313,6 +333,12 @@ cerbos_grpc_hostport: ""
 
 # Default environment for runs (prod/staging/dev)
 environment: dev
+
+# Execution safety guardrails
+# - max_affected_rows: upper bound for any single mutation step
+# - preview_row_limit: how many sample rows to include in mutation previews
+max_affected_rows: 1000
+preview_row_limit: 25
 "#,
         project = project
     );
@@ -557,6 +583,46 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
         let has_deleted_by = t.columns.iter().any(|c| c.name == "deleted_by");
         let has_delete_reason = t.columns.iter().any(|c| c.name == "delete_reason");
 
+        // Execution metadata for adapters (non-authoritative but generated deterministically).
+        // This enables safe SQL construction without requiring re-introspection at runtime.
+        let mut updatable_columns: Vec<String> = Vec::new();
+        for c in &t.columns {
+            if t.primary_key.contains(&c.name) {
+                continue;
+            }
+            if c.name == "tenant_id"
+                || c.name == "version"
+                || c.name == "deleted_at"
+                || c.name == "deleted_by"
+                || c.name == "delete_reason"
+            {
+                continue;
+            }
+            updatable_columns.push(c.name.clone());
+        }
+        updatable_columns.sort();
+
+        let meta = json!({
+            "generated": true,
+            "source_table": table_key,
+            "pg": {
+                "schema": t.schema,
+                "table": t.name,
+                "primary_key": t.primary_key,
+                "tenant_column": if has_tenant { json!("tenant_id") } else { serde_json::Value::Null },
+                "version_column": if has_version { json!("version") } else { serde_json::Value::Null },
+                "deleted_at_column": if has_deleted_at { json!("deleted_at") } else { serde_json::Value::Null },
+                "deleted_by_column": if has_deleted_by { json!("deleted_by") } else { serde_json::Value::Null },
+                "delete_reason_column": if has_delete_reason { json!("delete_reason") } else { serde_json::Value::Null },
+                "columns": t.columns.iter().map(|c| json!({
+                    "name": c.name,
+                    "data_type": c.data_type,
+                    "nullable": c.nullable
+                })).collect::<Vec<_>>(),
+                "updatable_columns": updatable_columns
+            }
+        });
+
         // GetById (if PK exists)
         if !t.primary_key.is_empty() {
             let name = format!("Get{}ById", entity_base);
@@ -569,7 +635,7 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 cerbos_action: "get".into(),
                 input_schema: build_get_by_id_input_schema(t, has_tenant),
                 effects: Some(vec!["Read one row by primary key.".to_string()]),
-                meta: json!({ "generated": true, "source_table": table_key }),
+                meta: meta.clone(),
             };
             write_action_file(&def, &name, force)?;
             written_files.push(format!("actions/{}.action.json", name));
@@ -588,7 +654,7 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 cerbos_action: "list".into(),
                 input_schema: build_list_input_schema(t, has_tenant),
                 effects: Some(vec!["List rows (paged).".to_string()]),
-                meta: json!({ "generated": true, "source_table": table_key }),
+                meta: meta.clone(),
             };
             write_action_file(&def, &name, force)?;
             written_files.push(format!("actions/{}.action.json", name));
@@ -609,7 +675,7 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 effects: Some(vec![
                     "Update selected fields (patch) with optimistic concurrency if supported.".to_string(),
                 ]),
-                meta: json!({ "generated": true, "source_table": table_key }),
+                meta: meta.clone(),
             };
             write_action_file(&def, &name, force)?;
             written_files.push(format!("actions/{}.action.json", name));
@@ -634,7 +700,7 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 cerbos_action: "soft_delete".into(),
                 input_schema: build_soft_delete_input_schema(t, has_tenant, has_version, has_deleted_by, has_delete_reason),
                 effects: Some(effects),
-                meta: json!({ "generated": true, "source_table": table_key }),
+                meta: meta.clone(),
             };
             write_action_file(&def, &name, force)?;
             written_files.push(format!("actions/{}.action.json", name));
@@ -961,7 +1027,7 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
 
     // Resolve DB URL & create adapter (preview mode still needs adapter)
     let db_url = resolve_database_url(&cfg)?;
-    let adapter = PostgresAdapter::new(&db_url).await?;
+    let adapter = PostgresAdapter::new(&db_url, pg_adapter_options_from_cfg(&cfg)).await?;
 
     // Infer tenant_id from plan inputs (best-effort), else "default"
     let tenant_id = infer_tenant_id(&plan_json).unwrap_or_else(|| "default".to_string());
@@ -1135,7 +1201,7 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
 
     // Adapter requires DB URL for preview
     let db_url = resolve_database_url(&cfg)?;
-    let adapter = PostgresAdapter::new(&db_url).await?;
+    let adapter = PostgresAdapter::new(&db_url, pg_adapter_options_from_cfg(&cfg)).await?;
 
     let policy = build_policy_client(&cfg).await?;
     let core_actions = build_core_action_map(&action_map)?;
@@ -1390,7 +1456,7 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
     let core_actions = build_core_action_map(&action_map)?;
 
     let db_url = resolve_database_url(&cfg)?;
-    let adapter = PostgresAdapter::new(&db_url).await?;
+    let adapter = PostgresAdapter::new(&db_url, pg_adapter_options_from_cfg(&cfg)).await?;
     let policy = build_policy_client(&cfg).await?;
 
     let audit = MemoryAuditSink::new();
@@ -1629,6 +1695,10 @@ struct CoriConfig {
     #[allow(dead_code)]
     cerbos_grpc_hostport: Option<String>,
     environment: Option<String>,
+    #[allow(dead_code)]
+    max_affected_rows: Option<u64>,
+    #[allow(dead_code)]
+    preview_row_limit: Option<u32>,
 }
 
 fn load_cori_config_from_cwd() -> anyhow::Result<CoriConfig> {
@@ -1702,6 +1772,13 @@ async fn build_policy_client(cfg: &CoriConfig) -> anyhow::Result<Arc<dyn PolicyC
     }
 }
 
+fn pg_adapter_options_from_cfg(cfg: &CoriConfig) -> cori_adapter_pg::PostgresAdapterOptions {
+    cori_adapter_pg::PostgresAdapterOptions {
+        max_affected_rows: cfg.max_affected_rows.unwrap_or(1000),
+        preview_row_limit: cfg.preview_row_limit.unwrap_or(25),
+    }
+}
+
 fn split_hostport(s: &str) -> anyhow::Result<(String, u16)> {
     let s = s.trim();
     let (host, port) = s
@@ -1733,6 +1810,7 @@ fn build_core_action_map(
                 resource_kind: def.resource_kind.clone(),
                 cerbos_action: def.cerbos_action.clone(),
                 input_schema: def.input_schema.clone(),
+                meta: def.meta.clone(),
             },
         );
     }

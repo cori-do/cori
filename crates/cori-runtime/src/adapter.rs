@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use cori_core::ActionDefinition;
 
 #[derive(Debug, Clone)]
 pub struct ActionOutcome {
@@ -21,7 +22,7 @@ pub trait DataAdapter: Send + Sync {
     async fn execute_action(
         &self,
         tenant_id: &str,
-        action: &str,
+        action: &ActionDefinition,
         inputs: &serde_json::Value,
         preview: bool,
     ) -> anyhow::Result<ActionOutcome>;

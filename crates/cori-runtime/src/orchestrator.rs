@@ -97,7 +97,7 @@ impl<A: DataAdapter, S: AuditSink> Orchestrator<A, S> {
 
             let outcome = self
                 .adapter
-                .execute_action(&intent.tenant_id, &step.action, &step.inputs, intent.preview)
+                .execute_action(&intent.tenant_id, action_def, &step.inputs, intent.preview)
                 .await?;
 
             self.audit.record(AuditEvent {
