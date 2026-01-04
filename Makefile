@@ -1,4 +1,4 @@
-.PHONY: build install build-install clean help cerbos-up cerbos-down cerbos-logs
+.PHONY: build install build-install clean test help demo-up demo-down demo-logs
 
 # Build the cori CLI in release mode
 build:
@@ -6,7 +6,7 @@ build:
 
 # Install the cori CLI to the system
 install:
-	cargo install --path crates/cori-cli --force
+	cargo install --path crates/cori-cli --force --locked
 
 # Build and install in one command
 build-install: build install
@@ -15,17 +15,23 @@ build-install: build install
 clean:
 	cargo clean
 
-# Run Cerbos PDP locally (Docker Compose) wired to the demo policies
-cerbos-up:
-	docker compose -f examples/docker-compose.cerbos.yml up -d
+# Run comprehensive CLI tests against demo CRM database
+test: build demo-up
+	@echo "Waiting for services to start..."
+	@sleep 5
+	cd examples && ./test-all-commands.sh
 
-# Stop Cerbos PDP
-cerbos-down:
-	docker compose -f examples/docker-compose.cerbos.yml down
+# Run demo database (PostgreSQL)
+demo-up:
+	docker compose -f examples/docker-compose.demo.yml up -d
 
-# Tail Cerbos logs
-cerbos-logs:
-	docker compose -f examples/docker-compose.cerbos.yml logs -f cerbos
+# Stop demo database
+demo-down:
+	docker compose -f examples/docker-compose.demo.yml down
+
+# Tail demo service logs
+demo-logs:
+	docker compose -f examples/docker-compose.demo.yml logs -f
 
 # Show available commands
 help:
@@ -34,8 +40,9 @@ help:
 	@echo "  make install       - Install the cori CLI to ~/.cargo/bin/"
 	@echo "  make build-install - Build and install the cori CLI"
 	@echo "  make clean         - Clean build artifacts"
-	@echo "  make cerbos-up     - Start Cerbos PDP (Docker Compose) for examples/"
-	@echo "  make cerbos-down   - Stop Cerbos PDP"
-	@echo "  make cerbos-logs   - Tail Cerbos logs"
+	@echo "  make test          - Run comprehensive CLI tests (starts demo services)"
+	@echo "  make demo-up       - Start demo database (PostgreSQL)"
+	@echo "  make demo-down     - Stop demo database"
+	@echo "  make demo-logs     - Tail demo service logs"
 	@echo "  make help          - Show this help message"
 

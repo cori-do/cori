@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cori Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <nav class="bg-indigo-600 text-white px-4 py-3">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <h1 class="text-xl font-bold">Cori Dashboard</h1>
+            <div class="flex gap-4">
+                <a href="/" class="hover:text-indigo-200">Home</a>
+                <a href="/schema" class="hover:text-indigo-200">Schema</a>
+                <a href="/roles" class="hover:text-indigo-200">Roles</a>
+                <a href="/tokens" class="hover:text-indigo-200">Tokens</a>
+                <a href="/audit" class="hover:text-indigo-200">Audit</a>
+                <a href="/approvals" class="hover:text-indigo-200">Approvals</a>
+                <a href="/settings" class="hover:text-indigo-200">Settings</a>
+            </div>
+        </div>
+    </nav>
+    
+    <main class="max-w-7xl mx-auto px-4 py-8">
+        <h2 class="text-3xl font-bold text-gray-900 mb-6">Welcome to Cori</h2>
+        <p class="text-gray-600 mb-8">
+            The AI Database Proxy that enables safe, tenant-isolated database access
+            for AI agents through Biscuit token authentication and Row-Level Security.
+        </p>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Schema Browser Card -->
+            <a href="/schema" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Schema Browser</h3>
+                <p class="text-gray-600">
+                    View introspected tables, columns, and foreign keys. Detect tenant columns.
+                </p>
+            </a>
+            
+            <!-- Roles Manager Card -->
+            <a href="/roles" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Roles Manager</h3>
+                <p class="text-gray-600">
+                    Create and edit roles with full permission configuration.
+                </p>
+            </a>
+            
+            <!-- Token Minting Card -->
+            <a href="/tokens" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Token Minting</h3>
+                <p class="text-gray-600">
+                    Generate role tokens and attenuate them for specific tenants.
+                </p>
+            </a>
+            
+            <!-- Audit Logs Card -->
+            <a href="/audit" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Audit Logs</h3>
+                <p class="text-gray-600">
+                    Query history filtered by tenant, role, action, and time range.
+                </p>
+            </a>
+            
+            <!-- Approvals Queue Card -->
+            <a href="/approvals" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Approvals Queue</h3>
+                <p class="text-gray-600">
+                    Review pending human-in-the-loop actions and approve or reject them.
+                </p>
+            </a>
+            
+            <!-- Settings Card -->
+            <a href="/settings" class="block p-6 bg-white rounded-lg shadow hover:shadow-lg transition-shadow">
+                <h3 class="text-lg font-semibold text-gray-900 mb-2">Settings</h3>
+                <p class="text-gray-600">
+                    Configure upstream database, global defaults, and guardrails.
+                </p>
+            </a>
+        </div>
+    </main>
+</body>
+</html>
+

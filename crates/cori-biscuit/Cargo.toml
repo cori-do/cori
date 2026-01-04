@@ -1,0 +1,35 @@
+[package]
+name = "cori-biscuit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Biscuit token handling for Cori AI Database Proxy"
+
+[dependencies]
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# Biscuit tokens
+biscuit-auth = "6"
+
+# Base64 encoding for token serialization
+base64 = "0.22"
+
+# Random generation for key generation
+rand = "0.9"
+
+# Internal crates
+cori-core = { path = "../cori-core" }
+tempfile = "3.24.0"
+

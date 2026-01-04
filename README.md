@@ -50,7 +50,7 @@ cori --help
 
 - **Postgres execution is stubbed**: generated actions do **not** run SQL yet. `execute` produces results + audit artifacts, but does not mutate a database in this release.
 - **Preview diffs are placeholders**: `plan preview` / `apply --preview` return a structured report, but not row-level before/after diffs yet.
-- **Cerbos is not enforced yet**: `cori generate policy-stubs --engine cerbos` generates files, but the runtime policy client is currently an allow-all stub.
+- **Biscuit-native policy model**: Policy enforcement uses Biscuit tokens and role YAML configuration. See AGENTS.md for the full policy model.
 
 ---
 
@@ -180,25 +180,16 @@ This creates an intent and runs a dry-run immediately.
 
 ---
 
-## Policy (optional, but powerful)
+## Policy (Biscuit-native)
 
-Cori can generate starter policies so you can control who can do what.
+Cori uses a **Biscuit-native policy model** — no external policy engine required.
 
-Generate Cerbos stubs:
+Policy enforcement happens at multiple layers:
+1. **Biscuit token verification** (signature, expiration, tenant claim)
+2. **Role YAML configuration** (table/column access, allowed_values)
+3. **Runtime guards** (RLS injection, column filtering, row limits)
 
-```sh
-cori generate policy-stubs --engine cerbos
-```
-
-You’ll get editable policies under:
-
-```
-policies/cerbos/resources/
-```
-
-Start with permissive rules in dev, tighten them in prod — on your timeline.
-
-> Note: in v0.1.0, Cerbos policies are generated but **not enforced** at runtime yet.
+See [AGENTS.md](AGENTS.md) Section 8 for the complete policy model.
 
 ---
 

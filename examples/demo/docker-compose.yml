@@ -1,0 +1,42 @@
+# =============================================================================
+# Cori Demo: Docker Compose
+# =============================================================================
+# This sets up the demo environment with a multi-tenant CRM database.
+# The database contains data for 3 organizations: Acme, Globex, Initech
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  # The upstream database that Cori protects.
+  
+  postgres:
+    image: postgres:16
+    container_name: cori-demo-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cori_demo
+    ports:
+      - "5432:5432"
+    volumes:
+      # Initialize with multi-tenant schema and seed data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      # Persist data between restarts
+      - cori_demo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cori_demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - cori-demo
+
+networks:
+  cori-demo:
+    driver: bridge
+
+volumes:
+  cori_demo_pgdata:

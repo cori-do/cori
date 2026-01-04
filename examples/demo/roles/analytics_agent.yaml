@@ -1,0 +1,64 @@
+# =============================================================================
+# ANALYTICS AGENT ROLE
+# =============================================================================
+# AI agent for data analysis. Read-only access to aggregate data.
+
+name: analytics_agent
+description: "AI agent for data analysis and reporting (read-only)"
+
+tables:
+  customers:
+    readable: [customer_id, company, status, lifetime_value, created_at]
+    # Note: PII excluded (first_name, last_name, email, phone)
+    editable: {}
+  
+  opportunities:
+    readable: [opportunity_id, customer_id, stage, estimated_value, probability, expected_close_date, actual_close_date, created_at]
+    editable: {}
+  
+  orders:
+    readable: [order_id, customer_id, order_date, status, subtotal, total_amount, created_at]
+    editable: {}
+  
+  order_items:
+    readable: [order_item_id, order_id, product_id, quantity, unit_price, line_total]
+    editable: {}
+  
+  products:
+    readable: [product_id, name, category, price, stock_quantity]
+    editable: {}
+  
+  tickets:
+    readable: [ticket_id, customer_id, status, priority, category, resolved_at, created_at]
+    editable: {}
+  
+  tags:
+    readable: "*"
+    editable: {}
+  
+  customer_tags:
+    readable: "*"
+    editable: {}
+
+blocked_tables:
+  - users
+  - api_keys
+  - billing
+  - audit_logs
+  - contacts       # PII
+  - addresses      # PII
+  - notes          # May contain PII
+  - communications # May contain PII
+  - payments       # Financial detail
+  - invoices       # Financial detail
+
+max_rows_per_query: 10000  # Analytics needs larger result sets
+max_affected_rows: 0       # No writes allowed
+
+blocked_operations:
+  - INSERT
+  - UPDATE
+  - DELETE
+  - TRUNCATE
+  - DROP
+

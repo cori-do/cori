@@ -64,13 +64,13 @@ impl DataAdapter for PostgresAdapter {
     ) -> anyhow::Result<ActionOutcome> {
         let pg = PgActionMeta::from_action(action)?;
 
-        match action.cerbos_action.as_str() {
+        match action.policy_action.as_str() {
             "get" => self.exec_get_by_id(action, &pg, inputs).await,
             "list" => self.exec_list(action, &pg, inputs).await,
             "update_fields" => self.exec_update_fields(action, &pg, inputs, preview).await,
             "soft_delete" => self.exec_soft_delete(action, &pg, inputs, preview).await,
             other => Err(anyhow::anyhow!(
-                "Unsupported Postgres action cerbos_action='{}' (action='{}')",
+                "Unsupported Postgres action policy_action='{}' (action='{}')",
                 other,
                 action.name
             )),
@@ -157,7 +157,9 @@ impl PgActionMeta {
             let name = c
                 .get("name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Action '{}' meta.pg.columns missing name", action.name))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Action '{}' meta.pg.columns missing name", action.name)
+                })?
                 .to_string();
             let data_type = c
                 .get("data_type")
@@ -215,10 +217,7 @@ fn quote_ident(ident: &str) -> anyhow::Result<String> {
         return Err(anyhow::anyhow!("empty identifier"));
     }
     // Be strict: we only expect generator-produced identifiers.
-    if !ident
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(anyhow::anyhow!("invalid identifier '{}'", ident));
     }
     Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
@@ -234,7 +233,11 @@ fn cast_for_pg_type(data_type: &str) -> Option<&'static str> {
     }
 }
 
-fn add_arg_for_col(args: &mut PgArguments, col: &PgColumnMeta, v: &serde_json::Value) -> anyhow::Result<()> {
+fn add_arg_for_col(
+    args: &mut PgArguments,
+    col: &PgColumnMeta,
+    v: &serde_json::Value,
+) -> anyhow::Result<()> {
     use serde_json::Value;
 
     if v.is_null() {
@@ -249,7 +252,9 @@ fn add_arg_for_col(args: &mut PgArguments, col: &PgColumnMeta, v: &serde_json::V
             "uuid" => args_add(args, Option::<uuid::Uuid>::None)?,
             "boolean" => args_add(args, Option::<bool>::None)?,
             "integer" | "bigint" | "smallint" => args_add(args, Option::<i64>::None)?,
-            "json" | "jsonb" => args_add(args, Option::<sqlx::types::Json<serde_json::Value>>::None)?,
+            "json" | "jsonb" => {
+                args_add(args, Option::<sqlx::types::Json<serde_json::Value>>::None)?
+            }
             _ => args_add(args, Option::<String>::None)?,
         }
         return Ok(());
@@ -279,13 +284,11 @@ fn add_arg_for_col(args: &mut PgArguments, col: &PgColumnMeta, v: &serde_json::V
             args_add(args, sqlx::types::Json(v.clone()))?;
         }
         // For these, bind as string and rely on explicit cast in SQL
-        "numeric" | "real" | "double precision" | "decimal" => {
-            match v {
-                Value::Number(n) => args_add(args, n.to_string())?,
-                Value::String(s) => args_add(args, s.clone())?,
-                _ => return Err(anyhow::anyhow!("Expected number/string for '{}'", col.name)),
-            }
-        }
+        "numeric" | "real" | "double precision" | "decimal" => match v {
+            Value::Number(n) => args_add(args, n.to_string())?,
+            Value::String(s) => args_add(args, s.clone())?,
+            _ => return Err(anyhow::anyhow!("Expected number/string for '{}'", col.name)),
+        },
         "date" | "timestamp with time zone" | "timestamp without time zone" => {
             let s = v
                 .as_str()
@@ -307,7 +310,10 @@ fn add_arg_for_col(args: &mut PgArguments, col: &PgColumnMeta, v: &serde_json::V
     Ok(())
 }
 
-fn get_obj<'a>(v: &'a serde_json::Value, ctx: &str) -> anyhow::Result<&'a serde_json::Map<String, serde_json::Value>> {
+fn get_obj<'a>(
+    v: &'a serde_json::Value,
+    ctx: &str,
+) -> anyhow::Result<&'a serde_json::Map<String, serde_json::Value>> {
     v.as_object()
         .ok_or_else(|| anyhow::anyhow!("Expected object for {}", ctx))
 }
@@ -371,8 +377,12 @@ impl PostgresAdapter {
             table,
             where_parts.join(" AND ")
         );
-        let rec = sqlx::query_with(&sql, args).fetch_optional(&self.pool).await?;
-        let row_json: Option<serde_json::Value> = rec.map(|r| r.try_get::<serde_json::Value, _>("row")).transpose()?;
+        let rec = sqlx::query_with(&sql, args)
+            .fetch_optional(&self.pool)
+            .await?;
+        let row_json: Option<serde_json::Value> = rec
+            .map(|r| r.try_get::<serde_json::Value, _>("row"))
+            .transpose()?;
 
         Ok(ActionOutcome {
             affected_count: 0,
@@ -397,7 +407,10 @@ impl PostgresAdapter {
             .get("limit")
             .and_then(|v| v.as_i64())
             .ok_or_else(|| anyhow::anyhow!("Missing/invalid required input 'limit'"))?;
-        let cursor = inputs.get("cursor").cloned().unwrap_or(serde_json::Value::Null);
+        let cursor = inputs
+            .get("cursor")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let mut where_parts: Vec<String> = Vec::new();
         let mut args = PgArguments::default();
@@ -563,8 +576,8 @@ impl PostgresAdapter {
             idx += 1;
         }
 
-        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-            if !expected.is_null() {
+        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version"))
+            && !expected.is_null() {
                 let col = meta
                     .column(vc)
                     .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
@@ -575,7 +588,6 @@ impl PostgresAdapter {
                 add_arg_for_col(&mut args_base, col, expected)?;
                 idx += 1;
             }
-        }
 
         if let Some(dc) = &meta.deleted_at_column {
             where_parts.push(format!("{} IS NULL", quote_ident(dc)?));
@@ -620,15 +632,12 @@ impl PostgresAdapter {
                         obj.insert((*k).clone(), (*v).clone());
                     }
                 }
-                if let Some(vc) = &meta.version_column {
-                    if let Some(obj) = after.as_object_mut() {
-                        if let Some(vv) = obj.get(vc).cloned() {
-                            if let Some(n) = vv.as_i64() {
+                if let Some(vc) = &meta.version_column
+                    && let Some(obj) = after.as_object_mut()
+                        && let Some(vv) = obj.get(vc).cloned()
+                            && let Some(n) = vv.as_i64() {
                                 obj.insert(vc.clone(), serde_json::json!(n + 1));
                             }
-                        }
-                    }
-                }
                 let pk_obj = meta
                     .primary_key
                     .iter()
@@ -698,45 +707,66 @@ impl PostgresAdapter {
         // Append WHERE binds after SET binds
         // Re-bind in the same order as in where_parts construction (tenant, pk..., expected_version)
         if let Some(tc) = &meta.tenant_column {
-            let v = inputs.get(tc).ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", tc))?;
-            let col = meta.column(tc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
+            let v = inputs
+                .get(tc)
+                .ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", tc))?;
+            let col = meta
+                .column(tc)
+                .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
             add_arg_for_col(&mut args, col, v)?;
         }
         for pk in &meta.primary_key {
-            let v = inputs.get(pk).ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", pk))?;
-            let col = meta.column(pk).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
+            let v = inputs
+                .get(pk)
+                .ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", pk))?;
+            let col = meta
+                .column(pk)
+                .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
             add_arg_for_col(&mut args, col, v)?;
         }
-        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-            if !expected.is_null() {
-                let col = meta.column(vc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
+        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version"))
+            && !expected.is_null() {
+                let col = meta
+                    .column(vc)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
                 add_arg_for_col(&mut args, col, expected)?;
             }
-        }
 
         // Rewrite WHERE placeholders to reflect SET binds offset
         let where_sql = {
             let mut out = Vec::new();
             let mut current = set_idx;
             if let Some(tc) = &meta.tenant_column {
-                let col = meta.column(tc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
-                let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+                let col = meta
+                    .column(tc)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
+                let cast = cast_for_pg_type(&col.data_type)
+                    .map(|c| format!("::{}", c))
+                    .unwrap_or_default();
                 out.push(format!("{} = ${}{}", quote_ident(tc)?, current, cast));
                 current += 1;
             }
             for pk in &meta.primary_key {
-                let col = meta.column(pk).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
-                let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+                let col = meta
+                    .column(pk)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
+                let cast = cast_for_pg_type(&col.data_type)
+                    .map(|c| format!("::{}", c))
+                    .unwrap_or_default();
                 out.push(format!("{} = ${}{}", quote_ident(pk)?, current, cast));
                 current += 1;
             }
-            if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-                if !expected.is_null() {
-                    let col = meta.column(vc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
-                    let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+            if let (Some(vc), Some(expected)) =
+                (&meta.version_column, inputs.get("expected_version"))
+                && !expected.is_null() {
+                    let col = meta
+                        .column(vc)
+                        .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
+                    let cast = cast_for_pg_type(&col.data_type)
+                        .map(|c| format!("::{}", c))
+                        .unwrap_or_default();
                     out.push(format!("{} = ${}{}", quote_ident(vc)?, current, cast));
                 }
-            }
             if let Some(dc) = &meta.deleted_at_column {
                 out.push(format!("{} IS NULL", quote_ident(dc)?));
             }
@@ -755,7 +785,9 @@ impl PostgresAdapter {
             .await?;
         tx.commit().await?;
 
-        let row_json: Option<serde_json::Value> = rec.map(|r| r.try_get::<serde_json::Value, _>("row")).transpose()?;
+        let row_json: Option<serde_json::Value> = rec
+            .map(|r| r.try_get::<serde_json::Value, _>("row"))
+            .transpose()?;
 
         Ok(ActionOutcome {
             affected_count: row_json.is_some() as u64,
@@ -817,8 +849,8 @@ impl PostgresAdapter {
             add_arg_for_col(&mut args_base, col, v)?;
             idx += 1;
         }
-        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-            if !expected.is_null() {
+        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version"))
+            && !expected.is_null() {
                 let col = meta
                     .column(vc)
                     .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
@@ -829,7 +861,6 @@ impl PostgresAdapter {
                 add_arg_for_col(&mut args_base, col, expected)?;
                 idx += 1;
             }
-        }
         where_parts.push(format!("{} IS NULL", quote_ident(deleted_at_col)?));
 
         if preview {
@@ -865,23 +896,19 @@ impl PostgresAdapter {
                 let mut after = before.clone();
                 if let Some(obj) = after.as_object_mut() {
                     obj.insert(deleted_at_col.to_string(), serde_json::json!(now));
-                    if let Some(dbc) = &meta.deleted_by_column {
-                        if let Some(v) = inputs.get("deleted_by") {
+                    if let Some(dbc) = &meta.deleted_by_column
+                        && let Some(v) = inputs.get("deleted_by") {
                             obj.insert(dbc.clone(), v.clone());
                         }
-                    }
-                    if let Some(drc) = &meta.delete_reason_column {
-                        if let Some(v) = inputs.get("reason") {
+                    if let Some(drc) = &meta.delete_reason_column
+                        && let Some(v) = inputs.get("reason") {
                             obj.insert(drc.clone(), v.clone());
                         }
-                    }
-                    if let Some(vc) = &meta.version_column {
-                        if let Some(vv) = obj.get(vc).cloned() {
-                            if let Some(n) = vv.as_i64() {
+                    if let Some(vc) = &meta.version_column
+                        && let Some(vv) = obj.get(vc).cloned()
+                            && let Some(n) = vv.as_i64() {
                                 obj.insert(vc.clone(), serde_json::json!(n + 1));
                             }
-                        }
-                    }
                 }
                 let pk_obj = meta
                     .primary_key
@@ -933,8 +960,8 @@ impl PostgresAdapter {
 
         // Bind SET values first (deleted_by/reason)
         let mut set_idx: usize = 1;
-        if let Some(dbc) = &meta.deleted_by_column {
-            if let Some(v) = inputs.get("deleted_by") {
+        if let Some(dbc) = &meta.deleted_by_column
+            && let Some(v) = inputs.get("deleted_by") {
                 let col = meta
                     .column(dbc)
                     .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", dbc))?;
@@ -945,9 +972,8 @@ impl PostgresAdapter {
                 add_arg_for_col(&mut args, col, v)?;
                 set_idx += 1;
             }
-        }
-        if let Some(drc) = &meta.delete_reason_column {
-            if let Some(v) = inputs.get("reason") {
+        if let Some(drc) = &meta.delete_reason_column
+            && let Some(v) = inputs.get("reason") {
                 let col = meta
                     .column(drc)
                     .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", drc))?;
@@ -958,51 +984,71 @@ impl PostgresAdapter {
                 add_arg_for_col(&mut args, col, v)?;
                 set_idx += 1;
             }
-        }
         if let Some(vc) = &meta.version_column {
             set_parts.push(format!("{} = {} + 1", quote_ident(vc)?, quote_ident(vc)?));
         }
 
         // WHERE binds after SET binds
         if let Some(tc) = &meta.tenant_column {
-            let v = inputs.get(tc).ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", tc))?;
-            let col = meta.column(tc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
+            let v = inputs
+                .get(tc)
+                .ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", tc))?;
+            let col = meta
+                .column(tc)
+                .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
             add_arg_for_col(&mut args, col, v)?;
         }
         for pk in &meta.primary_key {
-            let v = inputs.get(pk).ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", pk))?;
-            let col = meta.column(pk).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
+            let v = inputs
+                .get(pk)
+                .ok_or_else(|| anyhow::anyhow!("Missing required input '{}'", pk))?;
+            let col = meta
+                .column(pk)
+                .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
             add_arg_for_col(&mut args, col, v)?;
         }
-        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-            if !expected.is_null() {
-                let col = meta.column(vc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
+        if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version"))
+            && !expected.is_null() {
+                let col = meta
+                    .column(vc)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
                 add_arg_for_col(&mut args, col, expected)?;
             }
-        }
 
         let where_sql = {
             let mut out = Vec::new();
             let mut current = set_idx;
             if let Some(tc) = &meta.tenant_column {
-                let col = meta.column(tc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
-                let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+                let col = meta
+                    .column(tc)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", tc))?;
+                let cast = cast_for_pg_type(&col.data_type)
+                    .map(|c| format!("::{}", c))
+                    .unwrap_or_default();
                 out.push(format!("{} = ${}{}", quote_ident(tc)?, current, cast));
                 current += 1;
             }
             for pk in &meta.primary_key {
-                let col = meta.column(pk).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
-                let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+                let col = meta
+                    .column(pk)
+                    .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", pk))?;
+                let cast = cast_for_pg_type(&col.data_type)
+                    .map(|c| format!("::{}", c))
+                    .unwrap_or_default();
                 out.push(format!("{} = ${}{}", quote_ident(pk)?, current, cast));
                 current += 1;
             }
-            if let (Some(vc), Some(expected)) = (&meta.version_column, inputs.get("expected_version")) {
-                if !expected.is_null() {
-                    let col = meta.column(vc).ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
-                    let cast = cast_for_pg_type(&col.data_type).map(|c| format!("::{}", c)).unwrap_or_default();
+            if let (Some(vc), Some(expected)) =
+                (&meta.version_column, inputs.get("expected_version"))
+                && !expected.is_null() {
+                    let col = meta
+                        .column(vc)
+                        .ok_or_else(|| anyhow::anyhow!("Missing column metadata for '{}'", vc))?;
+                    let cast = cast_for_pg_type(&col.data_type)
+                        .map(|c| format!("::{}", c))
+                        .unwrap_or_default();
                     out.push(format!("{} = ${}{}", quote_ident(vc)?, current, cast));
                 }
-            }
             out.push(format!("{} IS NULL", quote_ident(deleted_at_col)?));
             out.join(" AND ")
         };
@@ -1018,7 +1064,9 @@ impl PostgresAdapter {
             .await?;
         tx.commit().await?;
 
-        let row_json: Option<serde_json::Value> = rec.map(|r| r.try_get::<serde_json::Value, _>("row")).transpose()?;
+        let row_json: Option<serde_json::Value> = rec
+            .map(|r| r.try_get::<serde_json::Value, _>("row"))
+            .transpose()?;
 
         Ok(ActionOutcome {
             affected_count: row_json.is_some() as u64,

@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 pub async fn introspect_schema_json(database_url: &str) -> anyhow::Result<serde_json::Value> {
     let pool = PgPool::connect(database_url).await?;
 
-    let (version,): (String,) = sqlx::query_as("select version()")
-        .fetch_one(&pool)
-        .await?;
+    let (version,): (String,) = sqlx::query_as("select version()").fetch_one(&pool).await?;
 
     let table_rows = sqlx::query(
         r#"
@@ -118,17 +116,14 @@ pub async fn introspect_schema_json(database_url: &str) -> anyhow::Result<serde_
             let foreign_table_name: String = fk.get("foreign_table_name");
             let foreign_column_name: String = fk.get("foreign_column_name");
 
-            fk_map
-                .entry(constraint_name)
-                .or_default()
-                .push(json!({
-                    "column": column_name,
-                    "references": {
-                        "schema": foreign_table_schema,
-                        "table": foreign_table_name,
-                        "column": foreign_column_name
-                    }
-                }));
+            fk_map.entry(constraint_name).or_default().push(json!({
+                "column": column_name,
+                "references": {
+                    "schema": foreign_table_schema,
+                    "table": foreign_table_name,
+                    "column": foreign_column_name
+                }
+            }));
         }
 
         let foreign_keys: Vec<serde_json::Value> = fk_map

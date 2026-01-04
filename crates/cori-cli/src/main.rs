@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use cori_adapter_pg::PostgresAdapter;
-use cori_core::{MutationIntent, Plan, Principal, Step, StepKind};
-use cori_policy::{AllowAllPolicyClient, PolicyClient};
+use cori_core::{
+    ActionDefinition, AuditEvent, AuditEventType, MutationIntent, Plan, Principal, Step, StepKind,
+};
+use cori_policy::PolicyClient;
 use cori_runtime::{audit::StdoutAuditSink, orchestrator::Orchestrator};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
+// Proxy commands module
+mod commands;
+
 #[derive(Parser, Debug)]
 #[command(name = "cori", version, about = "Cori CLI")]
 struct Cli {
@@ -26,9 +31,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Initialize a Cori project by introspecting an existing database schema.
+    /// Initialize a Cori AI Database Proxy project from an existing database.
+    ///
+    /// This command introspects your database schema and creates a complete
+    /// project structure with:
+    /// - Configuration file (cori.yaml) with tenant isolation settings
+    /// - Biscuit keypair for token authentication (keys/)
+    /// - Sample role definitions (roles/)
+    /// - Schema snapshot (schema/)
+    /// - Proper .gitignore for security
     Init {
-        /// Database URL (Postgres for MVP), e.g. postgres://user:pass@host:5432/db
+        /// Database URL (Postgres), e.g. postgres://user:pass@host:5432/db
         #[arg(long = "from-db")]
         from_db: String,
 
@@ -83,14 +96,10 @@ enum Command {
     },
 
     /// Execute an approved intent
-    Execute {
-        intent_id: String,
-    },
+    Execute { intent_id: String },
 
     /// Show status of an intent
-    Status {
-        intent_id: String,
-    },
+    Status { intent_id: String },
 
     /// Run a trivial built-in intent (stub) to verify wiring.
     Smoke {
@@ -100,8 +109,140 @@ enum Command {
         env: String,
         #[arg(long)]
         preview: bool,
-        #[arg(long, default_value = "postgres://postgres:postgres@localhost:5432/demo")]
+        #[arg(
+            long,
+            default_value = "postgres://postgres:postgres@localhost:5432/crm"
+        )]
         database_url: String,
+    },
+
+    // ===== Phase 1: Core Proxy Commands =====
+
+    /// Generate Biscuit keypair for token signing.
+    Keys {
+        #[command(subcommand)]
+        cmd: KeysCommand,
+    },
+
+    /// Biscuit token management (mint, attenuate, inspect, verify).
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCommand,
+    },
+
+    /// Start the Cori Postgres proxy server.
+    Serve {
+        /// Path to configuration file (YAML or TOML).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+    },
+
+    /// Proxy utilities (test, explain).
+    Proxy {
+        #[command(subcommand)]
+        cmd: ProxyCommand,
+    },
+
+    /// MCP server for AI agent integration.
+    Mcp(commands::mcp::McpCommand),
+}
+
+// ===== Phase 1: Core Proxy Command Definitions =====
+
+#[derive(Subcommand, Debug)]
+enum KeysCommand {
+    /// Generate a new Ed25519 keypair for Biscuit token signing.
+    Generate {
+        /// Output directory for key files. If not specified, prints to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    /// Mint a new role token (or agent token if --tenant is specified).
+    Mint {
+        /// Path to private key file. Falls back to BISCUIT_PRIVATE_KEY env var if not provided.
+        #[arg(long, env = "BISCUIT_PRIVATE_KEY")]
+        key: Option<String>,
+
+        /// Role name for the token.
+        #[arg(long)]
+        role: String,
+
+        /// Tenant ID (if specified, creates an attenuated agent token).
+        #[arg(long)]
+        tenant: Option<String>,
+
+        /// Expiration duration (e.g., "24h", "7d", "1h").
+        #[arg(long)]
+        expires: Option<String>,
+
+        /// Tables to grant access to (format: "table:col1,col2" or just "table").
+        #[arg(long = "table")]
+        tables: Vec<String>,
+
+        /// Output file path. If not specified, prints to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Attenuate a role token with tenant restriction and expiration.
+    Attenuate {
+        /// Path to private key file. Falls back to BISCUIT_PRIVATE_KEY env var if not provided.
+        #[arg(long, env = "BISCUIT_PRIVATE_KEY")]
+        key: Option<String>,
+
+        /// Path to base role token file.
+        #[arg(long)]
+        base: PathBuf,
+
+        /// Tenant ID to restrict the token to.
+        #[arg(long)]
+        tenant: String,
+
+        /// Expiration duration (e.g., "24h", "7d").
+        #[arg(long)]
+        expires: Option<String>,
+
+        /// Output file path. If not specified, prints to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Inspect a token without verification.
+    Inspect {
+        /// Token string or path to token file.
+        token: String,
+    },
+
+    /// Verify a token is valid.
+    Verify {
+        /// Path to public key file. Falls back to BISCUIT_PUBLIC_KEY env var if not provided.
+        #[arg(long, env = "BISCUIT_PUBLIC_KEY")]
+        key: Option<String>,
+
+        /// Token string or path to token file.
+        token: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProxyCommand {
+    /// Explain what RLS predicates would be injected for a query.
+    Explain {
+        /// The SQL query to explain.
+        #[arg(long)]
+        query: String,
+
+        /// Tenant ID to use for RLS injection.
+        #[arg(long)]
+        tenant: String,
+
+        /// Tenant column name (default: tenant_id).
+        #[arg(long, default_value = "tenant_id")]
+        tenant_column: String,
     },
 }
 
@@ -129,17 +270,6 @@ enum GenerateCommand {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
-
-    /// Generate policy stubs (starting point) for an engine (MVP: cerbos).
-    PolicyStubs {
-        /// Policy engine name. Only "cerbos" supported for now.
-        #[arg(long)]
-        engine: String,
-
-        /// Overwrite existing policy stub files
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,9 +278,7 @@ enum ActionsCommand {
     List,
 
     /// Describe one action by name
-    Describe {
-        action_name: String,
-    },
+    Describe { action_name: String },
 
     /// Validate actions against catalog + (optional) schema snapshot linkage
     Validate,
@@ -179,23 +307,24 @@ async fn main() -> anyhow::Result<()> {
             from_db,
             project,
             force,
-        } => run_init(&from_db, &project, force).await?,
+        } => commands::init::run(&from_db, &project, force).await?,
 
         Command::Schema { cmd } => run_schema(cmd).await?,
 
         Command::Generate { cmd } => run_generate(cmd).await?,
 
         Command::Actions { cmd } => run_actions(cmd).await?,
-        
+
         Command::Plan { cmd } => run_plan(cmd).await?,
 
         Command::Apply { file, preview } => run_apply(&file, preview).await?,
-        Command::Approve { intent_id, reason, as_principal } => {
-            run_approve(&intent_id, &reason, as_principal.as_deref()).await?
-        }
+        Command::Approve {
+            intent_id,
+            reason,
+            as_principal,
+        } => run_approve(&intent_id, &reason, as_principal.as_deref()).await?,
         Command::Execute { intent_id } => run_execute(&intent_id).await?,
         Command::Status { intent_id } => run_status(&intent_id).await?,
-
 
         Command::Smoke {
             tenant,
@@ -211,9 +340,11 @@ async fn main() -> anyhow::Result<()> {
                 "ListCustomers".to_string(),
                 cori_core::ActionDefinition {
                     name: "ListCustomers".to_string(),
+                    version: None,
+                    description: None,
                     kind: StepKind::Query,
                     resource_kind: "customers".to_string(),
-                    cerbos_action: "list".to_string(),
+                    policy_action: "list".to_string(),
                     input_schema: json!({
                         "type": "object",
                         "required": ["limit"],
@@ -223,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
                             "cursor": { "anyOf": [ { "type": "null" }, { "type": "string" } ], "default": null }
                         }
                     }),
+                    effects: None,
                     meta: json!({
                         "generated": false,
                         "pg": {
@@ -242,6 +374,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let intent = MutationIntent {
+                schema_version: "0.1.0".to_string(),
                 intent_id: "smoke-0001".to_string(),
                 tenant_id: tenant,
                 environment: env,
@@ -252,6 +385,9 @@ async fn main() -> anyhow::Result<()> {
                     attrs: json!({}),
                 },
                 plan: Plan {
+                    plan_id: None,
+                    name: None,
+                    summary: None,
                     steps: vec![Step {
                         id: "s1".to_string(),
                         kind: StepKind::Query,
@@ -260,12 +396,21 @@ async fn main() -> anyhow::Result<()> {
                             "limit": 1,
                             "cursor": null
                         }),
+                        depends_on: None,
+                        meta: serde_json::Value::Null,
                     }],
+                    meta: serde_json::Value::Null,
                 },
+                request: serde_json::Value::Null,
+                meta: serde_json::Value::Null,
             };
 
-            let adapter = PostgresAdapter::new(&database_url, cori_adapter_pg::PostgresAdapterOptions::default()).await?;
-            let policy: Arc<dyn PolicyClient> = Arc::new(AllowAllPolicyClient);
+            let adapter = PostgresAdapter::new(
+                &database_url,
+                cori_adapter_pg::PostgresAdapterOptions::default(),
+            )
+            .await?;
+            let policy: Arc<dyn PolicyClient> = Arc::new(cori_policy::BiscuitPolicyClient::new());
             let audit = StdoutAuditSink;
 
             let orchestrator = Orchestrator::new(policy, adapter, audit, actions);
@@ -273,106 +418,89 @@ async fn main() -> anyhow::Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+
+        // ===== Phase 1: Core Proxy Command Handlers =====
+
+        Command::Keys { cmd } => match cmd {
+            KeysCommand::Generate { output } => {
+                commands::keys::generate(output)?;
+            }
+        },
+
+        Command::Token { cmd } => match cmd {
+            TokenCommand::Mint {
+                key,
+                role,
+                tenant,
+                expires,
+                tables,
+                output,
+            } => {
+                commands::token::mint(key, role, tenant, expires, tables, output)?;
+            }
+            TokenCommand::Attenuate {
+                key,
+                base,
+                tenant,
+                expires,
+                output,
+            } => {
+                commands::token::attenuate(key, base, tenant, expires, output)?;
+            }
+            TokenCommand::Inspect { token } => {
+                commands::token::inspect(token)?;
+            }
+            TokenCommand::Verify { key, token } => {
+                commands::token::verify(key, token)?;
+            }
+        },
+
+        Command::Serve { config } => {
+            commands::serve::serve(config).await?;
+        }
+
+        Command::Proxy { cmd } => match cmd {
+            ProxyCommand::Explain {
+                query,
+                tenant,
+                tenant_column,
+            } => {
+                run_proxy_explain(&query, &tenant, &tenant_column)?;
+            }
+        },
+
+        Command::Mcp(cmd) => {
+            commands::mcp::execute(cmd).await?;
+        }
     }
 
     Ok(())
 }
 
-// -----------------------------
-// init
-// -----------------------------
+/// Explain RLS injection for a query.
+fn run_proxy_explain(query: &str, tenant: &str, tenant_column: &str) -> anyhow::Result<()> {
+    use cori_core::config::TenancyConfig;
+    use cori_rls::RlsInjector;
+    use std::collections::HashMap;
 
-async fn run_init(database_url: &str, project: &str, force: bool) -> anyhow::Result<()> {
-    let project_dir = PathBuf::from(project);
+    let tables = HashMap::new();
+    // Use default tenant column for all tables
+    let config = TenancyConfig {
+        default_column: tenant_column.to_string(),
+        tables,
+        ..Default::default()
+    };
 
-    if project_dir.exists() {
-        if !force {
-            return Err(anyhow::anyhow!(
-                "Project directory '{}' already exists. Use --force to overwrite.",
-                project
-            ));
-        }
-    } else {
-        fs::create_dir_all(&project_dir)?;
-    }
+    let injector = RlsInjector::new(config);
+    let explanation = injector.explain(query, tenant)?;
 
-    // Create standard project structure
-    let schema_dir = project_dir.join("schema");
-    let actions_dir = project_dir.join("actions");
-    let policies_dir = project_dir.join("policies");
-    let workflows_dir = project_dir.join("workflows");
+    println!("RLS Injection Explanation:");
+    println!("  Original: {}", explanation.original_sql);
+    println!("  Rewritten: {}", explanation.rewritten_sql);
+    println!("  Tenant: {}", explanation.tenant_id);
+    println!("  Tables scoped: {:?}", explanation.tables_scoped);
+    println!("  Predicates added: {:?}", explanation.predicates_added);
 
-    fs::create_dir_all(&schema_dir)?;
-    fs::create_dir_all(&actions_dir)?;
-    fs::create_dir_all(&policies_dir)?;
-    fs::create_dir_all(&workflows_dir)?;
-
-    // Introspect DB schema
-    let snapshot = cori_adapter_pg::introspect::introspect_schema_json(database_url).await?;
-
-    // Write schema snapshot
-    let snapshot_path = schema_dir.join("snapshot.json");
-    fs::write(&snapshot_path, serde_json::to_vec_pretty(&snapshot)?)?;
-
-    // Write cori.yaml (do NOT store secrets)
-    let config_path = project_dir.join("cori.yaml");
-    let cori_yaml = format!(
-        r#"# Cori project config (MVP)
-project: {project}
-adapter: postgres
-
-# Do not store credentials here. Provide DATABASE_URL via env or secret mount.
-database_url_env: DATABASE_URL
-
-# Policy engine (extensible). Supported: allow_all, cerbos
-policy_engine: allow_all
-
-# Cerbos PDP endpoint (gRPC). Set when policy_engine=cerbos.
-# Example: cerbos_grpc_hostport: "localhost:3593"
-cerbos_grpc_hostport: ""
-
-# Default environment for runs (prod/staging/dev)
-environment: dev
-
-# Execution safety guardrails
-# - max_affected_rows: upper bound for any single mutation step
-# - preview_row_limit: how many sample rows to include in mutation previews
-max_affected_rows: 1000
-preview_row_limit: 25
-"#,
-        project = project
-    );
-    fs::write(&config_path, cori_yaml)?;
-
-    // Small README
-    let readme_path = project_dir.join("README.md");
-    let readme = format!(
-        r#"# {project}
-
-This project was initialized from an existing database schema.
-
-## Files
-- `cori.yaml` : project configuration (no secrets)
-- `schema/snapshot.json` : schema snapshot captured during init
-
-## Next steps
-1) Export your DB URL: `export DATABASE_URL='<your url>'`
-2) Capture a new snapshot any time:
-   - `cori schema snapshot`
-3) See drift:
-   - `cori schema diff`
-4) Generate actions:
-   - `cori generate actions`
-5) Generate Cerbos policy stubs:
-   - `cori generate policy-stubs --engine cerbos`
-"#,
-        project = project
-    );
-    fs::write(&readme_path, readme)?;
-
-    println!("Initialized Cori project at: {}", project_dir.display());
-    println!("Wrote schema snapshot: {}", snapshot_path.display());
-    println!("Wrote config: {}", config_path.display());
     Ok(())
 }
 
@@ -432,108 +560,7 @@ async fn run_schema(cmd: SchemaCommand) -> anyhow::Result<()> {
 async fn run_generate(cmd: GenerateCommand) -> anyhow::Result<()> {
     match cmd {
         GenerateCommand::Actions { force } => run_generate_actions(force).await,
-        GenerateCommand::PolicyStubs { engine, force } => run_generate_policy_stubs(&engine, force).await,
     }
-}
-
-async fn run_generate_policy_stubs(engine: &str, force: bool) -> anyhow::Result<()> {
-    if engine != "cerbos" {
-        return Err(anyhow::anyhow!(
-            "Unsupported engine '{}'. Only --engine cerbos is supported.",
-            engine
-        ));
-    }
-
-    // Need actions catalog to know resource kinds and actions.
-    let catalog = load_actions_catalog()?;
-
-    // Group cerbos actions by resource_kind.
-    let mut by_resource: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for a in &catalog.actions {
-        by_resource
-            .entry(a.resource_kind.clone())
-            .or_default()
-            .insert(a.cerbos_action.clone());
-    }
-
-    // Output structure:
-    // policies/cerbos/
-    //   README.md
-    //   resources/
-    //     <resource_kind>.yaml
-    let base = PathBuf::from("policies").join("cerbos");
-    let resources_dir = base.join("resources");
-    fs::create_dir_all(&resources_dir)?;
-
-    // README
-    let readme_path = base.join("README.md");
-    if readme_path.exists() && !force {
-        // ok: don't overwrite readme unless force
-    } else {
-        let readme = r#"# Cerbos policy stubs (generated)
-
-These files are **starting points**. Review and harden them before using in production.
-
-## How to use
-- Run Cerbos PDP (locally or in-cluster)
-- Point Cori to it via `cori.yaml` (`policy_engine=cerbos` + `cerbos_grpc_hostport`)
-- Edit resource policies in `resources/`
-
-## Notes
-- These stubs are intentionally permissive for fast iteration.
-- Recommended pattern:
-  - default deny in production
-  - require approval obligations for sensitive actions
-  - enforce bulk limits via obligations/conditions
-"#;
-        fs::write(&readme_path, readme)?;
-    }
-
-    // One resourcePolicy per resource_kind
-    for (resource_kind, actions) in by_resource {
-        let file_name = sanitize_filename(&format!("{}.yaml", resource_kind));
-        let path = resources_dir.join(file_name);
-
-        if path.exists() && !force {
-            return Err(anyhow::anyhow!(
-                "{} already exists. Use --force to overwrite.",
-                path.display()
-            ));
-        }
-
-        let actions_list = actions
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        // Minimal, safe-by-default-ish stub: allow non-prod to admin; prod requires hardening.
-        // Users should refine this with conditions/obligations.
-        let yaml = format!(
-            r#"apiVersion: api.cerbos.dev/v1
-resourcePolicy:
-  version: "0.1"
-  resource: "{resource_kind}"
-  rules:
-    - actions: [{actions_list}]
-      effect: EFFECT_ALLOW
-      roles:
-        - admin
-      condition:
-        match:
-          # TODO: Harden this. Example: only allow in non-prod by default.
-          expr: request.principal.attr.context.environment != "prod"
-"#,
-            resource_kind = resource_kind,
-            actions_list = actions_list
-        );
-
-        fs::write(&path, yaml)?;
-    }
-
-    println!("Generated Cerbos policy stubs in: {}", base.display());
-    println!("Edit the files under policies/cerbos/resources/");
-    Ok(())
 }
 
 async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
@@ -630,9 +657,9 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 name: name.clone(),
                 version: Some("0.1".into()),
                 description: Some(format!("Generated action for {}", table_key)),
-                kind: "query".into(),
+                kind: StepKind::Query,
                 resource_kind: resource_kind_for(t, &entity_base),
-                cerbos_action: "get".into(),
+                policy_action: "get".into(),
                 input_schema: build_get_by_id_input_schema(t, has_tenant),
                 effects: Some(vec!["Read one row by primary key.".to_string()]),
                 meta: meta.clone(),
@@ -649,9 +676,9 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 name: name.clone(),
                 version: Some("0.1".into()),
                 description: Some(format!("Generated action for {}", table_key)),
-                kind: "query".into(),
+                kind: StepKind::Query,
                 resource_kind: resource_kind_for(t, &entity_base),
-                cerbos_action: "list".into(),
+                policy_action: "list".into(),
                 input_schema: build_list_input_schema(t, has_tenant),
                 effects: Some(vec!["List rows (paged).".to_string()]),
                 meta: meta.clone(),
@@ -668,12 +695,13 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
                 name: name.clone(),
                 version: Some("0.1".into()),
                 description: Some(format!("Generated action for {}", table_key)),
-                kind: "mutation".into(),
+                kind: StepKind::Mutation,
                 resource_kind: resource_kind_for(t, &entity_base),
-                cerbos_action: "update_fields".into(),
+                policy_action: "update_fields".into(),
                 input_schema: build_update_fields_input_schema(t, has_tenant, has_version),
                 effects: Some(vec![
-                    "Update selected fields (patch) with optimistic concurrency if supported.".to_string(),
+                    "Update selected fields (patch) with optimistic concurrency if supported."
+                        .to_string(),
                 ]),
                 meta: meta.clone(),
             };
@@ -687,18 +715,36 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
             let name = format!("SoftDelete{}", entity_base);
             let effects = vec![
                 "Set deleted_at to now().".to_string(),
-                if has_deleted_by { "Set deleted_by.".to_string() } else { "deleted_by not present.".to_string() },
-                if has_delete_reason { "Set delete_reason.".to_string() } else { "delete_reason not present.".to_string() },
-                if has_version { "Increment version.".to_string() } else { "version not present.".to_string() },
+                if has_deleted_by {
+                    "Set deleted_by.".to_string()
+                } else {
+                    "deleted_by not present.".to_string()
+                },
+                if has_delete_reason {
+                    "Set delete_reason.".to_string()
+                } else {
+                    "delete_reason not present.".to_string()
+                },
+                if has_version {
+                    "Increment version.".to_string()
+                } else {
+                    "version not present.".to_string()
+                },
             ];
             let def = ActionDefinition {
                 name: name.clone(),
                 version: Some("0.1".into()),
                 description: Some(format!("Generated action for {}", table_key)),
-                kind: "mutation".into(),
+                kind: StepKind::Mutation,
                 resource_kind: resource_kind_for(t, &entity_base),
-                cerbos_action: "soft_delete".into(),
-                input_schema: build_soft_delete_input_schema(t, has_tenant, has_version, has_deleted_by, has_delete_reason),
+                policy_action: "soft_delete".into(),
+                input_schema: build_soft_delete_input_schema(
+                    t,
+                    has_tenant,
+                    has_version,
+                    has_deleted_by,
+                    has_delete_reason,
+                ),
                 effects: Some(effects),
                 meta: meta.clone(),
             };
@@ -709,7 +755,9 @@ async fn run_generate_actions(force: bool) -> anyhow::Result<()> {
     }
 
     // Write catalog
-    let catalog = ActionsCatalog { actions: all_actions };
+    let catalog = ActionsCatalog {
+        actions: all_actions,
+    };
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)?;
     println!("Wrote actions catalog: {}", catalog_path.display());
     println!("Generated {} actions:", written_files.len());
@@ -735,8 +783,15 @@ async fn run_actions(cmd: ActionsCommand) -> anyhow::Result<()> {
             println!("Actions ({}):", catalog.actions.len());
             for a in &catalog.actions {
                 println!(
-                    "  - {:<32} kind={:<8} resource={:<16} cerbos_action={}",
-                    a.name, a.kind, a.resource_kind, a.cerbos_action
+                    "  - {:<32} kind={:<8} resource={:<16} policy_action={}",
+                    a.name,
+                    match a.kind {
+                        StepKind::Query => "query",
+                        StepKind::Mutation => "mutation",
+                        StepKind::Control => "control",
+                    },
+                    a.resource_kind,
+                    a.policy_action
                 );
             }
             Ok(())
@@ -759,12 +814,8 @@ async fn run_actions(cmd: ActionsCommand) -> anyhow::Result<()> {
                     return Err(anyhow::anyhow!("Action with empty name found in catalog."));
                 }
                 if !names.insert(a.name.clone()) {
-                    return Err(anyhow::anyhow!("Duplicate action name in catalog: {}", a.name));
-                }
-                if a.kind != "query" && a.kind != "mutation" && a.kind != "control" {
                     return Err(anyhow::anyhow!(
-                        "Invalid kind '{}' for action {}",
-                        a.kind,
+                        "Duplicate action name in catalog: {}",
                         a.name
                     ));
                 }
@@ -814,22 +865,19 @@ async fn run_actions(cmd: ActionsCommand) -> anyhow::Result<()> {
                 }
 
                 // Optional: validate linkage to snapshot via meta.source_table
-                if let Some(tables) = &snapshot_tables {
-                    if let Some(source_table) = file_def
+                if let Some(tables) = &snapshot_tables
+                    && let Some(source_table) = file_def
                         .meta
                         .get("source_table")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
-                    {
-                        if !tables.contains(&source_table) {
+                        && !tables.contains(&source_table) {
                             return Err(anyhow::anyhow!(
                                 "Action {} references meta.source_table='{}' but it is not in schema snapshot.",
                                 a.name,
                                 source_table
                             ));
                         }
-                    }
-                }
 
                 ok += 1;
             }
@@ -838,14 +886,14 @@ async fn run_actions(cmd: ActionsCommand) -> anyhow::Result<()> {
             println!("  - catalog actions: {}", catalog.actions.len());
             println!("  - validated files: {}", ok);
             if snapshot_tables.is_none() {
-                println!("  (note) schema/snapshot.json not found; skipped source_table linkage checks.");
+                println!(
+                    "  (note) schema/snapshot.json not found; skipped source_table linkage checks."
+                );
             }
             Ok(())
         }
     }
 }
-
-
 
 // -----------------------------
 // plan commands
@@ -871,7 +919,12 @@ fn validate_plan_against_catalog(
 
     let steps = match plan.get("steps").and_then(|v| v.as_array()) {
         Some(s) if !s.is_empty() => s,
-        _ => return Ok((plan, vec!["Invalid plan: missing or empty 'steps' array.".into()])),
+        _ => {
+            return Ok((
+                plan,
+                vec!["Invalid plan: missing or empty 'steps' array.".into()],
+            ));
+        }
     };
 
     // Unique step IDs
@@ -887,14 +940,23 @@ fn validate_plan_against_catalog(
 
     // Validate steps
     for (i, step) in steps.iter().enumerate() {
-        let sid = step.get("id").and_then(|v| v.as_str()).unwrap_or("<missing>");
+        let sid = step
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<missing>");
 
         // Reject MVP-unsupported constructs
         if step.get("foreach").is_some() {
-            errors.push(format!("steps[{}] (id={}) contains 'foreach' (not supported yet)", i, sid));
+            errors.push(format!(
+                "steps[{}] (id={}) contains 'foreach' (not supported yet)",
+                i, sid
+            ));
         }
         if step.get("paginate").is_some() {
-            errors.push(format!("steps[{}] (id={}) contains 'paginate' (not supported yet)", i, sid));
+            errors.push(format!(
+                "steps[{}] (id={}) contains 'paginate' (not supported yet)",
+                i, sid
+            ));
         }
 
         // kind
@@ -918,11 +980,17 @@ fn validate_plan_against_catalog(
                             ));
                         }
                     } else {
-                        errors.push(format!("steps[{}] (id={}) depends_on must contain strings", i, sid));
+                        errors.push(format!(
+                            "steps[{}] (id={}) depends_on must contain strings",
+                            i, sid
+                        ));
                     }
                 }
             } else {
-                errors.push(format!("steps[{}] (id={}) depends_on must be an array", i, sid));
+                errors.push(format!(
+                    "steps[{}] (id={}) depends_on must be an array",
+                    i, sid
+                ));
             }
         }
 
@@ -944,7 +1012,10 @@ fn validate_plan_against_catalog(
             }
         };
         if !inputs.is_object() {
-            errors.push(format!("steps[{}] (id={}) inputs must be an object", i, sid));
+            errors.push(format!(
+                "steps[{}] (id={}) inputs must be an object",
+                i, sid
+            ));
             continue;
         }
 
@@ -962,10 +1033,24 @@ fn validate_plan_against_catalog(
 
         // kind match
         if let Some(k) = kind {
-            if k != def.kind {
+            let expected = match k {
+                "query" => StepKind::Query,
+                "mutation" => StepKind::Mutation,
+                "control" => StepKind::Control,
+                _ => StepKind::Control, // already recorded as invalid kind above
+            };
+            if expected != def.kind {
                 errors.push(format!(
                     "steps[{}] (id={}) kind '{}' does not match action '{}' kind '{}'",
-                    i, sid, k, action_name, def.kind
+                    i,
+                    sid,
+                    k,
+                    action_name,
+                    match def.kind {
+                        StepKind::Query => "query",
+                        StepKind::Mutation => "mutation",
+                        StepKind::Control => "control",
+                    }
                 ));
             }
         }
@@ -987,8 +1072,11 @@ async fn run_plan_validate(file: &Path) -> anyhow::Result<()> {
     let _cfg = load_cori_config_from_cwd()?;
 
     let catalog = load_actions_catalog()?;
-    let action_map: BTreeMap<String, ActionDefinition> =
-        catalog.actions.into_iter().map(|a| (a.name.clone(), a)).collect();
+    let action_map: BTreeMap<String, ActionDefinition> = catalog
+        .actions
+        .into_iter()
+        .map(|a| (a.name.clone(), a))
+        .collect();
 
     let (_plan, errors) = validate_plan_against_catalog(file, &action_map)?;
 
@@ -1012,8 +1100,11 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
 
     // Load catalog (for validation + mapping to core steps)
     let catalog = load_actions_catalog()?;
-    let action_map: BTreeMap<String, ActionDefinition> =
-        catalog.actions.into_iter().map(|a| (a.name.clone(), a)).collect();
+    let action_map: BTreeMap<String, ActionDefinition> = catalog
+        .actions
+        .into_iter()
+        .map(|a| (a.name.clone(), a))
+        .collect();
 
     // Validate plan first
     let (plan_json, errors) = validate_plan_against_catalog(file, &action_map)?;
@@ -1041,6 +1132,7 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
     // Build intent
     let intent_id = format!("preview-{}", unix_millis());
     let intent = MutationIntent {
+        schema_version: "0.1.0".to_string(),
         intent_id: intent_id.clone(),
         tenant_id: tenant_id.clone(),
         environment: environment.clone(),
@@ -1051,10 +1143,12 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
             attrs: json!({}),
         },
         plan: core_plan,
+        request: serde_json::Value::Null,
+        meta: serde_json::Value::Null,
     };
 
     let policy = build_policy_client(&cfg).await?;
-    let core_actions = build_core_action_map(&action_map)?;
+    let core_actions = action_map.clone();
 
     // Memory audit sink to include in report
     let audit = MemoryAuditSink::new();
@@ -1067,7 +1161,7 @@ async fn run_plan_preview(file: &Path) -> anyhow::Result<()> {
     let audit_events_json: Vec<serde_json::Value> = audit_handle
         .drain()
         .into_iter()
-        .map(audit_event_to_json)
+        .map(|e| serde_json::to_value(e).expect("audit event must be serializable"))
         .collect();
 
     let report = json!({
@@ -1121,6 +1215,7 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
     // Create intent (on disk)
     let intent_id = format!("intent-{}", Uuid::new_v4());
     let intent = MutationIntent {
+        schema_version: "0.1.0".to_string(),
         intent_id: intent_id.clone(),
         tenant_id: tenant_id.clone(),
         environment: environment.clone(),
@@ -1131,6 +1226,8 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
             attrs: json!({}),
         },
         plan: core_plan,
+        request: serde_json::Value::Null,
+        meta: serde_json::Value::Null,
     };
 
     // Prepare intent directory
@@ -1162,6 +1259,36 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
         }))?,
     )?;
 
+    // Seed audit.json with portable evidence events (schema-aligned).
+    // Note: orchestrator will emit additional events when preview/execute runs.
+    {
+        let mut events: Vec<AuditEvent> = Vec::new();
+        events.push(new_cli_audit_event(
+            &intent,
+            0,
+            AuditEventType::IntentReceived,
+            "__intent__",
+            "__intent__",
+            true,
+            json!({"source":"cli.apply","file":file.display().to_string()}),
+            json!({}),
+        ));
+        events.push(new_cli_audit_event(
+            &intent,
+            1,
+            AuditEventType::PlanValidated,
+            "__intent__",
+            "__intent__",
+            true,
+            json!({"source":"cli.apply","file":file.display().to_string()}),
+            json!({}),
+        ));
+        fs::write(
+            intent_dir.join("audit.json"),
+            serde_json::to_vec_pretty(&events)?,
+        )?;
+    }
+
     // Create initial status
     let mut status = IntentStatus {
         intent_id: intent_id.clone(),
@@ -1181,12 +1308,10 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
 
     // If not preview: do NOT execute now (GitOps flow). Save status + exit.
     if !preview {
-        status.message = Some(
-            format!(
-                "Pending approval. Run: cori approve {} --reason \"...\"",
-                intent_id
-            ),
-        );
+        status.message = Some(format!(
+            "Pending approval. Run: cori approve {} --reason \"...\"",
+            intent_id
+        ));
         write_status(&status)?;
         println!("✔ Created intent (pending approval): {}", intent_id);
         println!("Path: {}", intent_dir.display());
@@ -1204,7 +1329,7 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
     let adapter = PostgresAdapter::new(&db_url, pg_adapter_options_from_cfg(&cfg)).await?;
 
     let policy = build_policy_client(&cfg).await?;
-    let core_actions = build_core_action_map(&action_map)?;
+    let core_actions = action_map.clone();
 
     // Capture audit events for report
     let audit = MemoryAuditSink::new();
@@ -1216,10 +1341,20 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
 
     match run_res {
         Ok(result) => {
-            let audit_events_json: Vec<serde_json::Value> = audit_handle
-                .drain()
-                .into_iter()
-                .map(audit_event_to_json)
+            // Merge existing (CLI-seeded) audit events with runtime-emitted ones,
+            // and ensure `sequence` is monotonic across the merged list.
+            let mut existing_events = read_audit_events(&intent_id).unwrap_or_default();
+            let offset = existing_events.len() as u64;
+            let mut runtime_events = audit_handle.drain();
+            for (i, e) in runtime_events.iter_mut().enumerate() {
+                e.sequence = Some(offset + i as u64);
+            }
+            existing_events.extend(runtime_events);
+
+            let audit_events_json: Vec<serde_json::Value> = existing_events
+                .iter()
+                .cloned()
+                .map(|e| serde_json::to_value(e).expect("audit event must be serializable"))
                 .collect();
 
             let report = json!({
@@ -1241,7 +1376,7 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
             )?;
             fs::write(
                 intent_dir.join("audit.json"),
-                serde_json::to_vec_pretty(&report["audit_events"])?,
+                serde_json::to_vec_pretty(&existing_events)?,
             )?;
 
             status.state = IntentState::Previewed;
@@ -1264,7 +1399,6 @@ async fn run_apply(file: &Path, preview: bool) -> anyhow::Result<()> {
         }
     }
 }
-
 
 async fn run_status(intent_id: &str) -> anyhow::Result<()> {
     validate_intent_id(intent_id)?;
@@ -1333,7 +1467,11 @@ async fn run_status(intent_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_approve(intent_id: &str, reason: &str, as_principal: Option<&str>) -> anyhow::Result<()> {
+async fn run_approve(
+    intent_id: &str,
+    reason: &str,
+    as_principal: Option<&str>,
+) -> anyhow::Result<()> {
     validate_intent_id(intent_id)?;
     if reason.trim().is_empty() {
         return Err(anyhow::anyhow!("--reason must be non-empty"));
@@ -1393,8 +1531,32 @@ async fn run_approve(intent_id: &str, reason: &str, as_principal: Option<&str>) 
     status.preview = false;
     status.updated_at_ms = now_ms();
     status.approved_at_ms = Some(approval.approved_at_ms);
-    status.message = Some(format!("Approved by {}: {}", approval.approver, approval.reason));
+    status.message = Some(format!(
+        "Approved by {}: {}",
+        approval.approver, approval.reason
+    ));
     write_status(&status)?;
+
+    // Append portable audit evidence for approval.
+    {
+        let next_seq = read_audit_events(intent_id).unwrap_or_default().len() as u64;
+        let ev = new_cli_audit_event_for(
+            &intent,
+            &approval.approver,
+            next_seq,
+            AuditEventType::Approved,
+            "__intent__",
+            "__intent__",
+            true,
+            json!({"source":"cli.approve"}),
+            json!({
+                "approver": approval.approver,
+                "reason": approval.reason,
+                "approved_at_ms": approval.approved_at_ms
+            }),
+        );
+        append_audit_event(intent_id, ev)?;
+    }
 
     println!("✔ Approved intent: {}", intent_id);
     Ok(())
@@ -1440,7 +1602,10 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
 
     // Require approval
     let approval = read_approval(intent_id)?.ok_or_else(|| {
-        anyhow::anyhow!("Intent is not approved yet. Run: cori approve {} --reason \"...\"", intent_id)
+        anyhow::anyhow!(
+            "Intent is not approved yet. Run: cori approve {} --reason \"...\"",
+            intent_id
+        )
     })?;
 
     // Mark running
@@ -1451,9 +1616,12 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
 
     // Execute via orchestrator
     let catalog = load_actions_catalog()?;
-    let action_map: BTreeMap<String, ActionDefinition> =
-        catalog.actions.into_iter().map(|a| (a.name.clone(), a)).collect();
-    let core_actions = build_core_action_map(&action_map)?;
+    let action_map: BTreeMap<String, ActionDefinition> = catalog
+        .actions
+        .into_iter()
+        .map(|a| (a.name.clone(), a))
+        .collect();
+    let core_actions = action_map.clone();
 
     let db_url = resolve_database_url(&cfg)?;
     let adapter = PostgresAdapter::new(&db_url, pg_adapter_options_from_cfg(&cfg)).await?;
@@ -1468,10 +1636,20 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
 
     match run_res {
         Ok(result) => {
-            let audit_events_json: Vec<serde_json::Value> = audit_handle
-                .drain()
-                .into_iter()
-                .map(audit_event_to_json)
+            // Merge existing audit events (seeded/appended by CLI) with runtime-emitted ones,
+            // and ensure `sequence` is monotonic across the merged list.
+            let mut existing_events = read_audit_events(intent_id).unwrap_or_default();
+            let offset = existing_events.len() as u64;
+            let mut runtime_events = audit_handle.drain();
+            for (i, e) in runtime_events.iter_mut().enumerate() {
+                e.sequence = Some(offset + i as u64);
+            }
+            existing_events.extend(runtime_events);
+
+            let audit_events_json: Vec<serde_json::Value> = existing_events
+                .iter()
+                .cloned()
+                .map(|e| serde_json::to_value(e).expect("audit event must be serializable"))
                 .collect();
 
             let report = json!({
@@ -1492,7 +1670,10 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
             });
 
             fs::write(result_path(intent_id), serde_json::to_vec_pretty(&report)?)?;
-            fs::write(audit_path(intent_id), serde_json::to_vec_pretty(&report["audit_events"])?)?;
+            fs::write(
+                audit_path(intent_id),
+                serde_json::to_vec_pretty(&existing_events)?,
+            )?;
 
             status.state = IntentState::Executed;
             status.updated_at_ms = now_ms();
@@ -1516,7 +1697,6 @@ async fn run_execute(intent_id: &str) -> anyhow::Result<()> {
     }
 }
 
-
 // -----------------------------
 // helpers for preview
 // -----------------------------
@@ -1532,13 +1712,76 @@ fn infer_tenant_id(plan: &serde_json::Value) -> Option<String> {
     let steps = plan.get("steps")?.as_array()?;
     for s in steps {
         let inputs = s.get("inputs")?;
-        if let Some(t) = inputs.get("tenant_id").and_then(|v| v.as_str()) {
-            if !t.trim().is_empty() {
+        if let Some(t) = inputs.get("tenant_id").and_then(|v| v.as_str())
+            && !t.trim().is_empty() {
                 return Some(t.to_string());
             }
-        }
     }
     None
+}
+
+fn value_to_map(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match v {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn new_cli_audit_event(
+    intent: &MutationIntent,
+    sequence: u64,
+    event_type: AuditEventType,
+    step_id: &str,
+    action: &str,
+    allowed: bool,
+    decision: serde_json::Value,
+    outcome: serde_json::Value,
+) -> AuditEvent {
+    new_cli_audit_event_for(
+        intent,
+        &intent.principal.id,
+        sequence,
+        event_type,
+        step_id,
+        action,
+        allowed,
+        decision,
+        outcome,
+    )
+}
+
+fn new_cli_audit_event_for(
+    intent: &MutationIntent,
+    principal_id: &str,
+    sequence: u64,
+    event_type: AuditEventType,
+    step_id: &str,
+    action: &str,
+    allowed: bool,
+    decision: serde_json::Value,
+    outcome: serde_json::Value,
+) -> AuditEvent {
+    AuditEvent {
+        event_id: Uuid::new_v4(),
+        occurred_at: chrono::Utc::now(),
+        sequence: Some(sequence),
+        tenant_id: intent.tenant_id.clone(),
+        intent_id: intent.intent_id.clone(),
+        principal_id: principal_id.to_string(),
+        step_id: step_id.to_string(),
+        event_type,
+        action: action.to_string(),
+        resource_kind: None,
+        resource_id: None,
+        allowed,
+        preview: Some(intent.preview),
+        decision: value_to_map(decision),
+        outcome: value_to_map(outcome),
+        integrity: None,
+        meta: Some(json!({
+            "environment": intent.environment.clone()
+        })),
+    }
 }
 
 fn plan_json_to_core_plan(plan: &serde_json::Value) -> anyhow::Result<Plan> {
@@ -1578,10 +1821,44 @@ fn plan_json_to_core_plan(plan: &serde_json::Value) -> anyhow::Result<Plan> {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("steps[{}].inputs missing", i))?;
 
-        steps.push(Step { id, kind, action, inputs });
+        let depends_on = s
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
+
+        let meta = s.get("meta").cloned().unwrap_or(serde_json::Value::Null);
+
+        steps.push(Step {
+            id,
+            kind,
+            action,
+            inputs,
+            depends_on,
+            meta,
+        });
     }
 
-    Ok(Plan { steps })
+    Ok(Plan {
+        plan_id: plan
+            .get("plan_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        name: plan
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        summary: plan
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        steps,
+        meta: plan.get("meta").cloned().unwrap_or(serde_json::Value::Null),
+    })
 }
 
 // -----------------------------
@@ -1612,18 +1889,6 @@ impl AuditSink for MemoryAuditSink {
         g.push(event);
     }
 }
-
-fn audit_event_to_json(e: RtAuditEvent) -> serde_json::Value {
-    json!({
-        "intent_id": e.intent_id,
-        "step_id": e.step_id,
-        "action": e.action,
-        "allowed": e.allowed,
-        "decision": e.decision,
-        "outcome": e.outcome
-    })
-}
-
 
 fn read_plan_file_as_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     let bytes = fs::read(path)?;
@@ -1678,7 +1943,6 @@ fn validate_instance_against_schema(
     Err(anyhow::anyhow!(msgs.join("; ")))
 }
 
-
 // -----------------------------
 // config + shared IO helpers
 // -----------------------------
@@ -1690,10 +1954,6 @@ struct CoriConfig {
     project: Option<String>,
     adapter: Option<String>,
     database_url_env: Option<String>,
-    #[allow(dead_code)]
-    policy_engine: Option<String>,
-    #[allow(dead_code)]
-    cerbos_grpc_hostport: Option<String>,
     environment: Option<String>,
     #[allow(dead_code)]
     max_affected_rows: Option<u64>,
@@ -1744,32 +2004,11 @@ fn read_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-async fn build_policy_client(cfg: &CoriConfig) -> anyhow::Result<Arc<dyn PolicyClient>> {
-    let engine = cfg.policy_engine.as_deref().unwrap_or("allow_all");
-
-    match engine {
-        "allow_all" => Ok(Arc::new(AllowAllPolicyClient)),
-        "cerbos" => {
-            let hp = cfg
-                .cerbos_grpc_hostport
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if hp.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "policy_engine=cerbos requires `cerbos_grpc_hostport`, e.g. \"localhost:3593\""
-                ));
-            }
-            let (host, port) = split_hostport(&hp)?;
-            let client = cori_policy::CerbosGrpcPolicyClient::connect_hostport(&host, port).await?;
-            Ok(Arc::new(client))
-        }
-        other => Err(anyhow::anyhow!(
-            "Unknown policy_engine '{}'. Supported: allow_all, cerbos",
-            other
-        )),
-    }
+async fn build_policy_client(_cfg: &CoriConfig) -> anyhow::Result<Arc<dyn PolicyClient>> {
+    // Biscuit-native policy model: policy enforcement happens at the proxy/RLS layer
+    // based on Biscuit token claims and role YAML configuration.
+    // This policy client exists for audit logging and backwards compatibility.
+    Ok(Arc::new(cori_policy::BiscuitPolicyClient::new()))
 }
 
 fn pg_adapter_options_from_cfg(cfg: &CoriConfig) -> cori_adapter_pg::PostgresAdapterOptions {
@@ -1779,44 +2018,6 @@ fn pg_adapter_options_from_cfg(cfg: &CoriConfig) -> cori_adapter_pg::PostgresAda
     }
 }
 
-fn split_hostport(s: &str) -> anyhow::Result<(String, u16)> {
-    let s = s.trim();
-    let (host, port) = s
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("Invalid hostport '{}', expected host:port", s))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Invalid port in '{}'", s))?;
-    Ok((host.to_string(), port))
-}
-
-fn build_core_action_map(
-    action_map: &BTreeMap<String, ActionDefinition>,
-) -> anyhow::Result<BTreeMap<String, cori_core::ActionDefinition>> {
-    let mut out = BTreeMap::new();
-    for (name, def) in action_map {
-        let kind = match def.kind.as_str() {
-            "query" => StepKind::Query,
-            "mutation" => StepKind::Mutation,
-            "control" => StepKind::Control,
-            other => return Err(anyhow::anyhow!("Invalid action kind '{}' for {}", other, name)),
-        };
-
-        out.insert(
-            name.clone(),
-            cori_core::ActionDefinition {
-                name: def.name.clone(),
-                kind,
-                resource_kind: def.resource_kind.clone(),
-                cerbos_action: def.cerbos_action.clone(),
-                input_schema: def.input_schema.clone(),
-                meta: def.meta.clone(),
-            },
-        );
-    }
-    Ok(out)
-}
-
 // -----------------------------
 // actions catalog + action defs
 // -----------------------------
@@ -1824,25 +2025,6 @@ fn build_core_action_map(
 #[derive(Debug, Serialize, Deserialize)]
 struct ActionsCatalog {
     actions: Vec<ActionDefinition>,
-}
-
-/// This is the persisted format for action definition JSON files and the catalog.
-/// Keep it stable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ActionDefinition {
-    name: String,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    kind: String, // query|mutation|control
-    resource_kind: String,
-    cerbos_action: String,
-    input_schema: serde_json::Value,
-    #[serde(default)]
-    effects: Option<Vec<String>>,
-    #[serde(default)]
-    meta: serde_json::Value,
 }
 
 fn load_actions_catalog() -> anyhow::Result<ActionsCatalog> {
@@ -1875,17 +2057,15 @@ fn load_action_by_name(name: &str) -> anyhow::Result<ActionDefinition> {
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let p = entry.path();
-        if p.is_file() {
-            if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
-                if fname.ends_with(".action.json") {
+        if p.is_file()
+            && let Some(fname) = p.file_name().and_then(|s| s.to_str())
+                && fname.ends_with(".action.json") {
                     let v = read_json(&p)?;
                     let def: ActionDefinition = serde_json::from_value(v)?;
                     if def.name == name {
                         return Ok(def);
                     }
                 }
-            }
-        }
     }
 
     Err(anyhow::anyhow!(
@@ -1904,16 +2084,6 @@ fn write_action_file(def: &ActionDefinition, action_name: &str, force: bool) -> 
     }
     fs::write(path, serde_json::to_vec_pretty(def)?)?;
     Ok(())
-}
-
-fn sanitize_filename(s: &str) -> String {
-    // Very conservative: map disallowed chars to '_'
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' => c,
-            _ => '_',
-        })
-        .collect()
 }
 
 // -----------------------------
@@ -2017,15 +2187,9 @@ fn diff_snapshots(old_v: &serde_json::Value, new_v: &serde_json::Value) -> Schem
     let old_keys: BTreeSet<String> = old_map.keys().cloned().collect();
     let new_keys: BTreeSet<String> = new_map.keys().cloned().collect();
 
-    let added_tables = new_keys
-        .difference(&old_keys)
-        .cloned()
-        .collect::<Vec<_>>();
+    let added_tables = new_keys.difference(&old_keys).cloned().collect::<Vec<_>>();
 
-    let removed_tables = old_keys
-        .difference(&new_keys)
-        .cloned()
-        .collect::<Vec<_>>();
+    let removed_tables = old_keys.difference(&new_keys).cloned().collect::<Vec<_>>();
 
     let mut changed_tables = Vec::new();
 
@@ -2282,7 +2446,7 @@ fn resource_kind_for(t: &TableEntry, entity_base: &str) -> String {
 }
 
 fn pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-' || c == ' ')
+    s.split(['_', '-', ' '])
         .filter(|p| !p.is_empty())
         .map(|p| {
             let mut chars = p.chars();
@@ -2484,7 +2648,10 @@ fn build_soft_delete_input_schema(
 
     if has_deleted_by {
         req.push("deleted_by".to_string());
-        props.insert("deleted_by".to_string(), json!({ "type": "string", "minLength": 1 }));
+        props.insert(
+            "deleted_by".to_string(),
+            json!({ "type": "string", "minLength": 1 }),
+        );
     } else {
         props.insert(
             "deleted_by".to_string(),
@@ -2627,4 +2794,26 @@ fn read_approval(intent_id: &str) -> anyhow::Result<Option<IntentApproval>> {
     }
     let v = read_json(&p)?;
     Ok(Some(serde_json::from_value(v)?))
+}
+
+fn read_audit_events(intent_id: &str) -> anyhow::Result<Vec<AuditEvent>> {
+    let p = audit_path(intent_id);
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(&p)?;
+    // audit.json is a JSON array of AuditEvent objects.
+    Ok(serde_json::from_slice::<Vec<AuditEvent>>(&bytes)?)
+}
+
+fn write_audit_events(intent_id: &str, events: &[AuditEvent]) -> anyhow::Result<()> {
+    fs::write(audit_path(intent_id), serde_json::to_vec_pretty(events)?)?;
+    Ok(())
+}
+
+fn append_audit_event(intent_id: &str, event: AuditEvent) -> anyhow::Result<()> {
+    let mut events = read_audit_events(intent_id)?;
+    events.push(event);
+    write_audit_events(intent_id, &events)?;
+    Ok(())
 }

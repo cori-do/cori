@@ -1,0 +1,132 @@
+# =============================================================================
+# Cori AI Database Proxy Configuration
+# =============================================================================
+# Complete configuration for the Cori demo. This demonstrates:
+#   - Multi-tenant isolation via organization_id
+#   - Role-based access control with fine-grained permissions
+#   - Virtual schema filtering to hide sensitive tables
+#   - Biscuit token-based authentication
+#   - MCP server integration for AI agents
+# =============================================================================
+
+project: cori-demo
+version: "1.0"
+
+# =============================================================================
+# UPSTREAM DATABASE
+# =============================================================================
+
+upstream:
+  # Fallback for local development
+  host: localhost
+  port: 5432
+  database: cori_demo
+  username: postgres
+  password: postgres
+
+# =============================================================================
+# PROXY SETTINGS
+# =============================================================================
+
+proxy:
+  listen_port: 5433
+  max_connections: 100
+  connection_timeout: 30
+  tls:
+    enabled: false
+
+# =============================================================================
+# BISCUIT TOKEN CONFIGURATION
+# =============================================================================
+
+biscuit:
+  public_key_env: BISCUIT_PUBLIC_KEY
+  public_key_file: keys/public.key
+  private_key_env: BISCUIT_PRIVATE_KEY
+  private_key_file: keys/private.key
+  require_expiration: true
+  max_token_lifetime: "30d"
+
+# =============================================================================
+# TENANT ISOLATION
+# =============================================================================
+
+tenancy:
+  default_column: organization_id
+  global_tables:
+    - products
+
+# =============================================================================
+# VIRTUAL SCHEMA
+# =============================================================================
+
+virtual_schema:
+  enabled: true
+  always_hidden:
+    - api_keys
+    - billing
+    - users
+    - audit_logs
+  always_visible: []
+  expose_row_counts: false
+  expose_indexes: false
+
+# =============================================================================
+# ROLES
+# =============================================================================
+
+roles_dir: roles
+
+# =============================================================================
+# MCP SERVER
+# =============================================================================
+
+mcp:
+  enabled: true
+  transport: http
+  http_port: 8989
+  auto_generate_tools: true
+  dry_run_enabled: true
+  require_approval:
+    - "*:delete"
+    - "*:update:*"
+  approval_exceptions:
+    - "tickets:update:status"
+    - "tasks:update:status"
+    - "communications:create"
+
+# =============================================================================
+# ADMIN DASHBOARD
+# =============================================================================
+
+dashboard:
+  enabled: true
+  listen_port: 8080
+  auth:
+    type: basic
+    users:
+      - username: admin
+        password_env: DASHBOARD_ADMIN_PASSWORD
+
+# =============================================================================
+# GUARDRAILS
+# =============================================================================
+
+guardrails:
+  max_rows_per_query: 10000
+  max_affected_rows: 1000
+  blocked_operations:
+    - TRUNCATE
+    - DROP
+    - ALTER
+    - CREATE
+
+# =============================================================================
+# AUDIT
+# =============================================================================
+
+audit:
+  enabled: true
+  log_queries: true
+  log_results: false
+  retention_days: 90

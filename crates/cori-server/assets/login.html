@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cori Pocket IDP</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 2rem; max-width: 520px; margin: 0 auto; }
+      .card { border: 1px solid #ddd; border-radius: 12px; padding: 1.25rem; }
+      label { display: block; margin-top: 0.75rem; font-weight: 600; }
+      input { width: 100%; padding: 0.6rem; border: 1px solid #ccc; border-radius: 10px; margin-top: 0.25rem; }
+      button { margin-top: 1rem; width: 100%; padding: 0.7rem; border: 0; border-radius: 10px; background: #111; color: #fff; font-weight: 700; cursor: pointer; }
+      .error { color: #b00020; margin-top: 0.75rem; }
+      .hint { color: #555; margin-top: 0.75rem; font-size: 0.9rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Pocket IDP</h1>
+    <div class="card">
+      <form method="post" action="/oidc/authorize">
+        <input type="hidden" name="client_id" value="{{client_id}}" />
+        <input type="hidden" name="redirect_uri" value="{{redirect_uri}}" />
+        <input type="hidden" name="state" value="{{state}}" />
+
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" />
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" />
+
+        <button type="submit">Sign in</button>
+        <div class="error">{{error}}</div>
+        <div class="hint">Default user: <code>admin</code>. Password comes from env <code>CORI_AUTH_EMBEDDED_ADMIN_PASSWORD</code> or <code>config.toml</code>.</div>
+      </form>
+    </div>
+  </body>
+</html>
+
+

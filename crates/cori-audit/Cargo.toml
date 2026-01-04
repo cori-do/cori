@@ -1,0 +1,34 @@
+[package]
+name = "cori-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Audit logging for Cori AI Database Proxy"
+
+[dependencies]
+# Core async runtime
+tokio.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# UUID generation
+uuid.workspace = true
+
+# Async traits
+async-trait.workspace = true
+
+# Internal crates
+cori-core = { path = "../cori-core" }
+

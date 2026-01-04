@@ -1,6 +1,14 @@
+//! Cori Policy Enforcement
+//!
+//! Biscuit-native policy model: policy decisions are made based on Biscuit token claims
+//! and role YAML configuration. No external policy decision point (PDP) required.
+//!
+//! See AGENTS.md Section 8: "Policy Model: Biscuit-Native (No External Engine)"
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Result of a policy check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyDecision {
     pub allow: bool,
@@ -9,6 +17,7 @@ pub struct PolicyDecision {
     pub reason: Option<String>,
 }
 
+/// Input for a policy check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyCheckInput {
     pub principal: serde_json::Value,
@@ -17,12 +26,70 @@ pub struct PolicyCheckInput {
     pub context: serde_json::Value,
 }
 
+/// Policy client trait for checking authorization.
+///
+/// In the Biscuit-native model, policy decisions are made by:
+/// 1. Verifying the Biscuit token (handled by cori-biscuit)
+/// 2. Checking role permissions from the token claims
+/// 3. Enforcing constraints from role configuration
+///
+/// This trait abstracts the policy decision interface for backwards compatibility.
 #[async_trait]
 pub trait PolicyClient: Send + Sync {
     async fn check(&self, input: PolicyCheckInput) -> anyhow::Result<PolicyDecision>;
 }
 
-/// Stub client for now; replace with real Cerbos gRPC client.
+/// Biscuit-native policy client.
+///
+/// This client implements the Biscuit-native policy model where:
+/// - Token validity and expiration are checked by the Biscuit verifier
+/// - Role permissions (tables, columns, operations) come from token claims
+/// - Runtime guards (RLS injection, row limits) are enforced at query time
+///
+/// For now, this acts as an allow-all stub since actual enforcement happens
+/// at the proxy/RLS layer based on token claims.
+pub struct BiscuitPolicyClient;
+
+impl BiscuitPolicyClient {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for BiscuitPolicyClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PolicyClient for BiscuitPolicyClient {
+    async fn check(&self, input: PolicyCheckInput) -> anyhow::Result<PolicyDecision> {
+        // In the Biscuit-native model, authorization is enforced at multiple layers:
+        // 1. Biscuit token verification (signature, expiration, tenant claim)
+        // 2. Role configuration (table/column access, allowed_values)
+        // 3. Runtime guards (RLS injection, column filtering, row limits)
+        //
+        // This policy client exists for audit logging and compatibility.
+        // Actual enforcement happens in cori-proxy and cori-rls.
+        
+        tracing::debug!(
+            action = %input.action,
+            "Biscuit-native policy check (enforcement at proxy layer)"
+        );
+
+        Ok(PolicyDecision {
+            allow: true,
+            obligations: serde_json::json!({}),
+            rule_id: None,
+            reason: Some("biscuit_native".to_string()),
+        })
+    }
+}
+
+/// Legacy allow-all policy client for backwards compatibility.
+/// 
+/// Use `BiscuitPolicyClient` for production deployments.
 pub struct AllowAllPolicyClient;
 
 #[async_trait]
@@ -34,139 +101,5 @@ impl PolicyClient for AllowAllPolicyClient {
             rule_id: None,
             reason: Some("allow_all_stub".to_string()),
         })
-    }
-}
-
-// -----------------------------
-// Cerbos SDK (gRPC) backend (preferred)
-// -----------------------------
-
-pub struct CerbosGrpcPolicyClient {
-    client: tokio::sync::Mutex<cerbos::sdk::CerbosAsyncClient>,
-}
-
-impl CerbosGrpcPolicyClient {
-    pub async fn connect_hostport(host: &str, port: u16) -> anyhow::Result<Self> {
-        use cerbos::sdk::{CerbosAsyncClient, CerbosClientOptions, CerbosEndpoint};
-        let opts = CerbosClientOptions::new(CerbosEndpoint::HostPort(host, port));
-        let client = CerbosAsyncClient::new(opts).await?;
-        Ok(Self {
-            client: tokio::sync::Mutex::new(client),
-        })
-    }
-}
-
-#[async_trait]
-impl PolicyClient for CerbosGrpcPolicyClient {
-    async fn check(&self, input: PolicyCheckInput) -> anyhow::Result<PolicyDecision> {
-        let principal = build_sdk_principal(&input.principal, &input.context)?;
-        let resource = build_sdk_resource(&input.resource)?;
-
-        let mut client = self.client.lock().await;
-        let allowed = client
-            .is_allowed(input.action.as_str(), principal, resource, None)
-            .await?;
-
-        Ok(PolicyDecision {
-            allow: allowed,
-            obligations: serde_json::json!({}),
-            rule_id: None,
-            reason: Some("cerbos_sdk_grpc".to_string()),
-        })
-    }
-}
-
-fn build_sdk_principal(
-    principal: &serde_json::Value,
-    context: &serde_json::Value,
-) -> anyhow::Result<cerbos::sdk::model::Principal> {
-    use cerbos::sdk::model::Principal;
-
-    let id = principal
-        .get("id")
-        .and_then(|x| x.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let roles: Vec<String> = principal
-        .get("roles")
-        .and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut p = Principal::new(id, roles);
-
-    // Carry Cori principal attrs into Cerbos principal attributes.
-    if let Some(obj) = principal.get("attrs").and_then(|x| x.as_object()) {
-        for (k, val) in obj {
-            p = p.add_attr(k, JsonAttrVal(val.clone()));
-        }
-    }
-
-    // Cerbos SDK v0.1.0 doesn't expose a first-class `request.context`, so we attach context
-    // under principal.attr.context.* and generate policy stubs accordingly.
-    p = p.add_attr("context", JsonAttrVal(context.clone()));
-
-    Ok(p)
-}
-
-fn build_sdk_resource(v: &serde_json::Value) -> anyhow::Result<cerbos::sdk::model::Resource> {
-    use cerbos::sdk::model::Resource;
-
-    let r = v.get("resource").unwrap_or(v);
-    let kind = r.get("kind").and_then(|x| x.as_str()).unwrap_or("unknown");
-    let id = r.get("id").and_then(|x| x.as_str()).unwrap_or("unknown");
-
-    let mut res = Resource::new(id, kind);
-    if let Some(obj) = r.get("attr").and_then(|x| x.as_object()) {
-        for (k, val) in obj {
-            res = res.add_attr(k, JsonAttrVal(val.clone()));
-        }
-    }
-    Ok(res)
-}
-
-#[derive(Debug, Clone)]
-struct JsonAttrVal(serde_json::Value);
-
-impl cerbos::sdk::attr::AttrVal for JsonAttrVal {
-    fn to_value(self) -> prost_types::Value {
-        json_to_prost_value(&self.0)
-    }
-}
-
-fn json_to_prost_value(v: &serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    use prost_types::{ListValue, Struct, Value};
-
-    match v {
-        serde_json::Value::Null => Value {
-            kind: Some(Kind::NullValue(0)),
-        },
-        serde_json::Value::Bool(b) => Value {
-            kind: Some(Kind::BoolValue(*b)),
-        },
-        serde_json::Value::Number(n) => Value {
-            kind: Some(Kind::NumberValue(n.as_f64().unwrap_or(0.0))),
-        },
-        serde_json::Value::String(s) => Value {
-            kind: Some(Kind::StringValue(s.clone())),
-        },
-        serde_json::Value::Array(arr) => Value {
-            kind: Some(Kind::ListValue(ListValue {
-                values: arr.iter().map(json_to_prost_value).collect(),
-            })),
-        },
-        serde_json::Value::Object(obj) => Value {
-            kind: Some(Kind::StructValue(Struct {
-                fields: obj
-                    .iter()
-                    .map(|(k, v)| (k.clone(), json_to_prost_value(v)))
-                    .collect(),
-            })),
-        },
     }
 }

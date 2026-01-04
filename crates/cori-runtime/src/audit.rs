@@ -1,12 +1,4 @@
-#[derive(Debug, Clone)]
-pub struct AuditEvent {
-    pub intent_id: String,
-    pub step_id: String,
-    pub action: String,
-    pub allowed: bool,
-    pub decision: serde_json::Value,
-    pub outcome: serde_json::Value,
-}
+pub use cori_core::{AuditEvent, AuditEventType};
 
 /// MVP: trait boundary. Later can implement DB/Kafka/outbox.
 pub trait AuditSink: Send + Sync {
@@ -19,13 +11,15 @@ pub struct StdoutAuditSink;
 impl AuditSink for StdoutAuditSink {
     fn record(&self, event: AuditEvent) {
         println!(
-            "[AUDIT] intent={} step={} action={} allowed={} decision={} outcome={}",
+            "[AUDIT] intent={} seq={:?} type={:?} step={} action={} allowed={} decision={} outcome={}",
             event.intent_id,
+            event.sequence,
+            event.event_type,
             event.step_id,
             event.action,
             event.allowed,
-            event.decision,
-            event.outcome
+            serde_json::Value::Object(event.decision.clone()),
+            serde_json::Value::Object(event.outcome.clone())
         );
     }
 }

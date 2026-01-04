@@ -1,0 +1,23 @@
+# Private keys - NEVER commit these! - here it's an example
+# keys/private.key
+
+# Generated tokens
+tokens/*.token
+tokens/*.biscuit
+
+# Environment files with secrets
+.env
+.env.*
+
+# Local development
+*.local.yaml
+
+# Cori runtime files
+.cori.pid
+.cori.log
+
+# Schema snapshots (generated)
+schema/snapshot.json
+
+# OS files
+.DS_Store

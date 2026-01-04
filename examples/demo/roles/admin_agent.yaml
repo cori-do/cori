@@ -1,0 +1,79 @@
+# =============================================================================
+# ADMIN AGENT ROLE
+# =============================================================================
+# Full access for administrative AI agents (use with caution).
+
+name: admin_agent
+description: "Administrative agent with full tenant access"
+
+tables:
+  customers:
+    readable: "*"
+    editable: "*"
+  contacts:
+    readable: "*"
+    editable: "*"
+  addresses:
+    readable: "*"
+    editable: "*"
+  opportunities:
+    readable: "*"
+    editable: "*"
+  orders:
+    readable: "*"
+    editable:
+      status: {}
+      notes: {}
+  order_items:
+    readable: "*"
+    editable: {}
+  invoices:
+    readable: "*"
+    editable:
+      status:
+        allowed_values: [draft, sent, paid, overdue, cancelled]
+  payments:
+    readable: "*"
+    editable: {}
+  tickets:
+    readable: "*"
+    editable: "*"
+  tasks:
+    readable: "*"
+    editable: "*"
+  notes:
+    readable: "*"
+    editable: "*"
+  communications:
+    readable: "*"
+    editable: "*"
+  products:
+    readable: "*"
+    editable:
+      name: {}
+      description: {}
+      price: {}
+      stock_quantity: {}
+      is_active: {}
+  tags:
+    readable: "*"
+    editable: "*"
+  customer_tags:
+    readable: "*"
+    editable: "*"
+
+# Still blocked from the most sensitive tables
+blocked_tables:
+  - users           # User management is not for AI
+  - api_keys        # Secrets
+  - billing         # Payment data
+  - audit_logs      # System audit trail
+  - organizations   # Tenant configuration
+
+max_rows_per_query: 1000
+max_affected_rows: 100
+
+blocked_operations:
+  - TRUNCATE
+  - DROP
+
