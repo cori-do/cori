@@ -1,253 +1,289 @@
-# Cori — the safest way to let software change your database
+<div align="center">
 
-**Cori turns database mutations into a simple, reviewable workflow.**
 
-Instead of “someone ran a SQL script in prod”, you get:
+<img src="https://assets.cori.do/cori-logo.png" alt="Cori Logo" width="140" />
 
-- **A plan** (what will happen)
-- **A preview** (what would change)
-- **An approval** (who allowed it)
-- **An execution** (do it safely)
+### The Secure Kernel for AI
 
-> Cori is built for teams who want to ship faster **without giving everyone direct write access to production databases**.
+**Give AI agents database access without giving away the keys.**
 
----
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-## Why Cori
+[Quick Start](#-quick-start) • [Why Cori](#-the-problem) • [How It Works](#-how-it-works) • [Documentation](AGENTS.md)
 
-Databases are the source of truth… and the source of most scary incidents.
-
-- “We need to delete a customer for compliance.”
-- “We must fix bad rows after a migration.”
-- “Support needs to refund 50 orders.”
-- “We need to backfill a column safely.”
-- “We want AI agents to take actions, but… not raw SQL.”
-
-**Cori is the action layer for your database.**  
-You define safe actions, Cori executes them with guardrails.
+</div>
 
 ---
 
-## Install (takes 10 seconds)
+## 🎯 The Problem
 
-This repository currently ships Cori as a Rust CLI.
+You want AI agents to work with your database. But:
 
-```sh
-cargo build --release
-./target/release/cori --help
+- **Multi-tenant data** → Agent for Client A must never see Client B's data
+- **Dynamic SQL generation** → LLMs write queries you can't predict
+- **Compliance & audit** → You need to know exactly what happened
+- **Zero trust** → Traditional app-level security doesn't cut it
+
+**Raw database access for AI is a security nightmare.**
+
+---
+
+## 💡 The Solution
+
+Cori is a **Postgres-compatible proxy** that sits between AI agents and your database.
+
+```
+AI Agent → Cori Proxy → Your Postgres
+              ↓
+         ✓ Verify token
+         ✓ Parse SQL
+         ✓ Inject tenant isolation
+         ✓ Audit everything
 ```
 
-Alternatively, install from the workspace:
+**Agents connect to Cori like it's Postgres. Cori protects your data.**
+
+---
+
+## ✨ Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **🔐 Biscuit Token Auth** | Cryptographic tokens with tenant + role claims. No forgery possible. |
+| **🏢 Automatic Tenant Isolation** | Every query is rewritten to scope data to the token's tenant. |
+| **📋 Role-Based Access** | Define which tables, columns, and operations each role can access. |
+| **🤖 MCP Server Built-In** | AI agents discover typed tools, not raw SQL. |
+| **👁️ Full Audit Trail** | Every query logged with who, what, when, and outcome. |
+| **🔍 Virtual Schema** | Agents only see tables/columns they're allowed to access. |
+| **✅ Human-in-the-Loop** | Flag sensitive operations for approval before execution. |
+
+---
+
+## 🚀 Quick Start
+
+### Install
 
 ```sh
 cargo install --path crates/cori-cli
-cori --help
 ```
+
+### 1. Initialize from Your Database
+
+```sh
+cori init --from-db postgres://user:pass@localhost/mydb --project myproject
+```
+
+This introspects your database and generates:
+- `cori.yaml` — Main configuration
+- `tenancy.yaml` — Auto-detected tenant columns and FK relationships  
+- `keys/` — Biscuit keypair for token signing
+- `roles/` — Sample role definitions based on your schema
+- `schema/snapshot.json` — Schema snapshot for drift detection
+
+### 2. Start Cori
+
+```sh
+cd myproject
+cori serve --config cori.yaml
+# Proxy on :5433, Dashboard on :8080
+```
+
+### 3. Mint a Token
+
+```sh
+# Create a role token
+cori token mint --role support_agent --output role.token
+
+# Attenuate for a specific tenant
+cori token attenuate \
+    --base role.token \
+    --tenant acme_corp \
+    --expires 24h \
+    --output agent.token
+```
+
+### 4. Connect Your Agent
+
+```python
+# Python example — connect like normal Postgres
+import psycopg2
+
+conn = psycopg2.connect(
+    host="localhost",
+    port=5433,  # Cori proxy
+    user="agent",
+    password=open("agent.token").read(),  # Biscuit token
+    database="myapp"
+)
+
+# This query is automatically scoped to acme_corp's data
+cursor.execute("SELECT * FROM orders WHERE status = 'pending'")
+```
+
+**That's it.** The agent can only see `acme_corp`'s orders. Always.
 
 ---
 
-## v0.1.0 (OSS Alpha) limitations (read this first)
+## 🔧 How It Works
 
-- **Postgres execution is stubbed**: generated actions do **not** run SQL yet. `execute` produces results + audit artifacts, but does not mutate a database in this release.
-- **Preview diffs are placeholders**: `plan preview` / `apply --preview` return a structured report, but not row-level before/after diffs yet.
-- **Biscuit-native policy model**: Policy enforcement uses Biscuit tokens and role YAML configuration. See AGENTS.md for the full policy model.
+### Define Your Tenancy
 
----
-
-## What you can do in 3 minutes
-
-### 1) Initialize a Cori project from your database
-
-Cori reads your schema and creates a project folder.
-
-```sh
-cori init --from-db "<DATABASE_URL>" --project my-super-app
-cd my-super-app
-```
-
-### 2) Capture a schema snapshot (optional but recommended)
-
-```sh
-export DATABASE_URL="<DATABASE_URL>"
-cori schema snapshot
-```
-
-### 3) Generate safe “data actions” automatically
-
-This is the magic: Cori generates a catalog of actions from your schema.
-
-```sh
-cori generate actions
-```
-
-See what you got:
-
-```sh
-cori actions list
-```
-
-Describe one action:
-
-```sh
-cori actions describe <ActionNameFromList>
-```
-
-Validate the generated artifacts:
-
-```sh
-cori actions validate
-```
-
----
-
-## Your first Cori plan (no database expertise needed)
-
-Create a file named `plan.yaml`:
+Tell Cori how your multi-tenant data is structured:
 
 ```yaml
-steps:
-  - id: delete_customer
-    kind: mutation
-    action: <ActionNameFromCatalog>
-    inputs:
-      # Tip: copy/paste the required inputs from:
-      #   cori actions describe <ActionNameFromCatalog>
-      # The input keys are schema-driven (e.g. your PK might be customer_id, not id).
-      tenant_id: acme
-      <primary_key_field>: "<primary_key_value>"
-      reason: "Why this change is needed"
+# tenancy.yaml
+tenant_id:
+  type: uuid
+
+tables:
+  customers:
+    tenant_column: organization_id
+  orders:
+    tenant_column: customer_org_id
+  products:
+    global: true  # Shared across all tenants
 ```
 
-### Validate the plan
+### Define Roles
 
-```sh
-cori plan validate plan.yaml
+Specify what each role can do:
+
+```yaml
+# roles/support_agent.yaml
+name: support_agent
+description: "AI agent for customer support"
+
+tables:
+  customers:
+    operations: [read]
+    readable: [id, name, email, plan]
+    
+  tickets:
+    operations: [read, update]
+    readable: [id, subject, status, priority]
+    editable:
+      status:
+        allowed_values: [open, in_progress, resolved]
+      priority:
+        requires_approval: true  # Human must approve
+
+blocked_tables: [users, billing, api_keys]
+max_rows_per_query: 100
 ```
 
-### Preview the plan (dry-run)
+### Automatic SQL Rewriting
 
-```sh
-cori plan preview plan.yaml
+Cori transforms every query:
+
+```sql
+-- What the agent sends:
+SELECT * FROM orders WHERE status = 'pending'
+
+-- What Postgres receives:
+SELECT * FROM orders WHERE status = 'pending' AND customer_org_id = 'acme_corp'
 ```
 
-You’ll get a clear report of what would happen — without taking action.
+No code changes. No ORM plugins. Just security.
 
 ---
 
-## Apply → Approve → Execute (the safe mutation workflow)
+## 🤖 MCP Integration
 
-### 1) Create an intent
+Cori exposes your database as **typed MCP tools** for AI agents:
 
-This creates a tracked request to change data.
-
-```sh
-cori apply plan.yaml
+```json
+{
+  "mcpServers": {
+    "cori": {
+      "command": "cori",
+      "args": ["mcp", "--config", "cori.yaml"],
+      "env": { "CORI_TOKEN": "<base64 agent.token>" }
+    }
+  }
+}
 ```
 
-Cori prints an `intent_id`.
+Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — automatically generated from your schema and role permissions.
 
-### 2) Check status
-
-```sh
-cori status <intent_id>
-```
-
-### 3) Approve it
-
-```sh
-cori approve <intent_id> --reason "Approved by ops after preview" --as "user:alice"
-```
-
-### 4) Execute it
-
-```sh
-cori execute <intent_id>
-```
-
-That’s it. You just ran a production mutation like a grown-up.
+**No raw SQL. Just safe, typed actions.**
 
 ---
 
-## Want to try without making changes?
+## 🏗️ Architecture
 
-Use preview apply:
-
-```sh
-cori apply plan.yaml --preview
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         cori binary                             │
+├─────────────────┬─────────────────┬─────────────────────────────┤
+│  Postgres Proxy │    MCP Server   │      Admin Dashboard        │
+│  (port 5433)    │  (stdio/http)   │      (port 8080)            │
+├─────────────────┴─────────────────┴─────────────────────────────┤
+│  SQL Parser → RLS Injector → Biscuit Verifier → Audit Logger   │
+├─────────────────────────────────────────────────────────────────┤
+│                    Upstream Postgres                             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-This creates an intent and runs a dry-run immediately.
+**Single binary. No external dependencies. No policy engine to deploy.**
 
 ---
 
-## Policy (Biscuit-native)
+## 🆚 Why Not Just...
 
-Cori uses a **Biscuit-native policy model** — no external policy engine required.
+| Alternative | Problem |
+|-------------|---------|
+| **Native Postgres RLS** | Requires session variables; no standard token format; no MCP |
+| **OPA / Cerbos / Cedar** | Extra service to deploy; latency; policy sprawl |
+| **API Gateway** | Doesn't understand SQL; can't inject row-level predicates |
+| **LangChain SQL Agent** | Generates raw SQL; no tenant isolation |
 
-Policy enforcement happens at multiple layers:
-1. **Biscuit token verification** (signature, expiration, tenant claim)
-2. **Role YAML configuration** (table/column access, allowed_values)
-3. **Runtime guards** (RLS injection, column filtering, row limits)
-
-See [AGENTS.md](AGENTS.md) Section 8 for the complete policy model.
-
----
-
-## Schema drift? Cori is built for it
-
-Schemas change. Cori expects that.
-
-```sh
-cori schema diff
-cori generate actions --force
-cori actions validate
-```
+**Cori is purpose-built for the AI-agent-to-database use case.**
 
 ---
 
-## What Cori is (and isn’t)
+## 📊 Current Status
 
-✅ Cori is:
-- A simple CLI to **plan/preview/approve/execute** database actions
-- A generator that turns schemas into **safe, reusable actions**
-- A foundation for agentic workflows (natural language → safe actions)
+> **Alpha Release** — Core proxy and token system work. Building toward production hardening.
 
-❌ Cori is not:
-- A BI tool
-- A replacement for your database
-- A giant framework you have to rewrite your app for
+| Component | Status |
+|-----------|--------|
+| Biscuit token auth | ✅ Working |
+| SQL parsing & RLS injection | ✅ Working |
+| MCP server | ✅ Working |
+| Admin dashboard | 🚧 In progress |
+| Connection pooling | 📋 Planned |
+| Production hardening | 📋 Planned |
 
----
-
-## The bold target
-
-**Cori becomes the standard “mutation gateway” for modern teams:**
-- humans and systems propose changes as plans
-- policies decide what is allowed
-- execution happens safely
-- integrations stay simple
 
 ---
 
-## Get started now
+## 📖 Documentation
 
-If you have a Postgres database URL, you can try Cori immediately:
-
-```sh
-cargo build --release
-./target/release/cori init --from-db "<DATABASE_URL>" --project my-super-app
-cd my-super-app
-export DATABASE_URL="<DATABASE_URL>"
-cori generate actions
-cori actions list
-```
+- **[examples/demo/](examples/demo/)** — Working demo with Docker Compose
 
 ---
 
-## Community
+## 🤝 Contributing
 
-- Star the repo ⭐️
-- Open an issue with your dream workflow
-- Tell us your “we changed prod data and regretted it” story 🙃
+We'd love your help! Here's how:
 
-**Cori is here to make database changes boring (in a good way).**
+- ⭐ **Star the repo** — It helps others find us
+- 🐛 **Report bugs** — Open an issue
+- 💡 **Suggest features** — Tell us your use case
+
+---
+
+## 📜 License
+
+Apache 2.0 — Use it, fork it, build on it.
+
+---
+
+<div align="center">
+
+**Cori: Because AI agents shouldn't have `sudo` on your database.**
+
+[Get Started](#-quick-start) • [Read the Docs](AGENTS.md) • [Star on GitHub ⭐](https://github.com/cori-do/cori)
+
+</div>
