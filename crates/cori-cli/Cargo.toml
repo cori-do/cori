@@ -25,16 +25,16 @@ cori-policy = { path = "../cori-policy" }
 cori-runtime = { path = "../cori-runtime" }
 cori-adapter-pg = { path = "../cori-adapter-pg" }
 
-# Phase 1: Core Proxy dependencies
 cori-biscuit = { path = "../cori-biscuit" }
 cori-rls = { path = "../cori-rls" }
 cori-proxy = { path = "../cori-proxy" }
 cori-audit = { path = "../cori-audit" }
 
-# Phase 2: MCP Integration
 cori-mcp = { path = "../cori-mcp" }
 base64 = "0.22"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+
+cori-dashboard = { path = "../cori-dashboard" }
 
 [dev-dependencies]
 tempfile = "3"

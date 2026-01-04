@@ -652,6 +652,7 @@ dependencies = [
  "cori-audit",
  "cori-biscuit",
  "cori-core",
+ "cori-dashboard",
  "cori-mcp",
  "cori-policy",
  "cori-proxy",
@@ -738,9 +739,12 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
+ "cori-adapter-pg",
  "cori-audit",
  "cori-biscuit",
  "cori-core",
+ "cori-mcp",
  "mime_guess",
  "rust-embed",
  "serde",
@@ -750,6 +754,7 @@ dependencies = [
  "tower 0.5.2",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

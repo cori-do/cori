@@ -18,11 +18,23 @@
 //! - HTMX + Alpine.js for interactivity (minimal JS)
 //! - Tailwind CSS for styling
 
+// Public modules
+pub mod api_types;
 pub mod error;
 pub mod handlers;
+pub mod pages;
+pub mod pages_extra;
 pub mod routes;
 pub mod server;
+pub mod state;
+pub mod templates;
 
+// Internal helper modules
+mod schema_converter;
+mod token_helpers;
+
+// Re-exports
 pub use error::DashboardError;
 pub use server::DashboardServer;
+pub use state::AppState;
 

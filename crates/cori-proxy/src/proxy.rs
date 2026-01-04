@@ -83,6 +83,11 @@ impl CoriProxy {
         }
     }
 
+    /// Get a reference to the proxy configuration.
+    pub fn config(&self) -> &ProxyConfig {
+        &self.config
+    }
+
     /// Create handlers for a new connection.
     /// Each connection gets its own session context that is shared between
     /// the startup handler (authentication) and query handler.

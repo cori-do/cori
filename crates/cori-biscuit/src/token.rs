@@ -139,6 +139,7 @@ impl TokenBuilder {
 }
 
 /// Verifier for Biscuit tokens.
+#[derive(Clone)]
 pub struct TokenVerifier {
     public_key: PublicKey,
 }

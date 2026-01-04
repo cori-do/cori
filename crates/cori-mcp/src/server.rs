@@ -212,7 +212,7 @@ impl McpServer {
     }
 
     /// Run the server with HTTP transport.
-    async fn run_http(&self) -> Result<(), McpError> {
+    pub async fn run_http(&self) -> Result<(), McpError> {
         tracing::info!(
             port = self.config.http_port,
             "Starting MCP server with HTTP transport"

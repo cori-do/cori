@@ -1,15 +1,23 @@
 //! Serve command for starting the Cori proxy.
 //!
-//! `cori serve` - Start the Postgres proxy server.
+//! `cori serve` - Start the Postgres proxy server, MCP server, and dashboard.
 
 use cori_audit::AuditLogger;
 use cori_biscuit::TokenVerifier;
-use cori_core::config::{AuditConfig, ProxyConfig, TenancyConfig, UpstreamConfig};
+use cori_core::config::{
+    AuditConfig, DashboardConfig, McpConfig, ProxyConfig, RoleConfig, TenancyConfig, Transport,
+    UpstreamConfig,
+};
+use cori_dashboard::DashboardServer;
+use cori_mcp::approval::ApprovalManager;
+use cori_mcp::McpServer;
 use cori_proxy::{CoriProxy, RolePermissions};
 use serde::Deserialize;
+use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Configuration file structure for `cori serve`.
 #[derive(Debug, Deserialize)]
@@ -37,6 +45,14 @@ pub struct ServeConfig {
     /// Audit configuration.
     #[serde(default)]
     pub audit: AuditConfigFile,
+
+    /// MCP server configuration.
+    #[serde(default)]
+    pub mcp: McpConfigFile,
+
+    /// Dashboard configuration.
+    #[serde(default)]
+    pub dashboard: DashboardConfigFile,
 
     /// Directory containing role definition files (each .yaml file = one role).
     #[serde(default)]
@@ -121,6 +137,73 @@ pub struct AuditConfigFile {
     pub log_queries: bool,
     #[serde(default)]
     pub log_results: bool,
+}
+
+/// MCP server configuration from config file.
+#[derive(Debug, Deserialize)]
+pub struct McpConfigFile {
+    /// Whether the MCP server is enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Transport type: "stdio" or "http".
+    #[serde(default)]
+    pub transport: Option<String>,
+
+    /// HTTP port (only used when transport is HTTP).
+    #[serde(default = "default_mcp_port")]
+    pub http_port: u16,
+
+    /// Whether dry-run mode is enabled.
+    #[serde(default = "default_enabled")]
+    pub dry_run_enabled: bool,
+
+    /// Whether to auto-generate MCP tools from schema.
+    #[serde(default = "default_enabled")]
+    pub auto_generate_tools: bool,
+
+    /// Actions that require human approval.
+    #[serde(default)]
+    pub require_approval: Vec<String>,
+
+    /// Exceptions to approval requirements.
+    #[serde(default)]
+    pub approval_exceptions: Vec<String>,
+}
+
+impl Default for McpConfigFile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            transport: Some("http".to_string()),
+            http_port: default_mcp_port(),
+            dry_run_enabled: true,
+            auto_generate_tools: true,
+            require_approval: Vec::new(),
+            approval_exceptions: Vec::new(),
+        }
+    }
+}
+
+/// Dashboard configuration from config file.
+#[derive(Debug, Deserialize)]
+pub struct DashboardConfigFile {
+    /// Whether the dashboard is enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Port to listen on.
+    #[serde(default = "default_dashboard_port")]
+    pub listen_port: u16,
+}
+
+impl Default for DashboardConfigFile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_port: default_dashboard_port(),
+        }
+    }
 }
 
 /// Role configuration loaded from a file or inline.
@@ -354,7 +437,20 @@ fn default_enabled() -> bool {
     true
 }
 
-/// Start the Cori proxy server.
+fn default_mcp_port() -> u16 {
+    3000
+}
+
+fn default_dashboard_port() -> u16 {
+    8080
+}
+
+/// Start the Cori proxy server, MCP server, and dashboard.
+///
+/// This function starts all enabled services based on the configuration:
+/// - Postgres proxy server (always started)
+/// - MCP server (if mcp.enabled is true)
+/// - Admin dashboard (if dashboard.enabled is true)
 pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     // Load configuration
     let config_str = fs::read_to_string(&config_path)?;
@@ -432,7 +528,7 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     let tenancy_config = load_tenancy_config(&serve_config, &config_dir)?;
 
     let proxy_config = ProxyConfig {
-        listen_addr: serve_config.proxy.listen_addr,
+        listen_addr: serve_config.proxy.listen_addr.clone(),
         listen_port: serve_config.proxy.listen_port,
         max_connections: serve_config.proxy.max_connections,
         ..Default::default()
@@ -446,31 +542,447 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
             log_results: serve_config.audit.log_results,
             ..Default::default()
         };
-        Some(AuditLogger::new(audit_config)?)
+        Some(Arc::new(AuditLogger::new(audit_config)?))
     } else {
         None
     };
 
+    // Create shared approval manager for MCP and dashboard
+    let approval_manager = Arc::new(ApprovalManager::default());
+
+    // Log startup information
     tracing::info!(
-        listen_port = proxy_config.listen_port,
+        proxy_port = proxy_config.listen_port,
+        mcp_enabled = serve_config.mcp.enabled,
+        mcp_port = serve_config.mcp.http_port,
+        dashboard_enabled = serve_config.dashboard.enabled,
+        dashboard_port = serve_config.dashboard.listen_port,
         upstream_host = upstream_config.host,
         roles_loaded = roles.len(),
-        "Starting Cori proxy"
+        "Starting Cori services"
     );
 
-    // Create and run proxy with role permissions
-    let proxy = CoriProxy::with_role_permissions(
-        proxy_config,
-        upstream_config,
-        verifier,
-        tenancy_config,
-        audit_logger,
-        role_permissions,
-    );
+    // Build database URL for MCP server
+    let database_url = build_database_url(&serve_config.upstream)?;
 
-    proxy.run().await?;
+    // Load schema for MCP tool generation
+    let schema_path = config_dir.join("schema/snapshot.json");
+    let schema = if schema_path.exists() {
+        match std::fs::read_to_string(&schema_path) {
+            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(json) => {
+                    match cori_mcp::schema::parse_schema_from_json(&json) {
+                        Ok(s) => {
+                            tracing::info!("Loaded schema from {}", schema_path.display());
+                            Some(s)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse schema: {:?}", e);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse schema file as JSON: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to read schema file: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("No schema file found at {}", schema_path.display());
+        None
+    };
+
+    // Convert loaded roles to cori_core RoleConfig for MCP
+    let core_roles: HashMap<String, RoleConfig> = roles
+        .iter()
+        .map(|r| (r.name.clone(), convert_to_core_role_config(r)))
+        .collect();
+
+    // ============================================
+    // START ALL SERVICES CONCURRENTLY
+    // ============================================
+
+    let mut handles = Vec::new();
+
+    // 1. Start Postgres Proxy (always started)
+    {
+        // Create a separate audit logger for the proxy
+        let proxy_audit_logger = if serve_config.audit.enabled {
+            let audit_config = AuditConfig {
+                enabled: serve_config.audit.enabled,
+                log_queries: serve_config.audit.log_queries,
+                log_results: serve_config.audit.log_results,
+                ..Default::default()
+            };
+            Some(AuditLogger::new(audit_config)?)
+        } else {
+            None
+        };
+
+        let proxy = CoriProxy::with_role_permissions(
+            proxy_config.clone(),
+            upstream_config.clone(),
+            verifier.clone(),
+            tenancy_config.clone(),
+            proxy_audit_logger,
+            role_permissions.clone(),
+        );
+
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                port = proxy.config().listen_port,
+                "Starting Postgres proxy"
+            );
+            if let Err(e) = proxy.run().await {
+                tracing::error!(error = %e, "Postgres proxy error");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // 2. Start MCP Server (if enabled and transport is HTTP)
+    if serve_config.mcp.enabled {
+        let transport = serve_config
+            .mcp
+            .transport
+            .as_deref()
+            .unwrap_or("http");
+
+        if transport == "http" {
+            let mcp_config = McpConfig {
+                enabled: true,
+                transport: Transport::Http,
+                http_port: serve_config.mcp.http_port,
+                dry_run_enabled: serve_config.mcp.dry_run_enabled,
+                auto_generate_tools: serve_config.mcp.auto_generate_tools,
+                require_approval: serve_config.mcp.require_approval.clone(),
+                approval_exceptions: serve_config.mcp.approval_exceptions.clone(),
+            };
+
+            let database_url = database_url.clone();
+            let tenant_column = tenancy_config.default_column.clone();
+            let schema = schema.clone();
+            let core_roles = core_roles.clone();
+            let approval_manager = approval_manager.clone();
+
+            let handle = tokio::spawn(async move {
+                tracing::info!(
+                    port = mcp_config.http_port,
+                    "Starting MCP HTTP server"
+                );
+
+                // Connect to database
+                match PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&database_url)
+                    .await
+                {
+                    Ok(pool) => {
+                        // Create MCP server - we'll use a default "agent" role for now
+                        // In production, each request would verify its token and use appropriate role
+                        let mut server = McpServer::new(mcp_config)
+                            .with_pool(pool)
+                            .with_tenant_column(&tenant_column)
+                            .with_approval_manager(approval_manager);
+
+                        if let Some(s) = schema {
+                            server = server.with_schema(s);
+                        }
+
+                        // If there's a default role, use it for tool generation
+                        // Otherwise, tools will be generated per-request based on token
+                        if let Some((_name, role_config)) = core_roles.iter().next() {
+                            server = server.with_role_config(role_config.clone());
+                            server.generate_tools();
+                        }
+
+                        // Use run_http directly to avoid Send issues with stdio transport
+                        if let Err(e) = server.run_http().await {
+                            tracing::error!(error = %e, "MCP server error");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to connect to database for MCP server");
+                    }
+                }
+            });
+            handles.push(handle);
+        } else {
+            tracing::info!(
+                transport = transport,
+                "MCP server configured for stdio transport - not starting in serve mode"
+            );
+        }
+    }
+
+    // 3. Start Dashboard (if enabled)
+    if serve_config.dashboard.enabled {
+        let dashboard_config = DashboardConfig {
+            enabled: true,
+            listen_port: serve_config.dashboard.listen_port,
+            ..Default::default()
+        };
+
+        // Build CoriConfig for dashboard state
+        let cori_config = build_cori_config(&serve_config, &config_dir, &tenancy_config, &core_roles)?;
+
+        let audit_logger_for_dashboard = audit_logger
+            .clone()
+            .unwrap_or_else(|| Arc::new(AuditLogger::new(AuditConfig::default()).unwrap()));
+
+        // Load keypair for dashboard (for token minting)
+        let keypair = resolve_keypair(&serve_config.biscuit, &config_dir)?;
+
+        let dashboard = DashboardServer::with_state(
+            dashboard_config,
+            cori_config,
+            keypair,
+            audit_logger_for_dashboard,
+            approval_manager.clone(),
+        );
+
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                port = dashboard.listen_port(),
+                "Starting admin dashboard"
+            );
+            if let Err(e) = dashboard.run().await {
+                tracing::error!(error = %e, "Dashboard error");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for any service to finish (they should run indefinitely)
+    // If any service exits, we log it
+    for handle in handles {
+        if let Err(e) = handle.await {
+            tracing::error!(error = %e, "Service task failed");
+        }
+    }
 
     Ok(())
+}
+
+/// Build database URL from upstream config.
+fn build_database_url(upstream: &UpstreamConfigFile) -> anyhow::Result<String> {
+    // First check for credentials_env
+    if let Some(env_var) = &upstream.credentials_env {
+        if let Ok(url) = std::env::var(env_var) {
+            return Ok(url);
+        }
+    }
+
+    // Also check DATABASE_URL directly
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        return Ok(url);
+    }
+
+    // Build from individual components
+    let host = upstream.host.as_deref().unwrap_or("localhost");
+    let port = upstream.port;
+    let database = upstream.database.as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var"))?;
+    let username = upstream.username.as_deref().unwrap_or("postgres");
+    let password = upstream.password.as_deref().unwrap_or("");
+
+    Ok(format!(
+        "postgres://{}:{}@{}:{}/{}",
+        username, password, host, port, database
+    ))
+}
+
+/// Convert a LoadedRole to cori_core RoleConfig.
+fn convert_to_core_role_config(loaded: &LoadedRole) -> RoleConfig {
+    use cori_core::config::{
+        ColumnConstraints as CoreColumnConstraints, EditableColumns as CoreEditableColumns,
+        ReadableColumns as CoreReadableColumns, TablePermissions,
+    };
+
+    let mut tables = HashMap::new();
+
+    for (table_name, table_config) in &loaded.config.tables {
+        let readable = match &table_config.readable {
+            ReadableColumnsConfig::All => CoreReadableColumns::All("*".to_string()),
+            ReadableColumnsConfig::List(cols) => CoreReadableColumns::List(cols.clone()),
+            ReadableColumnsConfig::None => CoreReadableColumns::List(Vec::new()),
+        };
+
+        let editable = match &table_config.editable {
+            EditableColumnsConfig::All => CoreEditableColumns::All("*".to_string()),
+            EditableColumnsConfig::Map(map) => {
+                let converted: HashMap<String, CoreColumnConstraints> = map
+                    .iter()
+                    .map(|(col, constraints)| {
+                        (
+                            col.clone(),
+                            CoreColumnConstraints {
+                                allowed_values: constraints.allowed_values.clone(),
+                                pattern: constraints.pattern.clone(),
+                                min: constraints.min,
+                                max: constraints.max,
+                                requires_approval: constraints.requires_approval,
+                            },
+                        )
+                    })
+                    .collect();
+                CoreEditableColumns::Map(converted)
+            }
+            EditableColumnsConfig::None => CoreEditableColumns::Map(HashMap::new()),
+        };
+
+        tables.insert(
+            table_name.clone(),
+            TablePermissions {
+                readable,
+                editable,
+                tenant_column: table_config.tenant_column.clone(),
+                operations: None,
+            },
+        );
+    }
+
+    RoleConfig {
+        name: loaded.name.clone(),
+        description: loaded.config.description.clone(),
+        tables,
+        blocked_tables: loaded.config.blocked_tables.clone(),
+        max_rows_per_query: loaded.config.max_rows_per_query,
+        max_affected_rows: loaded.config.max_affected_rows,
+        blocked_operations: loaded.config.blocked_operations.clone(),
+        custom_actions: Vec::new(),
+        include_actions: Vec::new(),
+    }
+}
+
+/// Build a CoriConfig for the dashboard state.
+fn build_cori_config(
+    serve_config: &ServeConfig,
+    _config_dir: &Path,
+    tenancy_config: &TenancyConfig,
+    roles: &HashMap<String, RoleConfig>,
+) -> anyhow::Result<cori_core::config::CoriConfig> {
+    use cori_core::config::CoriConfig;
+
+    let upstream = UpstreamConfig {
+        host: serve_config
+            .upstream
+            .host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string()),
+        port: serve_config.upstream.port,
+        database: serve_config
+            .upstream
+            .database
+            .clone()
+            .unwrap_or_else(|| "postgres".to_string()),
+        username: serve_config
+            .upstream
+            .username
+            .clone()
+            .unwrap_or_else(|| "postgres".to_string()),
+        password: serve_config.upstream.password.clone(),
+        credentials_env: serve_config.upstream.credentials_env.clone(),
+    };
+
+    let proxy = ProxyConfig {
+        listen_addr: serve_config.proxy.listen_addr.clone(),
+        listen_port: serve_config.proxy.listen_port,
+        max_connections: serve_config.proxy.max_connections,
+        ..Default::default()
+    };
+
+    let mcp = McpConfig {
+        enabled: serve_config.mcp.enabled,
+        transport: match serve_config.mcp.transport.as_deref() {
+            Some("http") => Transport::Http,
+            _ => Transport::Stdio,
+        },
+        http_port: serve_config.mcp.http_port,
+        dry_run_enabled: serve_config.mcp.dry_run_enabled,
+        auto_generate_tools: serve_config.mcp.auto_generate_tools,
+        require_approval: serve_config.mcp.require_approval.clone(),
+        approval_exceptions: serve_config.mcp.approval_exceptions.clone(),
+    };
+
+    let dashboard = DashboardConfig {
+        enabled: serve_config.dashboard.enabled,
+        listen_port: serve_config.dashboard.listen_port,
+        ..Default::default()
+    };
+
+    let audit = AuditConfig {
+        enabled: serve_config.audit.enabled,
+        log_queries: serve_config.audit.log_queries,
+        log_results: serve_config.audit.log_results,
+        ..Default::default()
+    };
+
+    Ok(CoriConfig {
+        project: None,
+        version: None,
+        upstream,
+        proxy,
+        biscuit: cori_core::config::BiscuitConfig {
+            public_key_env: serve_config.biscuit.public_key_env.clone(),
+            public_key_file: serve_config.biscuit.public_key_file.clone(),
+            private_key_env: serve_config.biscuit.private_key_env.clone(),
+            private_key_file: serve_config.biscuit.private_key_file.clone(),
+            ..Default::default()
+        },
+        tenancy: tenancy_config.clone(),
+        tenancy_file: serve_config.tenancy_file.clone(),
+        mcp,
+        dashboard,
+        audit,
+        virtual_schema: Default::default(),
+        guardrails: Default::default(),
+        observability: Default::default(),
+        roles_dir: serve_config.roles_dir.clone(),
+        role_files: serve_config.role_files.clone(),
+        roles: roles.clone(),
+    })
+}
+
+/// Resolve keypair from config for the dashboard.
+fn resolve_keypair(config: &BiscuitConfig, config_dir: &Path) -> anyhow::Result<cori_biscuit::keys::KeyPair> {
+    // Try private key file first
+    if let Some(private_key_file) = &config.private_key_file {
+        let path = if private_key_file.is_absolute() {
+            private_key_file.clone()
+        } else {
+            config_dir.join(private_key_file)
+        };
+
+        if path.exists() {
+            return cori_biscuit::keys::KeyPair::load_from_file(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to load keypair from {}: {}", path.display(), e));
+        }
+    }
+
+    // Try private key env
+    if let Some(env_var) = &config.private_key_env {
+        if let Ok(key_hex) = std::env::var(env_var) {
+            return cori_biscuit::keys::KeyPair::from_private_key_hex(&key_hex)
+                .map_err(|e| anyhow::anyhow!("Failed to load keypair from env {}: {}", env_var, e));
+        }
+    }
+
+    // Try default BISCUIT_PRIVATE_KEY
+    if let Ok(key_hex) = std::env::var("BISCUIT_PRIVATE_KEY") {
+        return cori_biscuit::keys::KeyPair::from_private_key_hex(&key_hex)
+            .map_err(|e| anyhow::anyhow!("Failed to load keypair from BISCUIT_PRIVATE_KEY: {}", e));
+    }
+
+    // Generate a new keypair if none found (for dashboard-only usage)
+    tracing::warn!("No Biscuit private key found, generating ephemeral keypair for dashboard");
+    cori_biscuit::keys::KeyPair::generate()
+        .map_err(|e| anyhow::anyhow!("Failed to generate ephemeral keypair: {}", e))
 }
 
 /// Load tenancy configuration from file or inline config.
