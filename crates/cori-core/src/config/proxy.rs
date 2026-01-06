@@ -1,8 +1,9 @@
-//! Proxy configuration types.
+//! Upstream database and legacy configuration types.
 
 use serde::{Deserialize, Serialize};
 
-/// Configuration for the Postgres wire protocol proxy.
+/// Legacy proxy configuration (deprecated).
+/// This struct is kept for backwards compatibility with existing config files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     /// Address to listen on.
@@ -38,7 +39,7 @@ impl Default for ProxyConfig {
     }
 }
 
-/// TLS configuration for the proxy.
+/// TLS configuration (legacy).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TlsConfig {
     /// Whether TLS is enabled.

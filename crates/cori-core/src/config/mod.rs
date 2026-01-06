@@ -1,4 +1,4 @@
-//! Configuration types for Cori AI Database Proxy.
+//! Configuration types for Cori MCP Server.
 //!
 //! This module provides the unified configuration types used across all Cori crates.
 //! Configuration can be loaded from YAML files (cori.yaml, tenancy.yaml, roles/*.yaml)
@@ -6,7 +6,7 @@
 //!
 //! # Configuration Files
 //!
-//! - **cori.yaml**: Main configuration file with upstream DB, proxy, biscuit, and feature settings
+//! - **cori.yaml**: Main configuration file with upstream DB, biscuit, MCP, and feature settings
 //! - **tenancy.yaml**: Defines how multi-tenancy is structured (tenant columns per table)
 //! - **roles/*.yaml**: Individual role definitions with table permissions and constraints
 
@@ -27,7 +27,7 @@ pub use audit::AuditConfig;
 pub use biscuit::BiscuitConfig;
 pub use dashboard::DashboardConfig;
 pub use mcp::{McpConfig, Transport};
-pub use proxy::{ProxyConfig, UpstreamConfig};
+pub use proxy::UpstreamConfig;
 pub use role::{
     ColumnConstraints, CustomAction, CustomActionInput, EditableColumns, Operation,
     ReadableColumns, RoleConfig, TablePermissions,
@@ -47,10 +47,6 @@ pub struct CoriConfig {
 
     /// Upstream Postgres connection.
     pub upstream: UpstreamConfig,
-
-    /// Proxy settings.
-    #[serde(default)]
-    pub proxy: ProxyConfig,
 
     /// Biscuit token configuration.
     #[serde(default)]
@@ -107,7 +103,6 @@ impl Default for CoriConfig {
             project: None,
             version: None,
             upstream: UpstreamConfig::default(),
-            proxy: ProxyConfig::default(),
             biscuit: BiscuitConfig::default(),
             tenancy: TenancyConfig::default(),
             tenancy_file: None,

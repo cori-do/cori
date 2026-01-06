@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-// Proxy commands module
+// MCP commands module
 mod commands;
 
 #[derive(Parser, Debug)]
@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Initialize a Cori AI Database Proxy project from an existing database.
+    /// Initialize a Cori MCP server project from an existing database.
     ///
     /// This command introspects your database schema and creates a complete
     /// project structure with:
@@ -116,7 +116,7 @@ enum Command {
         database_url: String,
     },
 
-    // ===== Phase 1: Core Proxy Commands =====
+    // ===== Phase 1: Core Commands =====
 
     /// Generate Biscuit keypair for token signing.
     Keys {
@@ -130,24 +130,18 @@ enum Command {
         cmd: TokenCommand,
     },
 
-    /// Start the Cori Postgres proxy server.
+    /// Start the Cori MCP server and dashboard.
     Serve {
         /// Path to configuration file (YAML or TOML).
         #[arg(long, short, default_value = "cori.yaml")]
         config: PathBuf,
     },
 
-    /// Proxy utilities (test, explain).
-    Proxy {
-        #[command(subcommand)]
-        cmd: ProxyCommand,
-    },
-
     /// MCP server for AI agent integration.
     Mcp(commands::mcp::McpCommand),
 }
 
-// ===== Phase 1: Core Proxy Command Definitions =====
+// ===== Phase 1: Core Command Definitions =====
 
 #[derive(Subcommand, Debug)]
 enum KeysCommand {
@@ -225,24 +219,6 @@ enum TokenCommand {
 
         /// Token string or path to token file.
         token: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ProxyCommand {
-    /// Explain what RLS predicates would be injected for a query.
-    Explain {
-        /// The SQL query to explain.
-        #[arg(long)]
-        query: String,
-
-        /// Tenant ID to use for RLS injection.
-        #[arg(long)]
-        tenant: String,
-
-        /// Tenant column name (default: tenant_id).
-        #[arg(long, default_value = "tenant_id")]
-        tenant_column: String,
     },
 }
 
@@ -419,7 +395,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
-        // ===== Phase 1: Core Proxy Command Handlers =====
+        // ===== Phase 1: Core Command Handlers =====
 
         Command::Keys { cmd } => match cmd {
             KeysCommand::Generate { output } => {
@@ -459,47 +435,10 @@ async fn main() -> anyhow::Result<()> {
             commands::serve::serve(config).await?;
         }
 
-        Command::Proxy { cmd } => match cmd {
-            ProxyCommand::Explain {
-                query,
-                tenant,
-                tenant_column,
-            } => {
-                run_proxy_explain(&query, &tenant, &tenant_column)?;
-            }
-        },
-
         Command::Mcp(cmd) => {
             commands::mcp::execute(cmd).await?;
         }
     }
-
-    Ok(())
-}
-
-/// Explain RLS injection for a query.
-fn run_proxy_explain(query: &str, tenant: &str, tenant_column: &str) -> anyhow::Result<()> {
-    use cori_core::config::TenancyConfig;
-    use cori_rls::RlsInjector;
-    use std::collections::HashMap;
-
-    let tables = HashMap::new();
-    // Use default tenant column for all tables
-    let config = TenancyConfig {
-        default_column: tenant_column.to_string(),
-        tables,
-        ..Default::default()
-    };
-
-    let injector = RlsInjector::new(config);
-    let explanation = injector.explain(query, tenant)?;
-
-    println!("RLS Injection Explanation:");
-    println!("  Original: {}", explanation.original_sql);
-    println!("  Rewritten: {}", explanation.rewritten_sql);
-    println!("  Tenant: {}", explanation.tenant_id);
-    println!("  Tables scoped: {:?}", explanation.tables_scoped);
-    println!("  Predicates added: {:?}", explanation.predicates_added);
 
     Ok(())
 }
@@ -2005,7 +1944,7 @@ fn read_json(path: &Path) -> anyhow::Result<serde_json::Value> {
 }
 
 async fn build_policy_client(_cfg: &CoriConfig) -> anyhow::Result<Arc<dyn PolicyClient>> {
-    // Biscuit-native policy model: policy enforcement happens at the proxy/RLS layer
+    // Biscuit-native policy model: policy enforcement happens at the MCP layer
     // based on Biscuit token claims and role YAML configuration.
     // This policy client exists for audit logging and backwards compatibility.
     Ok(Arc::new(cori_policy::BiscuitPolicyClient::new()))

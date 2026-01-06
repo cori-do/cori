@@ -26,8 +26,6 @@ cori-runtime = { path = "../cori-runtime" }
 cori-adapter-pg = { path = "../cori-adapter-pg" }
 
 cori-biscuit = { path = "../cori-biscuit" }
-cori-rls = { path = "../cori-rls" }
-cori-proxy = { path = "../cori-proxy" }
 cori-audit = { path = "../cori-audit" }
 
 cori-mcp = { path = "../cori-mcp" }

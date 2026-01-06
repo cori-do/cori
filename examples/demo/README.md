@@ -1,18 +1,17 @@
 # Cori Demo
 
-This demo showcases all core Cori AI Database Proxy capabilities with a multi-tenant CRM database.
+This demo showcases Cori MCP server capabilities with a multi-tenant CRM database.
 
 ## Features Demonstrated
 
 | Feature | Description |
 |---------|-------------|
-| **Postgres Wire Protocol** | 100% compatible - use psql, pgAdmin, any Postgres client |
 | **Biscuit Token Auth** | Cryptographic tokens with role + tenant claims |
-| **RLS Injection** | Automatic tenant predicate injection on all queries |
+| **Dynamic MCP Tools** | Auto-generated database tools for AI agents |
 | **Tenant Isolation** | Cryptographically enforced data separation |
-| **Virtual Schema** | Hide sensitive tables from AI agents |
 | **Role-Based Access** | Fine-grained table/column permissions |
-| **MCP Server** | Expose database as typed tools for AI agents |
+| **Human-in-the-Loop** | Approval workflow for sensitive operations |
+| **Admin Dashboard** | Web UI for token minting and management |
 
 ## Quick Start
 
@@ -40,7 +39,7 @@ docker compose up -d
 This will:
 - Generate Biscuit keys
 - Mint tokens for different roles and tenants
-- Start the Cori proxy
+- Start the MCP server and dashboard
 - Test all features
 
 ## Demo Database
@@ -58,27 +57,6 @@ Each organization has completely isolated:
 - Opportunities, Tickets, Tasks
 - Products, Communications, Notes
 
-**Sensitive tables** (hidden from AI agents):
-- `users` - Employee accounts with password hashes
-- `api_keys` - Integration secrets
-- `billing` - Payment information
-- `audit_logs` - System audit trail
-
-## Connecting to Cori
-
-Once the proxy is running:
-
-```bash
-# Read the token
-TOKEN=$(cat tokens/acme_support.token)
-
-# Connect via psql
-PGPASSWORD="$TOKEN" psql -h localhost -p 5433 -U agent -d cori_demo
-
-# Or use connection string
-psql "postgresql://agent:$TOKEN@localhost:5433/cori_demo"
-```
-
 ## Token Hierarchy
 
 ```
@@ -89,19 +67,20 @@ Role Token (long-lived, no tenant)
     └── Attenuate → Initech Agent Token (org_id=3, 24h)
 ```
 
-## How RLS Works
+## How MCP Works
 
-When an agent sends:
-```sql
-SELECT * FROM customers WHERE status = 'active'
-```
+When an AI agent connects with a Biscuit token:
 
-Cori rewrites it to:
-```sql
-SELECT * FROM customers WHERE status = 'active' AND organization_id = 1
-```
+1. **Token Verified** - Signature, expiration, tenant claims checked
+2. **Tools Generated** - Based on role permissions and database schema
+3. **Actions Filtered** - Agent only sees tools for accessible tables/columns
+4. **Tenant Enforced** - All queries automatically scoped to token's tenant
 
-The tenant predicate is injected based on the Biscuit token's claims.
+Example tools generated for `support_agent` role:
+- `getCustomer(id)` - Fetch single customer
+- `listCustomers(filters, limit)` - Query customers
+- `getTicket(id)` - Fetch ticket
+- `updateTicket(id, status)` - Update ticket status
 
 ## Available Roles
 
@@ -117,7 +96,6 @@ The tenant predicate is injected based on the Biscuit token's claims.
 ```
 demo/
 ├── docker-compose.yml    # Database container
-├── cori.yaml             # Full configuration
 ├── cori.yaml             # Main configuration
 ├── tenancy.yaml          # Tenant column mapping
 ├── test.sh               # Comprehensive test script
@@ -143,11 +121,11 @@ demo/
 # Just setup (database + keys + tokens)
 ./test.sh setup
 
-# Test proxy features only
-./test.sh proxy
-
 # Test MCP server
 ./test.sh mcp
+
+# Test dashboard
+./test.sh dashboard
 
 # Cleanup
 ./test.sh cleanup
@@ -174,28 +152,31 @@ cori token attenuate --key keys/private.key \
     --output tokens/acme_support.token
 ```
 
-### Start Proxy
+### Start Server
 ```bash
 cori serve --config cori.yaml
+# Starts MCP server on :8989 and Dashboard on :8080
 ```
 
-### Test Queries
+### MCP Server (stdio mode)
 ```bash
-TOKEN=$(cat tokens/acme_support.token)
-
-# This returns only Acme customers
-PGPASSWORD="$TOKEN" psql -h localhost -p 5433 -U agent -d cori_demo \
-    -c "SELECT first_name, company FROM customers LIMIT 5;"
-
-# This returns 0 rows (cross-tenant blocked)
-PGPASSWORD="$TOKEN" psql -h localhost -p 5433 -U agent -d cori_demo \
-    -c "SELECT * FROM customers WHERE organization_id = 2;"
-```
-
-### MCP Server
-```bash
-# Start MCP server for AI agent integration
+# Start MCP server for AI agent integration (Claude Desktop, etc.)
 cori mcp serve --config cori.yaml --token tokens/acme_support.token
+```
+
+### Claude Desktop Configuration
+
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "cori": {
+      "command": "cori",
+      "args": ["mcp", "serve", "--config", "/path/to/cori.yaml"],
+      "env": { "CORI_TOKEN": "<base64 token>" }
+    }
+  }
+}
 ```
 
 ## Ports
@@ -203,8 +184,8 @@ cori mcp serve --config cori.yaml --token tokens/acme_support.token
 | Service | Port | Description |
 |---------|------|-------------|
 | Postgres (direct) | 5432 | Raw database access |
-| Cori Proxy | 5433 | Protected access with RLS |
-| Dashboard | 8080 | Admin UI (when enabled) |
+| MCP Server (HTTP) | 8989 | MCP protocol endpoint |
+| Dashboard | 8080 | Admin UI |
 
 ## Troubleshooting
 

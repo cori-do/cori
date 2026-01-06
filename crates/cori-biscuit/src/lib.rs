@@ -1,6 +1,6 @@
 //! # cori-biscuit
 //!
-//! Biscuit token handling for Cori AI Database Proxy.
+//! Biscuit token handling for Cori MCP Server.
 //!
 //! This crate provides functionality for:
 //! - Generating Ed25519 keypairs for token signing

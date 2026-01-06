@@ -552,10 +552,6 @@ pub mod api {
                 ssl_mode: None, // Not in current config
                 connected: true, // Would need actual check
             },
-            proxy: ProxySettingsResponse {
-                listen_port: config.proxy.listen_port,
-                max_connections: config.proxy.max_connections,
-            },
             mcp: McpSettingsResponse {
                 enabled: config.mcp.enabled,
                 transport: format!("{:?}", config.mcp.transport),
@@ -585,23 +581,6 @@ pub mod api {
                 global_table_count: config.tenancy.global_tables.len(),
             },
         })
-    }
-
-    pub async fn settings_update_proxy(
-        State(state): State<AppState>,
-        Form(form): Form<ProxySettingsUpdate>,
-    ) -> Html<String> {
-        {
-            let mut config = state.config_mut();
-            if let Some(port) = form.listen_port {
-                config.proxy.listen_port = port;
-            }
-            if let Some(max) = form.max_connections {
-                config.proxy.max_connections = max;
-            }
-        }
-        
-        Html(r#"<script>showToast('Proxy settings saved');</script>"#.to_string())
     }
 
     pub async fn settings_update_guardrails(

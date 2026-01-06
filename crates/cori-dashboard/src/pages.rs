@@ -15,12 +15,12 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
             {roles_stat}
             {tables_stat}
             {approvals_stat}
-            {proxy_stat}
+            {mcp_stat}
         </div>"##,
         roles_stat = stats_card("Roles", &role_count.to_string(), "user-shield", "blue"),
         tables_stat = stats_card("Tables", &config.tenancy.tables.len().to_string(), "database", "green"),
         approvals_stat = stats_card("Pending Approvals", &pending_approvals.to_string(), "clock", "yellow"),
-        proxy_stat = stats_card("Proxy Port", &config.proxy.listen_port.to_string(), "server", "purple"),
+        mcp_stat = stats_card("MCP Port", &config.mcp.http_port.to_string(), "server", "purple"),
     );
 
     let quick_actions = card("Quick Actions", &format!(
@@ -67,8 +67,8 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
     let connection_info = card("Connection Info", &format!(
         r##"<div class="space-y-4">
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                <span class="text-gray-600 dark:text-gray-400">Proxy</span>
-                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">localhost:{proxy_port}</code>
+                <span class="text-gray-600 dark:text-gray-400">MCP HTTP</span>
+                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">localhost:{mcp_port}</code>
             </div>
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">Dashboard</span>
@@ -83,7 +83,7 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                 <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">{upstream_host}:{upstream_port}</code>
             </div>
         </div>"##,
-        proxy_port = config.proxy.listen_port,
+        mcp_port = config.mcp.http_port,
         dashboard_port = config.dashboard.listen_port,
         mcp_transport = format!("{:?}", config.mcp.transport).to_lowercase(),
         upstream_host = config.upstream.host,
@@ -94,7 +94,7 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
         r##"<div class="mb-8">
             <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Welcome to Cori</h1>
             <p class="mt-2 text-gray-600 dark:text-gray-400">
-                The AI Database Proxy that enables safe, tenant-isolated database access for AI agents.
+                The MCP server that enables safe, tenant-isolated database access for AI agents.
             </p>
         </div>
         

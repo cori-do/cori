@@ -21,7 +21,7 @@
 You want AI agents to work with your database. But:
 
 - **Multi-tenant data** → Agent for Client A must never see Client B's data
-- **Dynamic SQL generation** → LLMs write queries you can't predict
+- **Dynamic operations** → LLMs request actions you can't predict
 - **Compliance & audit** → You need to know exactly what happened
 - **Zero trust** → Traditional app-level security doesn't cut it
 
@@ -31,18 +31,18 @@ You want AI agents to work with your database. But:
 
 ## 💡 The Solution
 
-Cori is a **Postgres-compatible proxy** that sits between AI agents and your database.
+Cori is an **MCP server** that sits between AI agents and your database.
 
 ```
-AI Agent → Cori Proxy → Your Postgres
-              ↓
-         ✓ Verify token
-         ✓ Parse SQL
-         ✓ Inject tenant isolation
-         ✓ Audit everything
+AI Agent → MCP → Cori → Your Postgres
+                  ↓
+             ✓ Verify token
+             ✓ Check permissions
+             ✓ Inject tenant isolation
+             ✓ Audit everything
 ```
 
-**Agents connect to Cori like it's Postgres. Cori protects your data.**
+**Agents discover typed tools via MCP. Cori protects your data.**
 
 ---
 
@@ -51,10 +51,10 @@ AI Agent → Cori Proxy → Your Postgres
 | Feature | Description |
 |---------|-------------|
 | **🔐 Biscuit Token Auth** | Cryptographic tokens with tenant + role claims. No forgery possible. |
-| **🏢 Automatic Tenant Isolation** | Every query is rewritten to scope data to the token's tenant. |
+| **🏢 Automatic Tenant Isolation** | Every operation is scoped to the token's tenant. |
 | **📋 Role-Based Access** | Define which tables, columns, and operations each role can access. |
 | **🤖 MCP Server Built-In** | AI agents discover typed tools, not raw SQL. |
-| **👁️ Full Audit Trail** | Every query logged with who, what, when, and outcome. |
+| **👁️ Full Audit Trail** | Every action logged with who, what, when, and outcome. |
 | **🔍 Virtual Schema** | Agents only see tables/columns they're allowed to access. |
 | **✅ Human-in-the-Loop** | Flag sensitive operations for approval before execution. |
 
@@ -86,7 +86,7 @@ This introspects your database and generates:
 ```sh
 cd myproject
 cori serve --config cori.yaml
-# Proxy on :5433, Dashboard on :8080
+# MCP HTTP server on :8989, Dashboard on :8080
 ```
 
 ### 3. Mint a Token
@@ -103,25 +103,23 @@ cori token attenuate \
     --output agent.token
 ```
 
-### 4. Connect Your Agent
+### 4. Connect Your Agent (Claude Desktop)
 
-```python
-# Python example — connect like normal Postgres
-import psycopg2
+Add to `claude_desktop_config.json`:
 
-conn = psycopg2.connect(
-    host="localhost",
-    port=5433,  # Cori proxy
-    user="agent",
-    password=open("agent.token").read(),  # Biscuit token
-    database="myapp"
-)
-
-# This query is automatically scoped to acme_corp's data
-cursor.execute("SELECT * FROM orders WHERE status = 'pending'")
+```json
+{
+  "mcpServers": {
+    "cori": {
+      "command": "cori",
+      "args": ["mcp", "serve", "--config", "/path/to/cori.yaml"],
+      "env": { "CORI_TOKEN": "<base64 agent.token>" }
+    }
+  }
+}
 ```
 
-**That's it.** The agent can only see `acme_corp`'s orders. Always.
+**That's it.** The agent gets typed tools like `listCustomers`, `getOrder`, `updateTicketStatus` — all automatically scoped to `acme_corp`'s data.
 
 ---
 
@@ -172,16 +170,19 @@ blocked_tables: [users, billing, api_keys]
 max_rows_per_query: 100
 ```
 
-### Automatic SQL Rewriting
+### Automatic Tool Generation
 
-Cori transforms every query:
+Cori generates MCP tools from your schema and role permissions:
 
-```sql
--- What the agent sends:
-SELECT * FROM orders WHERE status = 'pending'
+```
+Agent Request:
+  tool: listOrders
+  arguments: { status: "pending" }
 
--- What Postgres receives:
-SELECT * FROM orders WHERE status = 'pending' AND customer_org_id = 'acme_corp'
+Cori Executes:
+  SELECT * FROM orders 
+  WHERE status = 'pending' 
+  AND customer_org_id = 'acme_corp'  -- injected from token
 ```
 
 No code changes. No ORM plugins. Just security.
@@ -192,16 +193,30 @@ No code changes. No ORM plugins. Just security.
 
 Cori exposes your database as **typed MCP tools** for AI agents:
 
+**Via stdio (Claude Desktop, etc.):**
 ```json
 {
   "mcpServers": {
     "cori": {
       "command": "cori",
-      "args": ["mcp", "--config", "cori.yaml"],
+      "args": ["mcp", "serve", "--config", "cori.yaml"],
       "env": { "CORI_TOKEN": "<base64 agent.token>" }
     }
   }
 }
+```
+
+**Via HTTP (custom agents):**
+```sh
+# Start HTTP server
+cori serve --config cori.yaml
+# MCP endpoint at http://localhost:8989
+
+# Call tools via HTTP
+curl -X POST http://localhost:8989/tools/listCustomers \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"filters": {"status": "active"}}'
 ```
 
 Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — automatically generated from your schema and role permissions.
@@ -215,11 +230,11 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         cori binary                             │
-├─────────────────┬─────────────────┬─────────────────────────────┤
-│  Postgres Proxy │    MCP Server   │      Admin Dashboard        │
-│  (port 5433)    │  (stdio/http)   │      (port 8080)            │
-├─────────────────┴─────────────────┴─────────────────────────────┤
-│  SQL Parser → RLS Injector → Biscuit Verifier → Audit Logger   │
+├─────────────────────────────────────┬───────────────────────────┤
+│         MCP Server                  │      Admin Dashboard      │
+│  (stdio or http on :8989)           │      (http on :8080)      │
+├─────────────────────────────────────┴───────────────────────────┤
+│  Tool Generator → Permission Check → Tenant Inject → Audit     │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Upstream Postgres                             │
 └─────────────────────────────────────────────────────────────────┘
@@ -235,7 +250,7 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 |-------------|---------|
 | **Native Postgres RLS** | Requires session variables; no standard token format; no MCP |
 | **OPA / Cerbos / Cedar** | Extra service to deploy; latency; policy sprawl |
-| **API Gateway** | Doesn't understand SQL; can't inject row-level predicates |
+| **API Gateway** | Doesn't understand database operations; can't inject row-level predicates |
 | **LangChain SQL Agent** | Generates raw SQL; no tenant isolation |
 
 **Cori is purpose-built for the AI-agent-to-database use case.**
@@ -244,13 +259,13 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 
 ## 📊 Current Status
 
-> **Alpha Release** — Core proxy and token system work. Building toward production hardening.
+> **Alpha Release** — Core MCP server and token system work. Building toward production hardening.
 
 | Component | Status |
 |-----------|--------|
 | Biscuit token auth | ✅ Working |
-| SQL parsing & RLS injection | ✅ Working |
-| MCP server | ✅ Working |
+| MCP tool generation | ✅ Working |
+| Tenant isolation | ✅ Working |
 | Admin dashboard | 🚧 In progress |
 | Connection pooling | 📋 Planned |
 | Production hardening | 📋 Planned |

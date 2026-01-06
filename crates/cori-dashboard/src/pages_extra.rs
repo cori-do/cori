@@ -602,7 +602,7 @@ pub fn settings_page(config: &CoriConfig) -> String {
         r##"<div class="mb-6">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Settings</h1>
             <p class="text-gray-600 dark:text-gray-400">
-                Configure Cori proxy, security, and operational settings
+                Configure Cori MCP server, security, and operational settings
             </p>
         </div>
         
@@ -645,17 +645,6 @@ fn connection_settings(config: &CoriConfig) -> String {
             </div>
             
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
-                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Proxy Settings</h3>
-                <form hx-put="/api/settings/proxy" hx-swap="none" class="space-y-4">
-                    {listen_port_input}
-                    {max_connections_input}
-                    <button type="submit" class="w-full py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg font-medium">
-                        Save Proxy Settings
-                    </button>
-                </form>
-            </div>
-            
-            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
                 <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">MCP Server</h3>
                 <div class="space-y-4">
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
@@ -666,7 +655,10 @@ fn connection_settings(config: &CoriConfig) -> String {
                         <span class="text-gray-600 dark:text-gray-400">Transport</span>
                         <code class="text-sm">{mcp_transport}</code>
                     </div>
-                    {mcp_port}
+                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                        <span class="text-gray-600 dark:text-gray-400">HTTP Port</span>
+                        <code class="text-sm">{mcp_http_port}</code>
+                    </div>
                 </div>
             </div>
             
@@ -688,16 +680,9 @@ fn connection_settings(config: &CoriConfig) -> String {
         port = config.upstream.port,
         database = config.upstream.database,
         ssl_mode = "default",
-        listen_port_input = input("listen_port", "Listen Port", "number", &config.proxy.listen_port.to_string(), "5433"),
-        max_connections_input = input("max_connections", "Max Connections", "number", &config.proxy.max_connections.to_string(), "100"),
         mcp_enabled = if config.mcp.enabled { "Yes" } else { "No" },
         mcp_transport = format!("{:?}", config.mcp.transport),
-        mcp_port = format!(
-            r#"<div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                <span class="text-gray-600 dark:text-gray-400">HTTP Port</span>
-                <code class="text-sm">{}</code>
-            </div>"#, config.mcp.http_port
-        ),
+        mcp_http_port = config.mcp.http_port,
         dashboard_port = config.dashboard.listen_port,
         auth_type = config.dashboard.auth.auth_type,
     )

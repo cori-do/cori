@@ -3,7 +3,7 @@ name = "cori-audit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Audit logging for Cori AI Database Proxy"
+description = "Audit logging for Cori MCP Server"
 
 [dependencies]
 # Core async runtime

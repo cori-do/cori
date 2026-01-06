@@ -15,14 +15,8 @@ members = [
   # Biscuit token handling
   "crates/cori-biscuit",
   
-  # SQL parsing and RLS injection
-  "crates/cori-rls",
-  
   # Audit logging
   "crates/cori-audit",
-  
-  # Postgres wire protocol proxy
-  "crates/cori-proxy",
   
   # MCP server implementation
   "crates/cori-mcp",
@@ -68,17 +62,10 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chro
 uuid = { version = "1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# SQL parsing
-sqlparser = "0.60"
-
 # Biscuit tokens
 biscuit-auth = "6"
 base64 = "0.22"
 rand = "0.9"
-
-# Postgres wire protocol
-pgwire = "0.37"
-futures = "0.3"
 
 # Static assets embedding
 rust-embed = "8"

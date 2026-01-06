@@ -24,7 +24,8 @@
 //! │  2. Generate    │  ← role_config + schema
 //! │     tools       │
 //! │  3. Map to SQL  │
-//! │  4. Inject RLS  │  ← cori-rls
+//! │  4. Enforce     │  ← tenant filtering
+//! │     tenant      │
 //! │  5. Dry-run or  │
 //! │     execute     │
 //! │  6. Return JSON │

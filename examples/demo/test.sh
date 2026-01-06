@@ -2,20 +2,16 @@
 # =============================================================================
 # Cori Demo Test Script
 # =============================================================================
-# This script tests ALL Cori features:
+# This script tests Cori MCP server features:
 #
 #   1. Key Generation & Token Management
 #   2. Schema Introspection & Snapshot
-#   3. Postgres Proxy with RLS Injection
-#   4. Tenant Isolation Verification
-#   5. Role-Based Access Control
-#   6. Virtual Schema Filtering
-#   7. MCP Server Integration
+#   3. MCP Server Integration
+#   4. Admin Dashboard
 #
 # Usage:
 #   ./test.sh              # Run all tests
 #   ./test.sh setup        # Just setup (database + keys + tokens)
-#   ./test.sh proxy        # Test proxy features
 #   ./test.sh mcp          # Test MCP server
 #   ./test.sh cleanup      # Stop services and cleanup
 #
@@ -46,8 +42,8 @@ CONFIG_FILE="${SCRIPT_DIR}/cori.yaml"
 CORI_PID_FILE="${SCRIPT_DIR}/.cori.pid"
 CORI_LOG_FILE="${SCRIPT_DIR}/.cori.log"
 
-CORI_PROXY_HOST="localhost"
-CORI_PROXY_PORT="5433"
+MCP_PORT="8989"
+DASHBOARD_PORT="8080"
 
 # Test counters
 PASSED=0
@@ -123,28 +119,6 @@ run_sql_direct() {
     
     PGPASSWORD=postgres psql -h localhost -U postgres -d cori_demo -c "$query" 2>/dev/null || {
         print_error "Query failed"
-        return 1
-    }
-}
-
-run_sql_proxy() {
-    local description="$1"
-    local query="$2"
-    local token_file="$3"
-    
-    local token
-    token=$(cat "$token_file" 2>/dev/null) || {
-        print_error "Cannot read token: $token_file"
-        return 1
-    }
-    
-    echo ""
-    echo -e "${BOLD}$description${NC}"
-    print_cmd "psql postgresql://agent:***@${CORI_PROXY_HOST}:${CORI_PROXY_PORT}/cori_demo -c \"$query\""
-    echo ""
-    
-    PGPASSWORD="$token" psql -h "$CORI_PROXY_HOST" -p "$CORI_PROXY_PORT" -U agent -d cori_demo -c "$query" 2>&1 || {
-        print_error "Query through Cori failed"
         return 1
     }
 }
@@ -307,11 +281,11 @@ test_schema_commands() {
 }
 
 # =============================================================================
-# Test: Proxy Server
+# Test: Cori Server (MCP + Dashboard)
 # =============================================================================
 
-start_proxy() {
-    print_header "Starting Cori Proxy"
+start_server() {
+    print_header "Starting Cori Server"
     
     # Stop existing
     if [[ -f "$CORI_PID_FILE" ]]; then
@@ -324,7 +298,7 @@ start_proxy() {
         rm -f "$CORI_PID_FILE"
     fi
     
-    print_section "Starting Proxy Server"
+    print_section "Starting MCP Server and Dashboard"
     print_cmd "cori serve --config $CONFIG_FILE"
     
     cd "$SCRIPT_DIR"
@@ -334,12 +308,23 @@ start_proxy() {
     
     print_info "Cori starting (PID: $cori_pid)"
     
-    # Wait for ready
+    # Wait for MCP server to be ready
     local max_attempts=30
     local attempt=0
     while [[ $attempt -lt $max_attempts ]]; do
-        if nc -z "$CORI_PROXY_HOST" "$CORI_PROXY_PORT" 2>/dev/null; then
-            print_success "Cori proxy ready on port $CORI_PROXY_PORT"
+        if nc -z localhost "$MCP_PORT" 2>/dev/null; then
+            print_success "MCP server ready on port $MCP_PORT"
+            break
+        fi
+        sleep 0.5
+        ((attempt++))
+    done
+    
+    # Wait for Dashboard to be ready
+    attempt=0
+    while [[ $attempt -lt $max_attempts ]]; do
+        if nc -z localhost "$DASHBOARD_PORT" 2>/dev/null; then
+            print_success "Dashboard ready on port $DASHBOARD_PORT"
             return 0
         fi
         sleep 0.5
@@ -351,7 +336,7 @@ start_proxy() {
     return 1
 }
 
-stop_proxy() {
+stop_server() {
     if [[ -f "$CORI_PID_FILE" ]]; then
         local pid=$(cat "$CORI_PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
@@ -362,73 +347,6 @@ stop_proxy() {
     fi
 }
 
-test_proxy_connectivity() {
-    print_header "Testing Proxy Connectivity"
-    
-    print_section "Basic Connectivity"
-    run_sql_proxy "Connect through Cori proxy" \
-        "SELECT 1 as proxy_works;" \
-        "$TOKENS_DIR/acme_support.token"
-    
-    print_success "Proxy connectivity OK"
-}
-
-# =============================================================================
-# Test: RLS Injection
-# =============================================================================
-
-test_rls_injection() {
-    print_header "Testing RLS Injection"
-    
-    print_section "Direct vs Proxy Comparison"
-    
-    run_sql_direct "Direct query (all tenants visible):" \
-        "SELECT organization_id, COUNT(*) as customers FROM customers GROUP BY organization_id ORDER BY organization_id;"
-    
-    run_sql_proxy "Proxy query (tenant-filtered):" \
-        "SELECT organization_id, COUNT(*) as customers FROM customers GROUP BY organization_id;" \
-        "$TOKENS_DIR/acme_support.token"
-    
-    print_section "RLS Explain"
-    
-    print_info "Showing query rewrite:"
-    print_cmd "cori proxy explain --query 'SELECT * FROM customers WHERE status = active' --tenant 1 --tenant-column organization_id"
-    cori proxy explain --query "SELECT * FROM customers WHERE status = 'active'" --tenant 1 --tenant-column organization_id 2>/dev/null || true
-    
-    print_success "RLS injection working"
-}
-
-# =============================================================================
-# Test: Tenant Isolation
-# =============================================================================
-
-test_tenant_isolation() {
-    print_header "Testing Tenant Isolation"
-    
-    print_section "Cross-Tenant Access Prevention"
-    
-    print_info "Acme agent trying to access Globex data (org_id=2):"
-    print_info "Query: SELECT * FROM customers WHERE organization_id = 2"
-    print_info "After RLS: ... AND organization_id = 1 (conflicts!)"
-    echo ""
-    
-    run_sql_proxy "Acme token querying for org_id=2 (should return 0 rows):" \
-        "SELECT COUNT(*) as found_rows FROM customers WHERE organization_id = 2;" \
-        "$TOKENS_DIR/acme_support.token"
-    
-    print_section "Verify Each Tenant's View"
-    
-    run_sql_proxy "Acme agent sees Acme customers:" \
-        "SELECT customer_id, first_name, company FROM customers LIMIT 5;" \
-        "$TOKENS_DIR/acme_support.token"
-    
-    run_sql_proxy "Globex agent sees Globex customers:" \
-        "SELECT customer_id, first_name, company FROM customers LIMIT 5;" \
-        "$TOKENS_DIR/globex_support.token"
-    
-    print_success "Tenant isolation verified"
-}
-
 # =============================================================================
 # Test: MCP Server
 # =============================================================================
@@ -436,7 +354,16 @@ test_tenant_isolation() {
 test_mcp_server() {
     print_header "Testing MCP Server"
     
-    print_section "MCP Tool Discovery"
+    print_section "MCP Server Connectivity"
+    
+    # Test MCP endpoint is responding
+    if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$MCP_PORT/" | grep -q "200\|404"; then
+        print_success "MCP server is responding"
+    else
+        print_error "MCP server not responding"
+    fi
+    
+    print_section "MCP Tool Discovery (stdio mode)"
     
     print_info "Testing MCP server startup with token..."
     print_cmd "timeout 3 cori mcp serve --config $CONFIG_FILE --token $TOKENS_DIR/acme_support.token"
@@ -463,22 +390,30 @@ test_mcp_server() {
 }
 
 # =============================================================================
-# Test: Virtual Schema
+# Test: Dashboard
 # =============================================================================
 
-test_virtual_schema() {
-    print_header "Testing Virtual Schema"
+test_dashboard() {
+    print_header "Testing Admin Dashboard"
     
-    print_section "Schema Filtering"
+    print_section "Dashboard Connectivity"
     
-    print_info "Sensitive tables (users, api_keys, billing) should be hidden"
+    # Test dashboard is responding
+    local status_code
+    status_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$DASHBOARD_PORT/")
+    if [[ "$status_code" == "200" ]]; then
+        print_success "Dashboard is responding (HTTP $status_code)"
+    else
+        print_error "Dashboard not responding (HTTP $status_code)"
+    fi
     
-    run_sql_proxy "Query information_schema through proxy:" \
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name LIMIT 20;" \
-        "$TOKENS_DIR/acme_support.token"
-    
-    print_info "Note: Sensitive tables should not appear in the list above"
-    print_success "Virtual schema filtering active"
+    # Test dashboard API
+    status_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$DASHBOARD_PORT/api/health")
+    if [[ "$status_code" == "200" ]]; then
+        print_success "Dashboard health endpoint OK"
+    else
+        print_info "Dashboard health endpoint returned HTTP $status_code"
+    fi
 }
 
 # =============================================================================
@@ -501,11 +436,8 @@ print_summary() {
         echo "  ✓ Biscuit key generation and token minting"
         echo "  ✓ Token attenuation for tenant isolation"
         echo "  ✓ Schema introspection and snapshot"
-        echo "  ✓ Postgres wire protocol proxy"
-        echo "  ✓ RLS injection for tenant isolation"
-        echo "  ✓ Cross-tenant access prevention"
         echo "  ✓ MCP server integration"
-        echo "  ✓ Virtual schema filtering"
+        echo "  ✓ Admin dashboard"
         exit 0
     else
         echo -e "${RED}${BOLD}Some tests failed!${NC}"
@@ -518,7 +450,7 @@ print_summary() {
 # =============================================================================
 
 cleanup() {
-    stop_proxy
+    stop_server
     rm -f "$CORI_LOG_FILE"
 }
 
@@ -539,12 +471,9 @@ main() {
     test_key_generation
     test_token_minting
     test_schema_commands
-    start_proxy
-    test_proxy_connectivity
-    test_rls_injection
-    test_tenant_isolation
-    test_virtual_schema
+    start_server
     test_mcp_server
+    test_dashboard
     
     print_summary
 }
@@ -560,21 +489,18 @@ case "${1:-all}" in
         test_prerequisites
         test_schema_commands
         ;;
-    proxy)
-        test_prerequisites
-        test_key_generation
-        test_token_minting
-        start_proxy
-        test_proxy_connectivity
-        test_rls_injection
-        test_tenant_isolation
-        test_virtual_schema
-        ;;
     mcp)
         test_prerequisites
         test_key_generation
         test_token_minting
+        start_server
         test_mcp_server
+        ;;
+    dashboard)
+        test_prerequisites
+        test_key_generation
+        start_server
+        test_dashboard
         ;;
     cleanup)
         cleanup
@@ -584,15 +510,15 @@ case "${1:-all}" in
         main
         ;;
     *)
-        echo "Usage: $0 [setup|schema|proxy|mcp|cleanup|all]"
+        echo "Usage: $0 [setup|schema|mcp|dashboard|cleanup|all]"
         echo ""
         echo "Commands:"
-        echo "  setup    - Database check, key generation, token minting"
-        echo "  schema   - Test schema commands"
-        echo "  proxy    - Test proxy server and RLS"
-        echo "  mcp      - Test MCP server"
-        echo "  cleanup  - Stop services"
-        echo "  all      - Run all tests (default)"
+        echo "  setup     - Database check, key generation, token minting"
+        echo "  schema    - Test schema commands"
+        echo "  mcp       - Test MCP server"
+        echo "  dashboard - Test admin dashboard"
+        echo "  cleanup   - Stop services"
+        echo "  all       - Run all tests (default)"
         exit 1
         ;;
 esac

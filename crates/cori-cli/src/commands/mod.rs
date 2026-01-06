@@ -1,4 +1,4 @@
-//! CLI command implementations for Cori proxy.
+//! CLI command implementations for Cori MCP server.
 
 pub mod init;
 pub mod keys;

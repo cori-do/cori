@@ -1,6 +1,6 @@
 //! # cori-audit
 //!
-//! Audit logging for Cori AI Database Proxy.
+//! Audit logging for Cori MCP Server.
 //!
 //! This crate provides functionality for:
 //! - Logging all queries with tenant, role, timing, and outcome

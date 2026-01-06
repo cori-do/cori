@@ -47,7 +47,7 @@ pub trait PolicyClient: Send + Sync {
 /// - Runtime guards (RLS injection, row limits) are enforced at query time
 ///
 /// For now, this acts as an allow-all stub since actual enforcement happens
-/// at the proxy/RLS layer based on token claims.
+/// at the MCP layer based on token claims.
 pub struct BiscuitPolicyClient;
 
 impl BiscuitPolicyClient {
@@ -68,14 +68,14 @@ impl PolicyClient for BiscuitPolicyClient {
         // In the Biscuit-native model, authorization is enforced at multiple layers:
         // 1. Biscuit token verification (signature, expiration, tenant claim)
         // 2. Role configuration (table/column access, allowed_values)
-        // 3. Runtime guards (RLS injection, column filtering, row limits)
+        // 3. Runtime guards (tenant filtering, column filtering, row limits)
         //
         // This policy client exists for audit logging and compatibility.
-        // Actual enforcement happens in cori-proxy and cori-rls.
+        // Actual enforcement happens in cori-mcp tool execution.
         
         tracing::debug!(
             action = %input.action,
-            "Biscuit-native policy check (enforcement at proxy layer)"
+            "Biscuit-native policy check (enforcement at MCP layer)"
         );
 
         Ok(PolicyDecision {

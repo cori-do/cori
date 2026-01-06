@@ -281,7 +281,6 @@ pub struct ApprovalDecisionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsResponse {
     pub upstream: UpstreamSettingsResponse,
-    pub proxy: ProxySettingsResponse,
     pub mcp: McpSettingsResponse,
     pub dashboard: DashboardSettingsResponse,
     pub audit: AuditSettingsResponse,
@@ -298,13 +297,6 @@ pub struct UpstreamSettingsResponse {
     pub user: Option<String>,
     pub ssl_mode: Option<String>,
     pub connected: bool,
-}
-
-/// Proxy settings.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProxySettingsResponse {
-    pub listen_port: u16,
-    pub max_connections: u32,
 }
 
 /// MCP settings.
@@ -353,16 +345,8 @@ pub struct TenancySettingsResponse {
 /// Settings update request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsUpdateRequest {
-    pub proxy: Option<ProxySettingsUpdate>,
     pub guardrails: Option<GuardrailsSettingsUpdate>,
     pub audit: Option<AuditSettingsUpdate>,
-}
-
-/// Proxy settings update.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProxySettingsUpdate {
-    pub listen_port: Option<u16>,
-    pub max_connections: Option<u32>,
 }
 
 /// Guardrails settings update.

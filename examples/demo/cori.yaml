@@ -1,10 +1,9 @@
 # =============================================================================
-# Cori AI Database Proxy Configuration
+# Cori MCP Server Configuration
 # =============================================================================
 # Complete configuration for the Cori demo. This demonstrates:
 #   - Multi-tenant isolation via organization_id
 #   - Role-based access control with fine-grained permissions
-#   - Virtual schema filtering to hide sensitive tables
 #   - Biscuit token-based authentication
 #   - MCP server integration for AI agents
 # =============================================================================
@@ -23,17 +22,6 @@ upstream:
   database: cori_demo
   username: postgres
   password: postgres
-
-# =============================================================================
-# PROXY SETTINGS
-# =============================================================================
-
-proxy:
-  listen_port: 5433
-  max_connections: 100
-  connection_timeout: 30
-  tls:
-    enabled: false
 
 # =============================================================================
 # BISCUIT TOKEN CONFIGURATION
@@ -55,21 +43,6 @@ tenancy:
   default_column: organization_id
   global_tables:
     - products
-
-# =============================================================================
-# VIRTUAL SCHEMA
-# =============================================================================
-
-virtual_schema:
-  enabled: true
-  always_hidden:
-    - api_keys
-    - billing
-    - users
-    - audit_logs
-  always_visible: []
-  expose_row_counts: false
-  expose_indexes: false
 
 # =============================================================================
 # ROLES

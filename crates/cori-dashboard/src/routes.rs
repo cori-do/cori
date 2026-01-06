@@ -59,7 +59,6 @@ fn api_routes() -> Router<AppState> {
         .route("/approvals/{id}/reject", post(handlers::api::approval_reject))
         // Settings API
         .route("/settings", get(handlers::api::settings_get))
-        .route("/settings/proxy", put(handlers::api::settings_update_proxy))
         .route("/settings/guardrails", put(handlers::api::settings_update_guardrails))
         .route("/settings/audit", put(handlers::api::settings_update_audit))
 }

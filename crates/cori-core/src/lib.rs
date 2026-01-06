@@ -7,7 +7,7 @@ pub mod config;
 // Re-export commonly used config types for convenience
 pub use config::{
     AuditConfig, BiscuitConfig, ColumnConstraints, CoriConfig, CustomAction, DashboardConfig,
-    EditableColumns, GuardrailsConfig, McpConfig, Operation, ProxyConfig, ReadableColumns,
+    EditableColumns, GuardrailsConfig, McpConfig, Operation, ReadableColumns,
     RoleConfig, TablePermissions, TenancyConfig, UpstreamConfig, VirtualSchemaConfig,
 };
 

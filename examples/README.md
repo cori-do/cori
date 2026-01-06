@@ -1,6 +1,6 @@
 # Cori Examples
 
-This directory contains a comprehensive demo of all Cori AI Database Proxy features.
+This directory contains a comprehensive demo of Cori MCP server features.
 
 ## Quick Start
 
@@ -25,11 +25,11 @@ The `demo/` directory showcases Cori's complete feature set:
 | Feature | Description |
 |---------|-------------|
 | **Biscuit Token Auth** | Ed25519 key generation, token minting, attenuation |
-| **Multi-Tenant Isolation** | Row-Level Security injection on all queries |
-| **Postgres Wire Protocol** | 100% compatible proxy - use any Postgres client |
+| **Multi-Tenant Isolation** | Automatic tenant filtering on all operations |
+| **MCP Server** | Typed database tools for AI agent integration |
 | **Virtual Schema** | Hide sensitive tables from AI agents |
 | **Role-Based Access** | Fine-grained table/column permissions |
-| **MCP Server** | Typed database tools for AI agent integration |
+| **Admin Dashboard** | Web UI for token management and monitoring |
 
 ## Demo Database
 
@@ -51,15 +51,14 @@ Each organization has isolated:
 examples/
 ├── demo/                     # Main demo directory
 │   ├── docker-compose.yml    # Database container
-│   ├── cori.yaml             # Full configuration
 │   ├── cori.yaml             # Main configuration
 │   ├── tenancy.yaml          # Tenant column mapping
 │   ├── test.sh               # Comprehensive test script
 │   ├── README.md             # Detailed documentation
 │   ├── database/
 │   │   ├── schema.sql        # Multi-tenant CRM schema
-│   │   └── seed.sql          # Sample data (3 orgs)
-│   ├── roles/
+│   │   └── seed.sql          # Sample data
+│   ├── roles/                # Role definitions
 │   │   ├── support_agent.yaml
 │   │   ├── sales_agent.yaml
 │   │   ├── analytics_agent.yaml
@@ -67,7 +66,6 @@ examples/
 │   ├── keys/                 # Generated Biscuit keypair
 │   ├── tokens/               # Generated tokens
 │   └── schema/               # Schema snapshots
-└── README.md                 # This file
 ```
 
 ## Running the Demo
@@ -80,64 +78,63 @@ cd demo
 ```
 
 This tests:
-1. Prerequisites check
-2. Key generation
-3. Token minting & attenuation
-4. Schema introspection
-5. Proxy server startup
-6. RLS injection verification
-7. Tenant isolation proof
-8. Virtual schema filtering
-9. MCP server integration
+1. Key generation and token minting
+2. Token attenuation to specific tenants
+3. MCP server tool generation
+4. Dashboard health and functionality
+5. Schema introspection
 
-### Individual Tests
+### Manual Testing
 
 ```bash
-./test.sh setup    # Keys + tokens only
-./test.sh schema   # Schema commands
-./test.sh proxy    # Proxy + RLS tests
-./test.sh mcp      # MCP server test
-./test.sh cleanup  # Stop services
+# Generate keys
+cori keys generate --output keys/
+
+# Mint role token
+cori token mint --key keys/private.key --role support_agent \
+    --table "customers:customer_id,first_name,email" \
+    --output tokens/role.token
+
+# Attenuate to tenant
+cori token attenuate --key keys/private.key \
+    --base tokens/role.token \
+    --tenant 1 --expires 24h \
+    --output tokens/agent.token
+
+# Start server
+cori serve --config cori.yaml
+
+# In another terminal, test MCP
+cori mcp serve --config cori.yaml --token tokens/agent.token
 ```
 
-## How It Works
+## Claude Desktop Integration
 
-### Token-Based Authentication
+Add to `claude_desktop_config.json`:
 
-```
-Admin mints role token → Attenuates with tenant → Agent uses token
-```
-
-### RLS Injection
-
-Agent query:
-```sql
-SELECT * FROM customers WHERE status = 'active'
-```
-
-Cori rewrites to:
-```sql
-SELECT * FROM customers WHERE status = 'active' AND organization_id = 1
+```json
+{
+  "mcpServers": {
+    "cori-demo": {
+      "command": "cori",
+      "args": ["mcp", "serve", "--config", "/path/to/examples/demo/cori.yaml"],
+      "env": { "CORI_TOKEN": "<base64 agent.token>" }
+    }
+  }
+}
 ```
 
-### Cross-Tenant Prevention
+## Services
 
-If an Acme agent (org_id=1) tries to access Globex data (org_id=2):
-```sql
--- Original: SELECT * FROM customers WHERE organization_id = 2
--- After RLS: SELECT * FROM customers WHERE organization_id = 2 AND organization_id = 1
--- Result: 0 rows (predicates conflict!)
+| Service | Port | Description |
+|---------|------|-------------|
+| Postgres | 5432 | Demo database |
+| MCP HTTP | 8989 | MCP protocol endpoint |
+| Dashboard | 8080 | Admin web UI |
+
+## Cleanup
+
+```bash
+docker compose down -v
+rm -rf keys/ tokens/ schema/
 ```
-
-## Ports
-
-| Service | Port |
-|---------|------|
-| PostgreSQL (direct) | 5432 |
-| Cori Proxy | 5433 |
-| Dashboard | 8080 |
-
-## See Also
-
-- [demo/README.md](demo/README.md) - Detailed demo documentation
-- [AGENTS.md](../AGENTS.md) - Full project architecture

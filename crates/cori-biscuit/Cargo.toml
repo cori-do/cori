@@ -3,7 +3,7 @@ name = "cori-biscuit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Biscuit token handling for Cori AI Database Proxy"
+description = "Biscuit token handling for Cori MCP Server"
 
 [dependencies]
 # Error handling

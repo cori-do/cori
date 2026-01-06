@@ -3,7 +3,7 @@ name = "cori-dashboard"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Admin web dashboard for Cori AI Database Proxy"
+description = "Admin web dashboard for Cori MCP Server"
 
 [dependencies]
 # Core async runtime

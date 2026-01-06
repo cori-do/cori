@@ -1,6 +1,6 @@
 //! # cori-dashboard
 //!
-//! Admin web dashboard for Cori AI Database Proxy.
+//! Admin web dashboard for Cori MCP Server.
 //!
 //! This crate provides an embedded web UI for:
 //! - Schema browser (view introspected tables, columns, foreign keys)
