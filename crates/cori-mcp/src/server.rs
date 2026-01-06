@@ -10,6 +10,7 @@ use crate::http_transport::HttpServer;
 use crate::protocol::*;
 use cori_core::config::mcp::{McpConfig, Transport};
 use cori_core::RoleConfig;
+use cori_biscuit::PublicKey;
 use crate::schema::DatabaseSchema;
 use crate::tool_generator::ToolGenerator;
 use crate::tools::ToolRegistry;
@@ -30,6 +31,8 @@ pub struct McpServer {
     executor: Option<ToolExecutor>,
     pool: Option<PgPool>,
     tenant_column: String,
+    /// Public key for token verification (required for HTTP transport).
+    public_key: Option<PublicKey>,
 }
 
 impl McpServer {
@@ -45,6 +48,7 @@ impl McpServer {
             executor: None,
             pool: None,
             tenant_column: "organization_id".to_string(),
+            public_key: None,
         }
     }
 
@@ -125,6 +129,15 @@ impl McpServer {
     /// Set the tenant ID from the authenticated token.
     pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
         self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    /// Set the public key for token verification.
+    /// 
+    /// This is required for HTTP transport. Without a public key,
+    /// the HTTP server will reject all requests (unless auth is disabled).
+    pub fn with_public_key(mut self, public_key: PublicKey) -> Self {
+        self.public_key = Some(public_key);
         self
     }
 
@@ -215,6 +228,7 @@ impl McpServer {
     pub async fn run_http(&self) -> Result<(), McpError> {
         tracing::info!(
             port = self.config.http_port,
+            auth_enabled = self.public_key.is_some(),
             "Starting MCP server with HTTP transport"
         );
 
@@ -262,8 +276,16 @@ impl McpServer {
             }
         });
 
-        // Start HTTP server
-        let http_server = HttpServer::new(self.config.http_port, request_tx);
+        // Start HTTP server with or without authentication
+        let http_server = match &self.public_key {
+            Some(pk) => HttpServer::with_auth(self.config.http_port, request_tx, pk.clone()),
+            None => {
+                tracing::warn!(
+                    "No public key configured - MCP HTTP server running WITHOUT authentication!"
+                );
+                HttpServer::without_auth(self.config.http_port, request_tx)
+            }
+        };
         http_server.run().await
     }
 

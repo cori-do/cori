@@ -3,6 +3,7 @@
 //! `cori serve` - Start the MCP server and admin dashboard.
 
 use cori_audit::AuditLogger;
+use cori_biscuit::PublicKey;
 use cori_core::config::{
     AuditConfig, DashboardConfig, McpConfig, RoleConfig, TenancyConfig, Transport,
     UpstreamConfig,
@@ -443,8 +444,31 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         );
     }
 
-    // Resolve Biscuit public key
-    let _public_key_hex = resolve_public_key(&serve_config.biscuit)?;
+    // Resolve Biscuit public key for MCP server authentication
+    let mcp_public_key: Option<PublicKey> = match resolve_public_key(&serve_config.biscuit) {
+        Ok(hex) => {
+            match cori_biscuit::keys::load_public_key_hex(&hex) {
+                Ok(pk) => {
+                    tracing::info!("Loaded Biscuit public key for MCP authentication");
+                    Some(pk)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to parse public key - MCP HTTP server will run WITHOUT authentication"
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "No Biscuit public key configured - MCP HTTP server will run WITHOUT authentication"
+            );
+            None
+        }
+    };
 
     // Build tenancy config - load from file if specified, otherwise use inline config
     let tenancy_config = load_tenancy_config(&serve_config, &config_dir)?;
@@ -546,10 +570,12 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
             let schema = schema.clone();
             let core_roles = core_roles.clone();
             let approval_manager = approval_manager.clone();
+            let public_key = mcp_public_key.clone();
 
             let handle = tokio::spawn(async move {
                 tracing::info!(
                     port = mcp_config.http_port,
+                    auth_enabled = public_key.is_some(),
                     "Starting MCP HTTP server"
                 );
 
@@ -565,6 +591,11 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
                             .with_pool(pool)
                             .with_tenant_column(&tenant_column)
                             .with_approval_manager(approval_manager);
+
+                        // Add public key for authentication if available
+                        if let Some(pk) = public_key {
+                            server = server.with_public_key(pk);
+                        }
 
                         if let Some(s) = schema {
                             server = server.with_schema(s);
