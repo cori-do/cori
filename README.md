@@ -234,9 +234,9 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 │         MCP Server                  │      Admin Dashboard      │
 │  (stdio or http on :8989)           │      (http on :8080)      │
 ├─────────────────────────────────────┴───────────────────────────┤
-│  Tool Generator → Permission Check → Tenant Inject → Audit     │
+│  Tool Generator → Permission Check → Tenant Inject → Audit      │
 ├─────────────────────────────────────────────────────────────────┤
-│                    Upstream Postgres                             │
+│                    Upstream Postgres                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
