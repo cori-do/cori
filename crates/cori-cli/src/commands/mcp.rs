@@ -343,9 +343,9 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
 
     info!("Connected to upstream database");
 
-    // Get tenant column from tenancy file using cori-core
+    // Load tenancy configuration (per-table tenant columns) using cori-core
     let config_dir = args.config.parent().unwrap_or(std::path::Path::new("."));
-    let tenant_column = if let Some(tenancy_file) = &config_file.tenancy_file {
+    let tenancy_config = if let Some(tenancy_file) = &config_file.tenancy_file {
         match TenancyConfig::load_from_path(tenancy_file, config_dir) {
             Ok(tenancy) => {
                 info!(
@@ -353,15 +353,21 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
                     tables = tenancy.tables.len(),
                     "Loaded tenancy configuration"
                 );
-                tenancy.default_column
+                tenancy
             }
             Err(e) => {
                 warn!("Failed to load tenancy file: {}", e);
-                "organization_id".to_string()
+                TenancyConfig {
+                    default_column: "organization_id".to_string(),
+                    ..TenancyConfig::default()
+                }
             }
         }
     } else {
-        "organization_id".to_string()
+        TenancyConfig {
+            default_column: "organization_id".to_string(),
+            ..TenancyConfig::default()
+        }
     };
 
     // Load schema from snapshot file if available
@@ -399,7 +405,7 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
     // Create and run server
     let mut server = McpServer::new(mcp_config)
         .with_pool(pool)
-        .with_tenant_column(&tenant_column);
+        .with_tenancy_config(tenancy_config);
 
     // Add schema if loaded
     if let Some(s) = schema {

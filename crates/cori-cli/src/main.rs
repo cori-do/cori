@@ -274,7 +274,13 @@ enum PlanCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    // Configure tracing to write to stderr (not stdout) to avoid contaminating
+    // JSON-RPC messages when using stdio transport for MCP
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false) // Disable ANSI colors to avoid escape codes
+        .with_env_filter("info")
+        .init();
 
     let cli = Cli::parse();
 
@@ -810,13 +816,14 @@ async fn run_actions(cmd: ActionsCommand) -> anyhow::Result<()> {
                         .get("source_table")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
-                        && !tables.contains(&source_table) {
-                            return Err(anyhow::anyhow!(
-                                "Action {} references meta.source_table='{}' but it is not in schema snapshot.",
-                                a.name,
-                                source_table
-                            ));
-                        }
+                    && !tables.contains(&source_table)
+                {
+                    return Err(anyhow::anyhow!(
+                        "Action {} references meta.source_table='{}' but it is not in schema snapshot.",
+                        a.name,
+                        source_table
+                    ));
+                }
 
                 ok += 1;
             }
@@ -1652,9 +1659,10 @@ fn infer_tenant_id(plan: &serde_json::Value) -> Option<String> {
     for s in steps {
         let inputs = s.get("inputs")?;
         if let Some(t) = inputs.get("tenant_id").and_then(|v| v.as_str())
-            && !t.trim().is_empty() {
-                return Some(t.to_string());
-            }
+            && !t.trim().is_empty()
+        {
+            return Some(t.to_string());
+        }
     }
     None
 }
@@ -1998,13 +2006,14 @@ fn load_action_by_name(name: &str) -> anyhow::Result<ActionDefinition> {
         let p = entry.path();
         if p.is_file()
             && let Some(fname) = p.file_name().and_then(|s| s.to_str())
-                && fname.ends_with(".action.json") {
-                    let v = read_json(&p)?;
-                    let def: ActionDefinition = serde_json::from_value(v)?;
-                    if def.name == name {
-                        return Ok(def);
-                    }
-                }
+            && fname.ends_with(".action.json")
+        {
+            let v = read_json(&p)?;
+            let def: ActionDefinition = serde_json::from_value(v)?;
+            if def.name == name {
+                return Ok(def);
+            }
+        }
     }
 
     Err(anyhow::anyhow!(

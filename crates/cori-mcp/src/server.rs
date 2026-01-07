@@ -9,8 +9,8 @@ use crate::executor::{ExecutionContext, ExecutionResult, ToolExecutor};
 use crate::http_transport::HttpServer;
 use crate::protocol::*;
 use cori_core::config::mcp::{McpConfig, Transport};
-use cori_core::RoleConfig;
 use cori_biscuit::PublicKey;
+use cori_core::{RoleConfig, TenancyConfig};
 use crate::schema::DatabaseSchema;
 use crate::tool_generator::ToolGenerator;
 use crate::tools::ToolRegistry;
@@ -30,7 +30,7 @@ pub struct McpServer {
     tenant_id: Option<String>,
     executor: Option<ToolExecutor>,
     pool: Option<PgPool>,
-    tenant_column: String,
+    tenancy: TenancyConfig,
     /// Public key for token verification (required for HTTP transport).
     public_key: Option<PublicKey>,
 }
@@ -47,22 +47,17 @@ impl McpServer {
             tenant_id: None,
             executor: None,
             pool: None,
-            tenant_column: "organization_id".to_string(),
+            tenancy: TenancyConfig {
+                default_column: "organization_id".to_string(),
+                ..TenancyConfig::default()
+            },
             public_key: None,
         }
     }
 
     /// Set the role configuration for dynamic tool generation.
     pub fn with_role_config(mut self, role_config: RoleConfig) -> Self {
-        let mut executor = ToolExecutor::new(role_config.clone(), self.approval_manager.clone());
-        if let Some(pool) = &self.pool {
-            executor = executor.with_pool(pool.clone());
-        }
-        executor = executor.with_tenant_column(&self.tenant_column);
-        if let Some(schema) = &self.schema {
-            executor = executor.with_schema(schema.clone());
-        }
-        self.executor = Some(executor);
+        self.executor = Some(self.build_executor(&role_config));
         self.role_config = Some(role_config);
         self
     }
@@ -72,40 +67,16 @@ impl McpServer {
         self.pool = Some(pool.clone());
         // Update executor if it exists
         if let Some(role_config) = &self.role_config {
-            let mut executor = ToolExecutor::new(role_config.clone(), self.approval_manager.clone());
-            executor = executor.with_pool(pool);
-            executor = executor.with_tenant_column(&self.tenant_column);
-            if let Some(schema) = &self.schema {
-                executor = executor.with_schema(schema.clone());
-            }
-            self.executor = Some(executor);
+            self.executor = Some(self.build_executor(role_config).with_pool(pool));
         }
         self
     }
 
-    /// Set the tenant column name.
-    pub fn with_tenant_column(mut self, column: impl Into<String>) -> Self {
-        self.tenant_column = column.into();
-        // Update executor if it exists
-        if let Some(executor) = &mut self.executor {
-            *executor = std::mem::replace(
-                executor,
-                ToolExecutor::new(
-                    self.role_config.clone().unwrap_or_default(),
-                    self.approval_manager.clone(),
-                ),
-            )
-            .with_tenant_column(&self.tenant_column);
-            if let Some(pool) = &self.pool {
-                *executor = std::mem::replace(
-                    executor,
-                    ToolExecutor::new(
-                        self.role_config.clone().unwrap_or_default(),
-                        self.approval_manager.clone(),
-                    ),
-                )
-                .with_pool(pool.clone());
-            }
+    /// Set tenancy configuration (per-table tenant columns + global tables).
+    pub fn with_tenancy_config(mut self, tenancy: TenancyConfig) -> Self {
+        self.tenancy = tenancy;
+        if let Some(role_config) = &self.role_config {
+            self.executor = Some(self.build_executor(role_config));
         }
         self
     }
@@ -115,13 +86,7 @@ impl McpServer {
         self.schema = Some(schema.clone());
         // Update executor if it exists
         if let Some(role_config) = &self.role_config {
-            let mut executor = ToolExecutor::new(role_config.clone(), self.approval_manager.clone());
-            if let Some(pool) = &self.pool {
-                executor = executor.with_pool(pool.clone());
-            }
-            executor = executor.with_tenant_column(&self.tenant_column);
-            executor = executor.with_schema(schema);
-            self.executor = Some(executor);
+            self.executor = Some(self.build_executor(role_config).with_schema(schema));
         }
         self
     }
@@ -146,20 +111,21 @@ impl McpServer {
         self.approval_manager = manager;
         // Recreate executor with new approval manager
         if let Some(role_config) = &self.role_config {
-            let mut executor = ToolExecutor::new(
-                role_config.clone(),
-                self.approval_manager.clone(),
-            );
-            if let Some(pool) = &self.pool {
-                executor = executor.with_pool(pool.clone());
-            }
-            executor = executor.with_tenant_column(&self.tenant_column);
-            if let Some(schema) = &self.schema {
-                executor = executor.with_schema(schema.clone());
-            }
-            self.executor = Some(executor);
+            self.executor = Some(self.build_executor(role_config));
         }
         self
+    }
+
+    fn build_executor(&self, role_config: &RoleConfig) -> ToolExecutor {
+        let mut executor = ToolExecutor::new(role_config.clone(), self.approval_manager.clone())
+            .with_tenancy_config(self.tenancy.clone());
+        if let Some(pool) = &self.pool {
+            executor = executor.with_pool(pool.clone());
+        }
+        if let Some(schema) = &self.schema {
+            executor = executor.with_schema(schema.clone());
+        }
+        executor
     }
 
     /// Get a mutable reference to the tool registry.
@@ -214,11 +180,11 @@ impl McpServer {
             }
 
             let request: JsonRpcRequest = serde_json::from_str(&line)?;
-            let response = self.handle_request(request).await;
-            let response_json = serde_json::to_string(&response)?;
-
-            writeln!(stdout_lock, "{}", response_json)?;
-            stdout_lock.flush()?;
+            if let Some(response) = self.handle_request(request).await {
+                let response_json = serde_json::to_string(&response)?;
+                writeln!(stdout_lock, "{}", response_json)?;
+                stdout_lock.flush()?;
+            }
         }
 
         Ok(())
@@ -243,8 +209,8 @@ impl McpServer {
         let approval_manager = self.approval_manager.clone();
         let config = self.config.clone();
         let pool = self.pool.clone();
-        let tenant_column = self.tenant_column.clone();
         let schema = self.schema.clone();
+        let tenancy = self.tenancy.clone();
 
         // Spawn request handler task
         tokio::spawn(async move {
@@ -256,23 +222,16 @@ impl McpServer {
                 temp_server.tenant_id = tenant_id.clone();
                 temp_server.approval_manager = approval_manager.clone();
                 temp_server.pool = pool.clone();
-                temp_server.tenant_column = tenant_column.clone();
+                temp_server.tenancy = tenancy.clone();
                 temp_server.schema = schema.clone();
 
                 if let Some(rc) = &temp_server.role_config {
-                    let mut executor = ToolExecutor::new(rc.clone(), temp_server.approval_manager.clone());
-                    if let Some(p) = &temp_server.pool {
-                        executor = executor.with_pool(p.clone());
-                    }
-                    executor = executor.with_tenant_column(&temp_server.tenant_column);
-                    if let Some(s) = &temp_server.schema {
-                        executor = executor.with_schema(s.clone());
-                    }
-                    temp_server.executor = Some(executor);
+                    temp_server.executor = Some(temp_server.build_executor(rc));
                 }
 
-                let response = temp_server.handle_request(request).await;
-                let _ = response_tx.send(response).await;
+                if let Some(response) = temp_server.handle_request(request).await {
+                    let _ = response_tx.send(response).await;
+                }
             }
         });
 
@@ -290,25 +249,55 @@ impl McpServer {
     }
 
     /// Handle a JSON-RPC request.
-    pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
+    pub async fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
+        // MCP clients (including Claude Desktop) send JSON-RPC notifications with no `id`,
+        // e.g. `notifications/initialized`. Notifications MUST NOT receive responses.
+        // If we respond with an error, it will contain `"id": null`, which some clients reject.
         let id = request.id.clone();
+        if id.is_none() {
+            // Best-effort: handle/ignore known notifications, ignore unknown ones.
+            match request.method.as_str() {
+                "initialized" | "notifications/initialized" => {
+                    tracing::debug!(method = %request.method, "Received initialized notification");
+                }
+                other if other.starts_with("notifications/") => {
+                    tracing::debug!(method = %request.method, "Ignoring notification");
+                }
+                _ => {
+                    tracing::debug!(
+                        method = %request.method,
+                        "Received request without id; treating as notification and not responding"
+                    );
+                }
+            }
+            return None;
+        }
 
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(id),
-            "initialized" => JsonRpcResponse::success(id, json!({})),
-            "tools/list" => self.handle_list_tools(id),
-            "tools/call" => self.handle_call_tool(id, request.params).await,
-            "shutdown" => self.handle_shutdown(id),
+            "initialize" => Some(self.handle_initialize(id)),
+            "initialized" => {
+                // This is a notification, not a request - do not respond
+                tracing::debug!("Received initialized notification");
+                None
+            },
+            "notifications/initialized" => {
+                // Notification variant used by Claude Desktop.
+                tracing::debug!("Received notifications/initialized notification");
+                None
+            }
+            "tools/list" => Some(self.handle_list_tools(id)),
+            "tools/call" => Some(self.handle_call_tool(id, request.params).await),
+            "shutdown" => Some(self.handle_shutdown(id)),
             // Approval-related methods
-            "approvals/list" => self.handle_list_approvals(id, request.params),
-            "approvals/get" => self.handle_get_approval(id, request.params),
-            "approvals/approve" => self.handle_approve(id, request.params),
-            "approvals/reject" => self.handle_reject(id, request.params),
-            _ => JsonRpcResponse::error(
+            "approvals/list" => Some(self.handle_list_approvals(id, request.params)),
+            "approvals/get" => Some(self.handle_get_approval(id, request.params)),
+            "approvals/approve" => Some(self.handle_approve(id, request.params)),
+            "approvals/reject" => Some(self.handle_reject(id, request.params)),
+            _ => Some(JsonRpcResponse::error(
                 id,
                 -32601,
                 format!("Method not found: {}", request.method),
-            ),
+            )),
         }
     }
 
@@ -414,21 +403,28 @@ impl McpServer {
         id: Option<Value>,
         result: ExecutionResult,
     ) -> JsonRpcResponse {
+        // Claude Desktop expects MCP tool results as text/image content.
+        // Our internal executor can produce structured JSON; serialize it to text here.
+        fn content_to_json(c: &ToolContent) -> Value {
+            match c {
+                ToolContent::Text { text } => json!({"type": "text", "text": text}),
+                ToolContent::Json { json } => {
+                    let rendered = serde_json::to_string_pretty(json)
+                        .unwrap_or_else(|_| json.to_string());
+                    json!({"type": "text", "text": rendered})
+                }
+            }
+        }
+
         if result.success {
             let response = json!({
-                "content": result.content.iter().map(|c| match c {
-                    ToolContent::Text { text } => json!({"type": "text", "text": text}),
-                    ToolContent::Json { json } => json!({"type": "json", "json": json}),
-                }).collect::<Vec<_>>(),
+                "content": result.content.iter().map(content_to_json).collect::<Vec<_>>(),
                 "isError": false
             });
             JsonRpcResponse::success(id, response)
         } else {
             let response = json!({
-                "content": result.content.iter().map(|c| match c {
-                    ToolContent::Text { text } => json!({"type": "text", "text": text}),
-                    ToolContent::Json { json } => json!({"type": "json", "json": json}),
-                }).collect::<Vec<_>>(),
+                "content": result.content.iter().map(content_to_json).collect::<Vec<_>>(),
                 "isError": true
             });
             JsonRpcResponse::success(id, response)
@@ -534,7 +530,7 @@ mod tests {
             params: None,
         };
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.expect("Should return response for initialize");
         assert!(response.result.is_some());
         assert!(response.error.is_none());
     }
@@ -549,7 +545,7 @@ mod tests {
             params: None,
         };
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.expect("Should return response for tools/list");
         assert!(response.result.is_some());
     }
 
@@ -566,7 +562,21 @@ mod tests {
             })),
         };
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.expect("Should return response for tools/call");
         assert!(response.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_initialized_notification() {
+        let server = McpServer::new(McpConfig::default());
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None, // Notifications have no id
+            method: "initialized".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(response.is_none(), "Notifications should not return a response");
     }
 }

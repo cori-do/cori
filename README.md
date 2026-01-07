@@ -103,9 +103,55 @@ cori token attenuate \
     --output agent.token
 ```
 
-### 4. Connect Your Agent (Claude Desktop)
+### 4. Connect Your Agent via MCP
 
-Add to `claude_desktop_config.json`:
+Add Cori to your AI agent's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "cori": {
+      "command": "cori",
+      "args": ["mcp", "serve", "--config", "cori.yaml", "--token", "agent.token"]
+    }
+  }
+}
+```
+
+Your agent now has **typed, safe tools** instead of raw SQL:
+
+```
+🔧 Available Tools (8):
+   • getCustomer (read)       → Retrieve a customer by ID
+   • listCustomers (read)     → List customers with filters
+   • getTicket (read)         → Retrieve a ticket by ID
+   • listTickets (read)       → List tickets with filters
+   • updateTicket (write)     → Update ticket status/priority
+   • getOrder (read)          → Retrieve an order by ID
+   • listOrders (read)        → List orders with filters
+   ...
+```
+
+Each tool is:
+- **Scoped to the tenant** in the token (no data leaks)
+- **Type-checked** with JSON Schema inputs
+- **Permission-aware** (only actions the role allows)
+- **Audited** (every call logged)
+
+Test what tools are available for a token:
+
+```sh
+cori mcp test --token agent.token --public-key keys/public.key
+```
+
+---
+
+### 5. Or Use Raw SQL (Postgres Proxy)
+
+For direct database access, connect to the proxy like normal Postgres:
+
+```python
+import psycopg2
 
 ```json
 {
@@ -119,7 +165,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-**That's it.** The agent gets typed tools like `listCustomers`, `getOrder`, `updateTicketStatus` — all automatically scoped to `acme_corp`'s data.
+**Either way, the agent can only see `acme_corp`'s orders. Always.**
 
 ---
 
@@ -189,19 +235,44 @@ No code changes. No ORM plugins. Just security.
 
 ---
 
-## 🤖 MCP Integration
+## 🤖 MCP Tool Generation
 
-Cori exposes your database as **typed MCP tools** for AI agents:
+Cori automatically generates MCP tools from your schema and role permissions:
+
+| Role Permission | Generated Tools |
+|-----------------|-----------------|
+| Table readable | `get{Entity}(id)`, `list{Entities}(filters)` |
+| Table has editable columns | `create{Entity}(data)`, `update{Entity}(id, data)` |
+| Table deletable | `delete{Entity}(id)` |
+
+Tools include:
+- **Typed inputs** — JSON Schema with column types, enums, constraints
+- **Filter parameters** — Auto-generated from readable columns
+- **Approval flags** — Sensitive fields marked for human-in-the-loop
+- **Pagination** — Built-in `limit`/`offset` respecting `max_rows_per_query`
+
+Example generated tool schema:
 
 **Via stdio (Claude Desktop, etc.):**
 ```json
 {
-  "mcpServers": {
-    "cori": {
-      "command": "cori",
-      "args": ["mcp", "serve", "--config", "cori.yaml"],
-      "env": { "CORI_TOKEN": "<base64 agent.token>" }
-    }
+  "name": "updateTicket",
+  "description": "Update an existing ticket",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "integer" },
+      "status": { 
+        "type": "string",
+        "enum": ["open", "in_progress", "pending_customer", "resolved"]
+      },
+      "priority": { "type": "string" }
+    },
+    "required": ["id"]
+  },
+  "annotations": {
+    "requiresApproval": true,
+    "dryRunSupported": true
   }
 }
 ```

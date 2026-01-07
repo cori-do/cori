@@ -566,7 +566,7 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
             };
 
             let database_url = database_url.clone();
-            let tenant_column = tenancy_config.default_column.clone();
+            let tenancy_for_mcp = tenancy_config.clone();
             let schema = schema.clone();
             let core_roles = core_roles.clone();
             let approval_manager = approval_manager.clone();
@@ -589,7 +589,7 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
                         // Create MCP server
                         let mut server = McpServer::new(mcp_config)
                             .with_pool(pool)
-                            .with_tenant_column(&tenant_column)
+                            .with_tenancy_config(tenancy_for_mcp)
                             .with_approval_manager(approval_manager);
 
                         // Add public key for authentication if available

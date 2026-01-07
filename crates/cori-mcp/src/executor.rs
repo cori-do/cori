@@ -9,7 +9,7 @@
 
 use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
-use cori_core::RoleConfig;
+use cori_core::{RoleConfig, TenancyConfig};
 use crate::schema::DatabaseSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -98,8 +98,8 @@ pub struct ToolExecutor {
     approval_manager: Arc<ApprovalManager>,
     /// Database connection pool.
     pool: Option<PgPool>,
-    /// Tenant column name for RLS.
-    tenant_column: String,
+    /// Tenancy configuration (per-table tenant columns + global tables).
+    tenancy: TenancyConfig,
     /// Database schema for primary key lookup.
     schema: Option<DatabaseSchema>,
 }
@@ -111,7 +111,10 @@ impl ToolExecutor {
             role_config,
             approval_manager,
             pool: None,
-            tenant_column: "organization_id".to_string(),
+            tenancy: TenancyConfig {
+                default_column: "organization_id".to_string(),
+                ..TenancyConfig::default()
+            },
             schema: None,
         }
     }
@@ -132,9 +135,9 @@ impl ToolExecutor {
         Ok(self)
     }
 
-    /// Set the tenant column name.
-    pub fn with_tenant_column(mut self, column: impl Into<String>) -> Self {
-        self.tenant_column = column.into();
+    /// Set the tenancy configuration (per-table tenant columns + global tables).
+    pub fn with_tenancy_config(mut self, tenancy: TenancyConfig) -> Self {
+        self.tenancy = tenancy;
         self
     }
 
@@ -142,6 +145,40 @@ impl ToolExecutor {
     pub fn with_schema(mut self, schema: DatabaseSchema) -> Self {
         self.schema = Some(schema);
         self
+    }
+
+    fn tenant_column_for_table(&self, table: &str) -> Option<String> {
+        self.tenancy.get_tenant_column(table).map(|c| c.to_string())
+    }
+
+    fn validate_tenant_for_table(&self, table: &str, tenant_id: &str) -> Result<(), String> {
+        let tenant_column = self.tenant_column_for_table(table);
+        if tenant_column.is_none() {
+            // Global / unscoped table: tenant not required.
+            return Ok(());
+        }
+
+        if tenant_id == "unknown" || tenant_id.trim().is_empty() {
+            return Err(format!(
+                "Missing tenant id for tenant-scoped table '{}'. Provide a tenant-scoped Biscuit token (with a tenant(...) attenuation block) via --token or CORI_TOKEN.",
+                table
+            ));
+        }
+
+        match self.tenancy.tenant_id.id_type.as_str() {
+            "integer" => {
+                if tenant_id.parse::<i64>().is_err() {
+                    return Err(format!(
+                        "Invalid tenant id '{}': expected integer (per tenancy.yaml tenant_id.type) for table '{}'.",
+                        tenant_id, table
+                    ));
+                }
+            }
+            // uuid/string: no extra validation here (DB will validate if needed).
+            _ => {}
+        }
+
+        Ok(())
     }
 
     /// Get the primary key column for a table from schema.
@@ -377,17 +414,26 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
+            return ExecutionResult::error(e);
+        }
         let id = arguments.get("id");
+        let tenant_column = self.tenant_column_for_table(table);
 
         if options.dry_run {
+            let where_clause = if let Some(tc) = &tenant_column {
+                format!(" WHERE id = $1 AND {} = $2", tc)
+            } else {
+                " WHERE id = $1".to_string()
+            };
             return ExecutionResult::dry_run(DryRunResult {
                 dry_run: true,
                 would_affect: json!({
                     table: { "select": 1 }
                 }),
                 preview: Some(json!({
-                    "query": format!("SELECT * FROM {} WHERE id = $1 AND {} = $2", table, self.tenant_column),
-                    "params": [id, context.tenant_id]
+                    "query": format!("SELECT * FROM {}{}", table, where_clause),
+                    "params": if tenant_column.is_some() { json!([id, context.tenant_id]) } else { json!([id]) }
                 })),
             });
         }
@@ -408,12 +454,14 @@ impl ToolExecutor {
             columns.join(", ")
         };
 
-        // Build tenant condition - embed directly since it comes from trusted token
-        let tenant_condition = if context.tenant_id.parse::<i64>().is_ok() {
-            format!("{} = {}", self.tenant_column, context.tenant_id)
-        } else {
-            format!("{} = '{}'", self.tenant_column, context.tenant_id.replace("'", "''"))
-        };
+        // Build optional tenant condition - embed directly since it comes from trusted token
+        let tenant_condition = tenant_column.as_ref().map(|tc| {
+            if context.tenant_id.parse::<i64>().is_ok() {
+                format!("{} = {}", tc, context.tenant_id)
+            } else {
+                format!("{} = '{}'", tc, context.tenant_id.replace("'", "''"))
+            }
+        });
 
         // Parse id as i64 for query (common case)
         let id_value: i64 = match id {
@@ -424,10 +472,17 @@ impl ToolExecutor {
         // Get primary key column from schema (or fallback to convention)
         let pk_column = self.get_primary_key_column(table);
 
-        let query = format!(
-            "SELECT {} FROM {} WHERE {} = {} AND {}",
-            column_list, table, pk_column, id_value, tenant_condition
-        );
+        let query = if let Some(tc) = tenant_condition {
+            format!(
+                "SELECT {} FROM {} WHERE {} = {} AND {}",
+                column_list, table, pk_column, id_value, tc
+            )
+        } else {
+            format!(
+                "SELECT {} FROM {} WHERE {} = {}",
+                column_list, table, pk_column, id_value
+            )
+        };
 
         tracing::debug!("Executing GET query: {}", query);
 
@@ -454,6 +509,9 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
+            return ExecutionResult::error(e);
+        }
         let limit = arguments
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -466,16 +524,22 @@ impl ToolExecutor {
         // Apply max rows limit from role config
         let max_rows = self.role_config.max_rows_per_query.unwrap_or(1000);
         let effective_limit = limit.min(max_rows);
+        let tenant_column = self.tenant_column_for_table(table);
 
         if options.dry_run {
+            let where_clause = if let Some(tc) = &tenant_column {
+                format!(" WHERE {} = $1", tc)
+            } else {
+                "".to_string()
+            };
             return ExecutionResult::dry_run(DryRunResult {
                 dry_run: true,
                 would_affect: json!({
                     table: { "select": "unknown" }
                 }),
                 preview: Some(json!({
-                    "query": format!("SELECT * FROM {} WHERE {} = $1 LIMIT {} OFFSET {}", table, self.tenant_column, effective_limit, offset),
-                    "params": [context.tenant_id]
+                    "query": format!("SELECT * FROM {}{} LIMIT {} OFFSET {}", table, where_clause, effective_limit, offset),
+                    "params": if tenant_column.is_some() { json!([context.tenant_id]) } else { json!([]) }
                 })),
             });
         }
@@ -497,14 +561,16 @@ impl ToolExecutor {
         };
 
         // Build filter conditions from arguments (excluding limit/offset)
-        // Tenant ID comes from the trusted token, so we can safely embed it
-        // If it's numeric, embed directly; otherwise quote as string
-        let tenant_condition = if context.tenant_id.parse::<i64>().is_ok() {
-            format!("{} = {}", self.tenant_column, context.tenant_id)
-        } else {
-            format!("{} = '{}'", self.tenant_column, context.tenant_id.replace("'", "''"))
-        };
-        let mut conditions = vec![tenant_condition];
+        // Tenant ID comes from the trusted token, so we can safely embed it.
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(tc) = &tenant_column {
+            let tenant_condition = if context.tenant_id.parse::<i64>().is_ok() {
+                format!("{} = {}", tc, context.tenant_id)
+            } else {
+                format!("{} = '{}'", tc, context.tenant_id.replace("'", "''"))
+            };
+            conditions.push(tenant_condition);
+        }
 
         // Add user-provided filter conditions
         let empty_map = serde_json::Map::new();
@@ -526,14 +592,21 @@ impl ToolExecutor {
             }
         }
 
-        let query = format!(
-            "SELECT {} FROM {} WHERE {} LIMIT {} OFFSET {}",
-            column_list,
-            table,
-            conditions.join(" AND "),
-            effective_limit,
-            offset
-        );
+        let query = if conditions.is_empty() {
+            format!(
+                "SELECT {} FROM {} LIMIT {} OFFSET {}",
+                column_list, table, effective_limit, offset
+            )
+        } else {
+            format!(
+                "SELECT {} FROM {} WHERE {} LIMIT {} OFFSET {}",
+                column_list,
+                table,
+                conditions.join(" AND "),
+                effective_limit,
+                offset
+            )
+        };
 
         tracing::info!("Executing LIST query: {}", query);
 
@@ -571,6 +644,10 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
+            return ExecutionResult::error(e);
+        }
+        let tenant_column = self.tenant_column_for_table(table);
         if options.dry_run {
             return ExecutionResult::dry_run(DryRunResult {
                 dry_run: true,
@@ -598,14 +675,18 @@ impl ToolExecutor {
         let empty_map = serde_json::Map::new();
         let obj = arguments.as_object().unwrap_or(&empty_map);
         
-        // Start with tenant column
-        let mut columns = vec![self.tenant_column.clone()];
-        let tenant_value = if context.tenant_id.parse::<i64>().is_ok() {
-            context.tenant_id.clone()
-        } else {
-            format!("'{}'", context.tenant_id.replace("'", "''"))
-        };
-        let mut value_strs = vec![tenant_value];
+        // Start with tenant column (if table is tenant-scoped)
+        let mut columns: Vec<String> = Vec::new();
+        let mut value_strs: Vec<String> = Vec::new();
+        if let Some(tc) = &tenant_column {
+            columns.push(tc.clone());
+            let tenant_value = if context.tenant_id.parse::<i64>().is_ok() {
+                context.tenant_id.clone()
+            } else {
+                format!("'{}'", context.tenant_id.replace("'", "''"))
+            };
+            value_strs.push(tenant_value);
+        }
 
         for (key, value) in obj {
             // Validate column name (alphanumeric and underscore only)
@@ -659,7 +740,11 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
+            return ExecutionResult::error(e);
+        }
         let id = arguments.get("id");
+        let tenant_column = self.tenant_column_for_table(table);
 
         if options.dry_run {
             return ExecutionResult::dry_run(DryRunResult {
@@ -719,24 +804,36 @@ impl ToolExecutor {
             return ExecutionResult::error("No fields to update");
         }
 
-        // Build tenant condition - embed directly since it comes from trusted token
-        let tenant_condition = if context.tenant_id.parse::<i64>().is_ok() {
-            format!("{} = {}", self.tenant_column, context.tenant_id)
-        } else {
-            format!("{} = '{}'", self.tenant_column, context.tenant_id.replace("'", "''"))
-        };
+        // Build optional tenant condition - embed directly since it comes from trusted token
+        let tenant_condition = tenant_column.as_ref().map(|tc| {
+            if context.tenant_id.parse::<i64>().is_ok() {
+                format!("{} = {}", tc, context.tenant_id)
+            } else {
+                format!("{} = '{}'", tc, context.tenant_id.replace("'", "''"))
+            }
+        });
 
         // Get primary key column from schema (or fallback to convention)
         let pk_column = self.get_primary_key_column(table);
 
-        let query = format!(
-            "UPDATE {} SET {} WHERE {} = {} AND {} RETURNING *",
-            table,
-            set_clauses.join(", "),
-            pk_column,
-            id_value,
-            tenant_condition
-        );
+        let query = if let Some(tc) = tenant_condition {
+            format!(
+                "UPDATE {} SET {} WHERE {} = {} AND {} RETURNING *",
+                table,
+                set_clauses.join(", "),
+                pk_column,
+                id_value,
+                tc
+            )
+        } else {
+            format!(
+                "UPDATE {} SET {} WHERE {} = {} RETURNING *",
+                table,
+                set_clauses.join(", "),
+                pk_column,
+                id_value
+            )
+        };
 
         tracing::debug!("Executing UPDATE query: {}", query);
 
@@ -761,7 +858,11 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
+            return ExecutionResult::error(e);
+        }
         let id = arguments.get("id");
+        let tenant_column = self.tenant_column_for_table(table);
 
         if options.dry_run {
             return ExecutionResult::dry_run(DryRunResult {
@@ -791,20 +892,29 @@ impl ToolExecutor {
             None => return ExecutionResult::error("Missing required field: id"),
         };
 
-        // Build tenant condition - embed directly since it comes from trusted token
-        let tenant_condition = if context.tenant_id.parse::<i64>().is_ok() {
-            format!("{} = {}", self.tenant_column, context.tenant_id)
-        } else {
-            format!("{} = '{}'", self.tenant_column, context.tenant_id.replace("'", "''"))
-        };
+        // Build optional tenant condition - embed directly since it comes from trusted token
+        let tenant_condition = tenant_column.as_ref().map(|tc| {
+            if context.tenant_id.parse::<i64>().is_ok() {
+                format!("{} = {}", tc, context.tenant_id)
+            } else {
+                format!("{} = '{}'", tc, context.tenant_id.replace("'", "''"))
+            }
+        });
 
         // Get primary key column from schema (or fallback to convention)
         let pk_column = self.get_primary_key_column(table);
 
-        let query = format!(
-            "DELETE FROM {} WHERE {} = {} AND {} RETURNING {}",
-            table, pk_column, id_value, tenant_condition, pk_column
-        );
+        let query = if let Some(tc) = tenant_condition {
+            format!(
+                "DELETE FROM {} WHERE {} = {} AND {} RETURNING {}",
+                table, pk_column, id_value, tc, pk_column
+            )
+        } else {
+            format!(
+                "DELETE FROM {} WHERE {} = {} RETURNING {}",
+                table, pk_column, id_value, pk_column
+            )
+        };
 
         tracing::debug!("Executing DELETE query: {}", query);
 

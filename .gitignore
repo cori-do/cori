@@ -3,3 +3,6 @@
 .DS_Store
 .env
 tmp*
+postgres/
+myproject/
+AGENTS.md
