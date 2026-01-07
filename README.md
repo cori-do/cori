@@ -146,29 +146,6 @@ cori mcp test --token agent.token --public-key keys/public.key
 
 ---
 
-### 5. Or Use Raw SQL (Postgres Proxy)
-
-For direct database access, connect to the proxy like normal Postgres:
-
-```python
-import psycopg2
-
-```json
-{
-  "mcpServers": {
-    "cori": {
-      "command": "cori",
-      "args": ["mcp", "serve", "--config", "/path/to/cori.yaml"],
-      "env": { "CORI_TOKEN": "<base64 agent.token>" }
-    }
-  }
-}
-```
-
-**Either way, the agent can only see `acme_corp`'s orders. Always.**
-
----
-
 ## 🔧 How It Works
 
 ### Define Your Tenancy
