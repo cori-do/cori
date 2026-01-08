@@ -1,0 +1,178 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/SchemaDefinition.schema.json",
+  "title": "SchemaDefinition",
+  "description": "Auto-generated database schema. Version-controlled, updated only via 'cori db sync'.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "database": {
+      "$ref": "#/$defs/Database"
+    },
+    "extensions": {
+      "type": "array",
+      "description": "Enabled extensions (e.g., uuid-ossp, pgcrypto)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "enums": {
+      "type": "array",
+      "description": "Custom enum types",
+      "items": {
+        "$ref": "#/$defs/Enum"
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Table"
+      }
+    }
+  },
+  "required": ["version", "captured_at", "database", "tables"],
+  "additionalProperties": false,
+  "$defs": {
+    "Database": {
+      "type": "object",
+      "properties": {
+        "engine": {
+          "type": "string",
+          "enum": ["postgres", "mysql", "mariadb", "sqlite", "sqlserver"]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": ["engine"],
+      "additionalProperties": false
+    },
+    "Enum": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "schema": { "type": "string", "default": "public" },
+        "values": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["name", "values"],
+      "additionalProperties": false
+    },
+    "Table": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "schema": { "type": "string", "default": "public" },
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Column" }
+        },
+        "primary_key": {
+          "type": "array",
+          "description": "Column names forming the primary key",
+          "items": { "type": "string" }
+        },
+        "foreign_keys": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ForeignKey" }
+        },
+        "indexes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Index" }
+        }
+      },
+      "required": ["name", "schema", "columns"],
+      "additionalProperties": false
+    },
+    "Column": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "type": {
+          "type": "string",
+          "description": "Generic type",
+          "enum": [
+            "string", "text", "integer", "bigint", "smallint",
+            "decimal", "float", "double", "boolean",
+            "date", "time", "datetime", "timestamp",
+            "uuid", "json", "jsonb", "binary", "array", "enum", "unknown"
+          ]
+        },
+        "native_type": {
+          "type": "string",
+          "description": "Original DB type (e.g., 'character varying', 'serial')"
+        },
+        "nullable": { "type": "boolean" },
+        "default": {
+          "type": ["string", "number", "boolean", "null"],
+          "description": "Default value or expression"
+        },
+        "max_length": {
+          "type": "integer",
+          "description": "Max length for string types"
+        },
+        "enum_name": {
+          "type": "string",
+          "description": "Reference to enum type name (if type is 'enum')"
+        }
+      },
+      "required": ["name", "type", "nullable"],
+      "additionalProperties": false
+    },
+    "ForeignKey": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "references": {
+          "type": "object",
+          "properties": {
+            "table": { "type": "string" },
+            "schema": { "type": "string" },
+            "columns": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["table", "columns"],
+          "additionalProperties": false
+        },
+        "on_delete": {
+          "type": "string",
+          "enum": ["no_action", "restrict", "cascade", "set_null", "set_default"]
+        },
+        "on_update": {
+          "type": "string",
+          "enum": ["no_action", "restrict", "cascade", "set_null", "set_default"]
+        }
+      },
+      "required": ["columns", "references"],
+      "additionalProperties": false
+    },
+    "Index": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "unique": { "type": "boolean", "default": false }
+      },
+      "required": ["name", "columns"],
+      "additionalProperties": false
+    }
+  }
+}

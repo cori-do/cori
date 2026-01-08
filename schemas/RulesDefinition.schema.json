@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/RulesDefinition.schema.json",
+  "title": "RulesDefinition",
+  "description": "User-modifiable column rules. Pre-generated from schema, editable to add validation and tagging.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "tables": {
+      "type": "object",
+      "description": "Map of table name to column rules",
+      "additionalProperties": {
+        "$ref": "#/$defs/Table"
+      }
+    }
+  },
+  "required": ["version", "tables"],
+  "additionalProperties": false,
+  "$defs": {
+    "Table": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "tenant": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Column name that holds the tenant ID (e.g., 'organization_id')"
+            },
+            {
+              "type": "object",
+              "description": "Inherited tenancy through foreign key",
+              "properties": {
+                "via": {
+                  "type": "string",
+                  "description": "FK column in this table that references the parent"
+                },
+                "references": {
+                  "type": "string",
+                  "description": "Parent table to inherit tenant from"
+                }
+              },
+              "required": ["via", "references"],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Tenant isolation config: column name for direct tenant, or object for inherited tenancy"
+        },
+        "global": {
+          "type": "boolean",
+          "const": true,
+          "description": "If true, this table is shared across all tenants (no tenant filtering). Mutually exclusive with 'tenant'."
+        },
+        "soft_delete": {
+          "$ref": "#/$defs/SoftDelete",
+          "description": "Soft delete configuration. When set, 'delete' operations set this column instead of deleting, and queries filter out soft-deleted rows."
+        },
+        "columns": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Column"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SoftDelete": {
+      "type": "object",
+      "description": "Soft delete behavior for this table",
+      "properties": {
+        "column": {
+          "type": "string",
+          "description": "Column name (e.g., 'deleted_at', 'is_deleted')"
+        },
+        "deleted_value": {
+          "description": "Value that indicates deleted. Defaults: timestamp columns → NOW(), boolean → true",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["NOW()"] }
+          ]
+        },
+        "active_value": {
+          "description": "Value for non-deleted rows. Defaults: timestamp columns → NULL, boolean → false",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": ["column"],
+      "additionalProperties": false
+    },
+    "Column": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "description": "Reference to types.yaml (e.g., 'email', 'phone')"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Inline regex validation (overrides type)",
+          "format": "regex"
+        },
+        "allowed_values": {
+          "type": "array",
+          "description": "Whitelist of allowed values",
+          "items": {}
+        },
+        "tags": {
+          "type": "array",
+          "description": "Categorization: 'pii', 'sensitive', 'immutable', 'auto'",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

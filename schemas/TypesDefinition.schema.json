@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/TypesDefinition.schema.json",
+  "title": "TypesDefinition",
+  "description": "Reusable semantic types for input validation. Referenced by constraints.yaml.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "types": {
+      "type": "object",
+      "description": "Map of type name to definition",
+      "additionalProperties": {
+        "$ref": "#/$defs/Type"
+      }
+    }
+  },
+  "required": ["version", "types"],
+  "additionalProperties": false,
+  "$defs": {
+    "Type": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern for validation",
+          "format": "regex"
+        },
+        "format": {
+          "type": "string",
+          "description": "Well-known format (validated by Cori)",
+          "enum": ["email", "url", "uuid", "phone", "date", "datetime", "ipv4", "ipv6"]
+        },
+        "tags": {
+          "type": "array",
+          "description": "Categorization (e.g., 'pii', 'sensitive')",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

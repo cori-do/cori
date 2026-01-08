@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/GroupDefinition.schema.json",
+  "title": "Cori Group Definition",
+  "description": "Schema for defining approval groups. Groups contain members identified by their email addresses and are used to specify who can approve human-in-the-loop actions.",
+  "type": "object",
+  "required": ["name", "members"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique identifier for this group (e.g., 'support_managers', 'billing_admins').",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "examples": ["support_managers", "billing_admins", "security_team", "data_stewards"]
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the group's purpose and responsibilities.",
+      "examples": ["Managers who can approve support ticket escalations", "Team responsible for billing-related approvals"]
+    },
+    "members": {
+      "type": "array",
+      "description": "List of group members identified by their email addresses.",
+      "items": {
+        "type": "string",
+        "format": "email",
+        "description": "Email address of a group member."
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "examples": [
+        ["alice@example.com", "bob@example.com"],
+        ["manager@company.org", "lead@company.org", "admin@company.org"]
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "name": "support_managers",
+      "description": "Managers who can approve support ticket priority changes",
+      "members": [
+        "alice.manager@example.com",
+        "bob.lead@example.com"
+      ]
+    },
+    {
+      "name": "security_team",
+      "description": "Security team for sensitive data access approvals",
+      "members": [
+        "security-lead@example.com",
+        "ciso@example.com",
+        "security-analyst@example.com"
+      ]
+    },
+    {
+      "name": "data_stewards",
+      "description": "Data governance team for customer data modifications",
+      "members": [
+        "data-lead@example.com",
+        "compliance@example.com"
+      ]
+    }
+  ]
+}

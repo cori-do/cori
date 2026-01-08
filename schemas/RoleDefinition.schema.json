@@ -1,0 +1,542 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/RoleDefinition.schema.json",
+  "title": "Cori Role Definition",
+  "description": "Schema for defining AI agent roles with table permissions and column constraints. Role definitions control what AI agents can do when accessing the database via MCP.",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique identifier for this role (e.g., 'support_agent', 'analytics_agent').",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "examples": ["support_agent", "sales_agent", "admin_agent"]
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the role's purpose and capabilities.",
+      "examples": ["AI agent for customer support operations"]
+    },
+    "tables": {
+      "type": "object",
+      "description": "Table permissions configuration. Each key is a table name, and the value defines readable/creatable/updatable/deletable permissions.",
+      "additionalProperties": {
+        "$ref": "#/$defs/TablePermissions"
+      }
+    },
+    "blocked_tables": {
+      "type": "array",
+      "description": "List of tables that this role cannot access at all.",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "examples": [["users", "billing", "api_keys"]]
+    },
+    "max_rows_per_query": {
+      "type": "integer",
+      "description": "Maximum number of rows that can be returned by a single query.",
+      "minimum": 1,
+      "default": 100,
+      "examples": [100, 500, 1000]
+    },
+    "max_affected_rows": {
+      "type": "integer",
+      "description": "Maximum number of rows that can be affected by a single mutation (INSERT, UPDATE, DELETE).",
+      "minimum": 1,
+      "default": 10,
+      "examples": [10, 50, 100]
+    },
+    "approvals": {
+      "$ref": "#/$defs/ApprovalConfig",
+      "description": "Default approval configuration for all requires_approval flags in this role. Can be overridden at individual field/action level."
+    }
+  },
+  "$defs": {
+    "TablePermissions": {
+      "type": "object",
+      "description": "Permission configuration for a single table. Define which columns can be read, created, updated, and whether deletion is allowed.",
+      "properties": {
+        "readable": {
+          "$ref": "#/$defs/ColumnList",
+          "description": "Columns that can be read (SELECT). Use \"*\" for all columns, or provide a list of column names. Omit or use [] for no read access."
+        },
+        "creatable": {
+          "$ref": "#/$defs/CreatableColumns",
+          "description": "Columns that can be set on INSERT. Use \"*\" for all columns, {} for none, or a map of column names to INSERT-specific constraints (required, default, restrict_to)."
+        },
+        "updatable": {
+          "$ref": "#/$defs/UpdatableColumns",
+          "description": "Columns that can be modified on UPDATE. Use \"*\" for all columns, {} for none, or a map of column names to UPDATE-specific constraints (restrict_to, transitions, only_when, increment_only, append_only)."
+        },
+        "deletable": {
+          "$ref": "#/$defs/DeletablePermission",
+          "description": "Whether records can be deleted from this table. Use false to deny, true to allow, or {requires_approval: true} to allow with human approval."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColumnList": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "*",
+          "description": "All columns."
+        },
+        {
+          "type": "array",
+          "description": "List of specific column names.",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      ],
+      "examples": ["*", ["id", "name", "email", "created_at"]]
+    },
+    "DeletablePermission": {
+      "oneOf": [
+        {
+          "type": "boolean",
+          "description": "true = deletion allowed, false = deletion denied."
+        },
+        {
+          "type": "object",
+          "description": "Deletion allowed with additional constraints.",
+          "properties": {
+            "requires_approval": {
+              "$ref": "#/$defs/ApprovalRequirement",
+              "description": "Whether deletion requires human approval. Use true for default group, or specify a group name."
+            },
+            "soft_delete": {
+              "type": "boolean",
+              "description": "If true, deletion is performed as a soft delete (e.g., setting a deleted_at column) instead of a hard delete. Defaults to false (hard delete).",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "default": false,
+      "examples": [
+        false,
+        true,
+        { "requires_approval": true },
+        { "requires_approval": { "group": "data_stewards" } },
+        { "soft_delete": true },
+        { "requires_approval": true, "soft_delete": true }
+      ]
+    },
+    "CreatableColumns": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "*",
+          "description": "All columns are creatable with default (no) constraints."
+        },
+        {
+          "type": "object",
+          "description": "Map of column names to their INSERT constraints. Use {} for no creatable columns, or {column: {}} for a column with no constraints.",
+          "additionalProperties": {
+            "$ref": "#/$defs/CreatableColumnConstraints"
+          }
+        }
+      ],
+      "examples": [
+        "*",
+        {},
+        {
+          "subject": { "required": true, "guidance": "Use a clear, concise subject that summarizes the issue" },
+          "priority": { "default": "medium", "restrict_to": ["low", "medium", "high"], "guidance": "Set to 'high' only for production-blocking issues" }
+        }
+      ]
+    },
+    "CreatableColumnConstraints": {
+      "type": "object",
+      "description": "Constraints on a column for INSERT operations. An empty object {} means the column is creatable with no constraints.",
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "If true, this role must provide a value for this column on INSERT (even if the database allows NULL).",
+          "default": false,
+          "examples": [true]
+        },
+        "default": {
+          "description": "Role-specific default value if not provided. This is separate from the database default.",
+          "examples": ["pending", "low", 0]
+        },
+        "restrict_to": {
+          "type": "array",
+          "description": "Subset of globally allowed values that this role can use. Must be a subset of allowed_values defined in ConstraintsDefinition.",
+          "items": {},
+          "uniqueItems": true,
+          "examples": [["low", "medium", "high"], ["draft", "pending"]]
+        },
+        "requires_approval": {
+          "$ref": "#/$defs/ApprovalRequirement",
+          "description": "Whether creating a record with this column value requires human approval."
+        },
+        "guidance": {
+          "type": "string",
+          "description": "Instructions for AI agents on how to use this column when creating records. This text is included in the MCP tool schema to help LLMs make better decisions.",
+          "examples": [
+            "Use a clear, concise subject line that summarizes the customer's issue",
+            "Set to 'high' only for production-blocking issues affecting multiple users",
+            "Format as 'YYYY-MM-DD' for consistency"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "UpdatableColumns": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "*",
+          "description": "All columns are updatable with default (no) constraints."
+        },
+        {
+          "type": "object",
+          "description": "Map of column names to their UPDATE constraints. Use {} for no updatable columns, or {column: {}} for a column with no constraints.",
+          "additionalProperties": {
+            "$ref": "#/$defs/UpdatableColumnConstraints"
+          }
+        }
+      ],
+      "examples": [
+        "*",
+        {},
+        {
+          "status": {
+            "transitions": {
+              "open": ["in_progress", "resolved"],
+              "in_progress": ["resolved", "closed"]
+            },
+            "guidance": "Only mark as 'resolved' after confirming the issue is fully addressed"
+          },
+          "priority": { "requires_approval": true, "guidance": "Priority changes affect SLA timers - use sparingly" }
+        }
+      ]
+    },
+    "UpdatableColumnConstraints": {
+      "type": "object",
+      "description": "Constraints on a column for UPDATE operations. An empty object {} means the column is updatable with no constraints.",
+      "properties": {
+        "restrict_to": {
+          "type": "array",
+          "description": "Subset of globally allowed values that this role can set. Must be a subset of allowed_values defined in ConstraintsDefinition.",
+          "items": {},
+          "uniqueItems": true,
+          "examples": [["open", "in_progress", "resolved"], ["pending", "shipped"]]
+        },
+        "transitions": {
+          "type": "object",
+          "description": "State machine defining valid transitions. Keys are current values, values are arrays of allowed new values. If a current value is not listed, updates from that state are denied.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {},
+            "uniqueItems": true
+          },
+          "examples": [
+            {
+              "open": ["in_progress", "cancelled"],
+              "in_progress": ["resolved", "cancelled"],
+              "resolved": ["closed"]
+            }
+          ]
+        },
+        "only_when": {
+          "type": "object",
+          "description": "Preconditions on other columns' current values. Update is only allowed if all conditions are met.",
+          "additionalProperties": {
+            "$ref": "#/$defs/ColumnCondition"
+          },
+          "examples": [
+            { "status": ["open", "in_progress"] },
+            { "quantity": { "greater_than": 0 } },
+            { "price": { "lower_than": 1000 } },
+            { "shipping_address": { "not_null": true } }
+          ]
+        },
+        "increment_only": {
+          "type": "boolean",
+          "description": "For numeric columns: value can only increase, never decrease. Useful for counters, inventory adjustments.",
+          "default": false,
+          "examples": [true]
+        },
+        "append_only": {
+          "type": "boolean",
+          "description": "For text columns: can only append to existing value, not replace. Useful for audit notes, logs.",
+          "default": false,
+          "examples": [true]
+        },
+        "requires_approval": {
+          "$ref": "#/$defs/ApprovalRequirement",
+          "description": "Whether updating this column requires human approval."
+        },
+        "guidance": {
+          "type": "string",
+          "description": "Instructions for AI agents on how to use this column when updating records. This text is included in the MCP tool schema to help LLMs make better decisions.",
+          "examples": [
+            "Only mark as 'resolved' after confirming the customer's issue is fully addressed",
+            "Append resolution notes with timestamp and action taken",
+            "Escalate to 'critical' only if SLA breach is imminent"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColumnCondition": {
+      "oneOf": [
+        {
+          "description": "Single value - column must equal this value.",
+          "not": {
+            "type": ["array", "object"]
+          }
+        },
+        {
+          "type": "array",
+          "description": "Column must have one of these values (IN operator).",
+          "items": {}
+        },
+        {
+          "type": "object",
+          "description": "Comparison condition.",
+          "properties": {
+            "equals": {
+              "description": "Column must equal this value (explicit form of default behavior)."
+            },
+            "not_equals": {
+              "description": "Column must not equal this value."
+            },
+            "greater_than": {
+              "type": "number",
+              "description": "Column must be greater than this value (numeric columns)."
+            },
+            "greater_than_or_equal": {
+              "type": "number",
+              "description": "Column must be greater than or equal to this value (numeric columns)."
+            },
+            "lower_than": {
+              "type": "number",
+              "description": "Column must be lower than this value (numeric columns)."
+            },
+            "lower_than_or_equal": {
+              "type": "number",
+              "description": "Column must be lower than or equal to this value (numeric columns)."
+            },
+            "not_null": {
+              "type": "boolean",
+              "description": "If true, column must not be null."
+            },
+            "is_null": {
+              "type": "boolean",
+              "description": "If true, column must be null."
+            },
+            "in": {
+              "type": "array",
+              "description": "Column must be one of these values.",
+              "items": {}
+            },
+            "not_in": {
+              "type": "array",
+              "description": "Column must not be one of these values.",
+              "items": {}
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "examples": [
+        "active",
+        ["open", "in_progress"],
+        { "greater_than": 0 },
+        { "lower_than_or_equal": 100 },
+        { "not_null": true },
+        { "not_in": ["archived", "deleted"] }
+      ]
+    },
+    "ApprovalRequirement": {
+      "oneOf": [
+        {
+          "type": "boolean",
+          "description": "true = requires approval from the group defined in role's 'approvals' config, false = no approval needed."
+        },
+        {
+          "$ref": "#/$defs/ApprovalConfig"
+        }
+      ],
+      "examples": [
+        true,
+        false,
+        { "group": "support_managers" },
+        { "group": "security_team", "notify_on_pending": true, "message": "Sensitive data access requires security approval" }
+      ]
+    },
+    "ApprovalConfig": {
+      "type": "object",
+      "description": "Approval configuration specifying which group can approve and notification settings.",
+      "required": ["group"],
+      "properties": {
+        "group": {
+          "type": "string",
+          "description": "Name of the approval group (must be defined in groups/ folder).",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "examples": ["support_managers", "security_team", "data_stewards"]
+        },
+        "notify_on_pending": {
+          "type": "boolean",
+          "description": "Whether to send notifications to group members when approvals are pending.",
+          "default": true
+        },
+        "message": {
+          "type": "string",
+          "description": "Custom message to display to approvers explaining why approval is needed.",
+          "examples": ["This change affects billing data and requires finance team approval."]
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        { "group": "support_managers" },
+        { "group": "admins", "notify_on_pending": true },
+        { "group": "security_team", "message": "Security approval required" }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "name": "support_agent",
+      "description": "AI agent for customer support operations",
+      "approvals": {
+        "group": "support_managers",
+        "notify_on_pending": true
+      },
+      "tables": {
+        "customers": {
+          "readable": ["id", "name", "email", "plan", "created_at"],
+          "creatable": {},
+          "updatable": {},
+          "deletable": false
+        },
+        "tickets": {
+          "readable": ["id", "customer_id", "subject", "status", "priority", "created_at"],
+          "creatable": {
+            "subject": { "required": true },
+            "description": { "required": true },
+            "customer_id": { "required": true },
+            "priority": {
+              "default": "medium",
+              "restrict_to": ["low", "medium", "high"]
+            },
+            "status": {
+              "default": "open",
+              "restrict_to": ["open"]
+            }
+          },
+          "updatable": {
+            "status": {
+              "transitions": {
+                "open": ["in_progress", "resolved"],
+                "in_progress": ["open", "resolved", "escalated"],
+                "resolved": ["open"]
+              }
+            },
+            "priority": {
+              "restrict_to": ["low", "medium", "high"],
+              "requires_approval": true
+            },
+            "description": {
+              "append_only": true,
+              "only_when": {
+                "status": ["open", "in_progress"]
+              }
+            }
+          },
+          "deletable": false
+        }
+      },
+      "blocked_tables": ["users", "billing", "api_keys"],
+      "max_rows_per_query": 100,
+      "max_affected_rows": 10
+    },
+    {
+      "name": "warehouse_agent",
+      "description": "AI agent for warehouse and shipping operations",
+      "approvals": {
+        "group": "warehouse_managers"
+      },
+      "tables": {
+        "orders": {
+          "readable": "*",
+          "creatable": {},
+          "updatable": {
+            "status": {
+              "transitions": {
+                "paid": ["shipped"],
+                "shipped": ["delivered"]
+              },
+              "only_when": {
+                "shipping_address": { "not_null": true }
+              }
+            },
+            "tracking_number": {},
+            "shipped_at": {}
+          },
+          "deletable": false
+        },
+        "inventory": {
+          "readable": ["id", "product_id", "quantity", "warehouse_id"],
+          "creatable": {},
+          "updatable": {
+            "quantity": {
+              "increment_only": true
+            }
+          },
+          "deletable": false
+        }
+      },
+      "blocked_tables": ["users", "billing", "customers"],
+      "max_rows_per_query": 500,
+      "max_affected_rows": 50
+    },
+    {
+      "name": "admin_agent",
+      "description": "Administrative agent with broad access",
+      "approvals": {
+        "group": "admins"
+      },
+      "tables": {
+        "customers": {
+          "readable": "*",
+          "creatable": "*",
+          "updatable": "*",
+          "deletable": true
+        },
+        "orders": {
+          "readable": "*",
+          "creatable": {
+            "customer_id": { "required": true },
+            "items": { "required": true },
+            "status": { "default": "pending" },
+            "notes": {}
+          },
+          "updatable": {
+            "status": {
+              "restrict_to": ["pending", "shipped", "delivered", "cancelled"]
+            },
+            "notes": {}
+          },
+          "deletable": {
+            "requires_approval": {
+              "group": "data_stewards",
+              "message": "Order deletion requires data steward approval for audit compliance"
+            }
+          }
+        }
+      },
+      "blocked_tables": ["users", "api_keys"],
+      "max_rows_per_query": 1000,
+      "max_affected_rows": 100
+    }
+  ]
+}
