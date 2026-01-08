@@ -31,11 +31,6 @@
           "description": "Regex pattern for validation",
           "format": "regex"
         },
-        "format": {
-          "type": "string",
-          "description": "Well-known format (validated by Cori)",
-          "enum": ["email", "url", "uuid", "phone", "date", "datetime", "ipv4", "ipv6"]
-        },
         "tags": {
           "type": "array",
           "description": "Categorization (e.g., 'pii', 'sensitive')",
