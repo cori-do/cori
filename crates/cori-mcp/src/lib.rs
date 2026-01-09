@@ -50,11 +50,12 @@
 //! ## Example Usage
 //!
 //! ```ignore
-//! use cori_core::config::{McpConfig, RoleConfig};
+//! use cori_core::config::McpConfig;
+//! use cori_core::RoleDefinition;
 //! use cori_mcp::McpServer;
 //!
 //! // Load role configuration
-//! let role_config = RoleConfig::from_file("roles/support_agent.yaml")?;
+//! let role_config = RoleDefinition::from_file("roles/support_agent.yaml")?;
 //!
 //! // Create MCP server with role-driven tools
 //! let mut server = McpServer::new(McpConfig::default())

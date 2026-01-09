@@ -1,0 +1,13 @@
+# =============================================================================
+# Approval Group: Support Managers
+# =============================================================================
+# Managers who can approve support ticket priority changes and escalations.
+# Conforms to: GroupDefinition.schema.json
+# =============================================================================
+
+name: support_managers
+description: "Managers who can approve support ticket priority changes"
+members:
+  - manager@example.com
+  - lead@example.com
+  # Add actual team member emails here

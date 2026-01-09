@@ -8,12 +8,13 @@ use crate::error::McpError;
 use crate::executor::{ExecutionContext, ExecutionResult, ToolExecutor};
 use crate::http_transport::HttpServer;
 use crate::protocol::*;
-use cori_core::config::mcp::{McpConfig, Transport};
-use cori_biscuit::PublicKey;
-use cori_core::{RoleConfig, TenancyConfig};
 use crate::schema::DatabaseSchema;
 use crate::tool_generator::ToolGenerator;
 use crate::tools::ToolRegistry;
+use cori_biscuit::PublicKey;
+use cori_core::config::mcp::{McpConfig, Transport};
+use cori_core::config::rules_definition::RulesDefinition;
+use cori_core::RoleDefinition;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::io::{BufRead, Write};
@@ -24,13 +25,13 @@ use tokio::sync::mpsc;
 pub struct McpServer {
     config: McpConfig,
     tools: ToolRegistry,
-    role_config: Option<RoleConfig>,
+    role: Option<RoleDefinition>,
     schema: Option<DatabaseSchema>,
     approval_manager: Arc<ApprovalManager>,
     tenant_id: Option<String>,
     executor: Option<ToolExecutor>,
     pool: Option<PgPool>,
-    tenancy: TenancyConfig,
+    rules: Option<RulesDefinition>,
     /// Public key for token verification (required for HTTP transport).
     public_key: Option<PublicKey>,
 }
@@ -41,24 +42,21 @@ impl McpServer {
         Self {
             config,
             tools: ToolRegistry::new(),
-            role_config: None,
+            role: None,
             schema: None,
             approval_manager: Arc::new(ApprovalManager::default()),
             tenant_id: None,
             executor: None,
             pool: None,
-            tenancy: TenancyConfig {
-                default_column: "organization_id".to_string(),
-                ..TenancyConfig::default()
-            },
+            rules: None,
             public_key: None,
         }
     }
 
-    /// Set the role configuration for dynamic tool generation.
-    pub fn with_role_config(mut self, role_config: RoleConfig) -> Self {
-        self.executor = Some(self.build_executor(&role_config));
-        self.role_config = Some(role_config);
+    /// Set the role definition for dynamic tool generation.
+    pub fn with_role(mut self, role: RoleDefinition) -> Self {
+        self.executor = Some(self.build_executor(&role));
+        self.role = Some(role);
         self
     }
 
@@ -66,17 +64,17 @@ impl McpServer {
     pub fn with_pool(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool.clone());
         // Update executor if it exists
-        if let Some(role_config) = &self.role_config {
-            self.executor = Some(self.build_executor(role_config).with_pool(pool));
+        if let Some(role) = &self.role {
+            self.executor = Some(self.build_executor(role).with_pool(pool));
         }
         self
     }
 
-    /// Set tenancy configuration (per-table tenant columns + global tables).
-    pub fn with_tenancy_config(mut self, tenancy: TenancyConfig) -> Self {
-        self.tenancy = tenancy;
-        if let Some(role_config) = &self.role_config {
-            self.executor = Some(self.build_executor(role_config));
+    /// Set rules definition for tenant configuration.
+    pub fn with_rules(mut self, rules: RulesDefinition) -> Self {
+        self.rules = Some(rules);
+        if let Some(role) = &self.role {
+            self.executor = Some(self.build_executor(role));
         }
         self
     }
@@ -85,8 +83,8 @@ impl McpServer {
     pub fn with_schema(mut self, schema: DatabaseSchema) -> Self {
         self.schema = Some(schema.clone());
         // Update executor if it exists
-        if let Some(role_config) = &self.role_config {
-            self.executor = Some(self.build_executor(role_config).with_schema(schema));
+        if let Some(role) = &self.role {
+            self.executor = Some(self.build_executor(role).with_schema(schema));
         }
         self
     }
@@ -110,15 +108,17 @@ impl McpServer {
     pub fn with_approval_manager(mut self, manager: Arc<ApprovalManager>) -> Self {
         self.approval_manager = manager;
         // Recreate executor with new approval manager
-        if let Some(role_config) = &self.role_config {
-            self.executor = Some(self.build_executor(role_config));
+        if let Some(role) = &self.role {
+            self.executor = Some(self.build_executor(role));
         }
         self
     }
 
-    fn build_executor(&self, role_config: &RoleConfig) -> ToolExecutor {
-        let mut executor = ToolExecutor::new(role_config.clone(), self.approval_manager.clone())
-            .with_tenancy_config(self.tenancy.clone());
+    fn build_executor(&self, role: &RoleDefinition) -> ToolExecutor {
+        let mut executor = ToolExecutor::new(role.clone(), self.approval_manager.clone());
+        if let Some(rules) = &self.rules {
+            executor = executor.with_rules(rules.clone());
+        }
         if let Some(pool) = &self.pool {
             executor = executor.with_pool(pool.clone());
         }
@@ -138,11 +138,11 @@ impl McpServer {
         &self.approval_manager
     }
 
-    /// Generate tools from role configuration and schema.
+    /// Generate tools from role definition and schema.
     pub fn generate_tools(&mut self) {
-        if let Some(role_config) = &self.role_config {
+        if let Some(role) = &self.role {
             let schema = self.schema.clone().unwrap_or_default();
-            let generator = ToolGenerator::new(role_config.clone(), schema);
+            let generator = ToolGenerator::new(role.clone(), schema);
             let tools = generator.generate_all();
 
             for tool in tools {
@@ -150,9 +150,9 @@ impl McpServer {
             }
 
             tracing::info!(
-                role = %role_config.name,
+                role = %role.name,
                 tool_count = self.tools.list().len(),
-                "Generated tools from role configuration"
+                "Generated tools from role definition"
             );
         }
     }
@@ -193,10 +193,11 @@ impl McpServer {
     /// Run the server with HTTP transport.
     pub async fn run_http(&self) -> Result<(), McpError> {
         tracing::info!(
-            port = self.config.http_port,
+            port = self.config.port,
             auth_enabled = self.public_key.is_some(),
             "Starting MCP server with HTTP transport"
         );
+
 
         // Create channel for request handling
         let (request_tx, mut request_rx) =
@@ -204,13 +205,13 @@ impl McpServer {
 
         // Clone self for the request handler task
         let tools = self.tools.clone();
-        let role_config = self.role_config.clone();
+        let role = self.role.clone();
         let tenant_id = self.tenant_id.clone();
         let approval_manager = self.approval_manager.clone();
         let config = self.config.clone();
         let pool = self.pool.clone();
         let schema = self.schema.clone();
-        let tenancy = self.tenancy.clone();
+        let rules = self.rules.clone();
 
         // Spawn request handler task
         tokio::spawn(async move {
@@ -218,15 +219,15 @@ impl McpServer {
                 // Create a temporary server instance to handle the request
                 let mut temp_server = McpServer::new(config.clone());
                 temp_server.tools = tools.clone();
-                temp_server.role_config = role_config.clone();
+                temp_server.role = role.clone();
                 temp_server.tenant_id = tenant_id.clone();
                 temp_server.approval_manager = approval_manager.clone();
                 temp_server.pool = pool.clone();
-                temp_server.tenancy = tenancy.clone();
+                temp_server.rules = rules.clone();
                 temp_server.schema = schema.clone();
 
-                if let Some(rc) = &temp_server.role_config {
-                    temp_server.executor = Some(temp_server.build_executor(rc));
+                if let Some(r) = &temp_server.role {
+                    temp_server.executor = Some(temp_server.build_executor(r));
                 }
 
                 if let Some(response) = temp_server.handle_request(request).await {
@@ -237,12 +238,12 @@ impl McpServer {
 
         // Start HTTP server with or without authentication
         let http_server = match &self.public_key {
-            Some(pk) => HttpServer::with_auth(self.config.http_port, request_tx, pk.clone()),
+            Some(pk) => HttpServer::with_auth(self.config.get_port(), request_tx, pk.clone()),
             None => {
                 tracing::warn!(
                     "No public key configured - MCP HTTP server running WITHOUT authentication!"
                 );
-                HttpServer::without_auth(self.config.http_port, request_tx)
+                HttpServer::without_auth(self.config.get_port(), request_tx)
             }
         };
         http_server.run().await
@@ -360,7 +361,7 @@ impl McpServer {
             let context = ExecutionContext {
                 tenant_id: self.tenant_id.clone().unwrap_or_else(|| "unknown".to_string()),
                 role: self
-                    .role_config
+                    .role
                     .as_ref()
                     .map(|r| r.name.clone())
                     .unwrap_or_else(|| "unknown".to_string()),

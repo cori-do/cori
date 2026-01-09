@@ -5,8 +5,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use cori_biscuit::{keys::load_public_key_file, KeyPair, TokenVerifier};
-use cori_core::config::{McpConfig, ReadableColumns, RoleConfig, TenancyConfig, Transport};
+use cori_biscuit::{keys::load_public_key_file, TokenVerifier};
+use cori_core::config::role_definition::RoleDefinition;
+use cori_core::config::rules_definition::RulesDefinition;
+use cori_core::config::{McpConfig, Transport};
 use cori_mcp::McpServer;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -24,8 +26,6 @@ struct ConfigFile {
     roles_dir: Option<String>,
     #[serde(default)]
     upstream: UpstreamConfigFile,
-    #[serde(default)]
-    tenancy_file: Option<String>,
 }
 
 /// Upstream database section of the config file.
@@ -58,10 +58,6 @@ struct McpConfigFile {
     transport: Option<String>,
     #[serde(default)]
     http_port: Option<u16>,
-    #[serde(default = "default_dry_run")]
-    dry_run_enabled: bool,
-    #[serde(default)]
-    require_approval: Vec<String>,
 }
 
 /// Biscuit section of the config file.
@@ -71,17 +67,9 @@ struct BiscuitConfigFile {
     public_key_file: Option<String>,
     #[serde(default)]
     public_key_env: Option<String>,
-    #[serde(default)]
-    private_key_file: Option<String>,
-    #[serde(default)]
-    private_key_env: Option<String>,
 }
 
 fn default_enabled() -> bool {
-    true
-}
-
-fn default_dry_run() -> bool {
     true
 }
 
@@ -90,6 +78,16 @@ fn default_dry_run() -> bool {
 pub struct McpCommand {
     #[command(subcommand)]
     pub command: McpSubcommand,
+}
+
+impl McpCommand {
+    /// Get the config file path from the command arguments.
+    pub fn get_config_path(&self) -> PathBuf {
+        match &self.command {
+            McpSubcommand::Serve(args) => args.config.clone(),
+            McpSubcommand::Test(_) => PathBuf::from("cori.yaml"),
+        }
+    }
 }
 
 /// MCP subcommands.
@@ -285,25 +283,23 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
     };
 
     // Load role configuration from token's role claim
-    let role_config = if let Some(name) = role_name {
+    let role_config = if let Some(name) = role_name.clone() {
         // Try to find role file based on token's role
         let role_path = roles_dir.join(format!("{}.yaml", name));
         if role_path.exists() {
-            RoleConfig::from_file(&role_path)
+            RoleDefinition::from_file(&role_path)
                 .with_context(|| format!("Failed to load role config: {:?}", role_path))?
         } else {
             warn!(role = %name, path = %role_path.display(), "No role configuration file found for role from token");
             // Create minimal role config
-            RoleConfig {
+            RoleDefinition {
                 name,
                 description: None,
+                approvals: None,
                 tables: std::collections::HashMap::new(),
                 blocked_tables: Vec::new(),
                 max_rows_per_query: Some(100),
                 max_affected_rows: Some(10),
-                blocked_operations: Vec::new(),
-                custom_actions: Vec::new(),
-                include_actions: Vec::new(),
             }
         }
     } else {
@@ -318,16 +314,13 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
     let mcp_config = McpConfig {
         enabled: config_file.mcp.enabled,
         transport,
-        http_port,
-        dry_run_enabled: config_file.mcp.dry_run_enabled,
-        auto_generate_tools: true,
-        require_approval: config_file.mcp.require_approval.clone(),
-        approval_exceptions: Vec::new(),
+        port: http_port,
+        ..Default::default()
     };
 
     info!(
         transport = ?mcp_config.transport,
-        http_port = mcp_config.http_port,
+        port = mcp_config.port,
         "MCP configuration loaded"
     );
 
@@ -343,31 +336,27 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
 
     info!("Connected to upstream database");
 
-    // Load tenancy configuration (per-table tenant columns) using cori-core
+    // Load rules configuration (tenancy, soft-delete, etc.) from schema/rules.yaml
     let config_dir = args.config.parent().unwrap_or(std::path::Path::new("."));
-    let tenancy_config = if let Some(tenancy_file) = &config_file.tenancy_file {
-        match TenancyConfig::load_from_path(tenancy_file, config_dir) {
-            Ok(tenancy) => {
+    let rules_path = config_dir.join("schema/rules.yaml");
+    let rules = if rules_path.exists() {
+        match RulesDefinition::from_file(&rules_path) {
+            Ok(rules) => {
                 info!(
-                    default_column = %tenancy.default_column,
-                    tables = tenancy.tables.len(),
-                    "Loaded tenancy configuration"
+                    tables = rules.tables.len(),
+                    path = %rules_path.display(),
+                    "Loaded rules configuration"
                 );
-                tenancy
+                Some(rules)
             }
             Err(e) => {
-                warn!("Failed to load tenancy file: {}", e);
-                TenancyConfig {
-                    default_column: "organization_id".to_string(),
-                    ..TenancyConfig::default()
-                }
+                warn!("Failed to load rules file: {}", e);
+                None
             }
         }
     } else {
-        TenancyConfig {
-            default_column: "organization_id".to_string(),
-            ..TenancyConfig::default()
-        }
+        info!("No rules file found at {}", rules_path.display());
+        None
     };
 
     // Load schema from snapshot file if available
@@ -404,16 +393,20 @@ async fn execute_serve(args: McpServeArgs) -> Result<()> {
 
     // Create and run server
     let mut server = McpServer::new(mcp_config)
-        .with_pool(pool)
-        .with_tenancy_config(tenancy_config);
+        .with_pool(pool);
+
+    // Add rules if loaded
+    if let Some(r) = rules {
+        server = server.with_rules(r);
+    }
 
     // Add schema if loaded
     if let Some(s) = schema {
         server = server.with_schema(s);
     }
 
-    // Add role config (must be after schema for proper executor setup)
-    server = server.with_role_config(role_config);
+    // Add role (must be after schema for proper executor setup)
+    server = server.with_role(role_config);
 
     if let Some(tid) = tenant_id {
         server = server.with_tenant_id(tid);
@@ -469,10 +462,10 @@ async fn execute_test(args: McpTestArgs) -> Result<()> {
 
     // Verify token - required to get role claim
     let verified_info = if let Some(pk_path) = &args.public_key {
-        let keypair = KeyPair::load_from_file(pk_path)
-            .with_context(|| format!("Failed to load key from {:?}", pk_path))?;
+        let public_key = load_public_key_file(pk_path)
+            .with_context(|| format!("Failed to load public key from {:?}", pk_path))?;
 
-        let verifier = TokenVerifier::new(keypair.public_key());
+        let verifier = TokenVerifier::new(public_key);
         match verifier.verify(&token) {
             Ok(verified) => {
                 Some((verified.role.clone(), verified.tenant.clone()))
@@ -490,7 +483,7 @@ async fn execute_test(args: McpTestArgs) -> Result<()> {
     // Load role configuration from token's role claim
     let role_path = args.roles_dir.join(format!("{}.yaml", role_name));
     let role_config = if role_path.exists() {
-        RoleConfig::from_file(&role_path)
+        RoleDefinition::from_file(&role_path)
             .with_context(|| format!("Failed to load role config: {:?}", role_path))?
     } else {
         anyhow::bail!(
@@ -509,7 +502,7 @@ async fn execute_test(args: McpTestArgs) -> Result<()> {
 
     // Create server and generate tools
     let mcp_config = McpConfig::default();
-    let mut server = McpServer::new(mcp_config).with_role_config(role_config.clone());
+    let mut server = McpServer::new(mcp_config).with_role(role_config.clone());
 
     // Generate tools
     server.generate_tools();
@@ -554,8 +547,8 @@ async fn execute_test(args: McpTestArgs) -> Result<()> {
     // Print table access summary
     println!("\n📊 Table Access:");
     for (table, perms) in &role_config.tables {
-        let can_read = !matches!(&perms.readable, ReadableColumns::List(cols) if cols.is_empty());
-        let can_write = !perms.editable.is_empty();
+        let can_read = !perms.readable.is_empty();
+        let can_write = !perms.creatable.is_empty() || !perms.updatable.is_empty();
 
         let mut access = Vec::new();
         if can_read {

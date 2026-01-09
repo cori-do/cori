@@ -1,79 +1,136 @@
 # =============================================================================
 # ADMIN AGENT ROLE
 # =============================================================================
-# Full access for administrative AI agents (use with caution).
+# Full administrative access to all tables and columns.
+# Use with extreme caution - typically for internal tools only.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
 
 name: admin_agent
-description: "Administrative agent with full tenant access"
+description: "Administrative agent with full database access"
 
 tables:
-  customers:
-    readable: "*"
-    editable: "*"
-  contacts:
-    readable: "*"
-    editable: "*"
   addresses:
     readable: "*"
-    editable: "*"
-  opportunities:
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  api_keys:
     readable: "*"
-    editable: "*"
-  orders:
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  audit_logs:
     readable: "*"
-    editable:
-      status: {}
-      notes: {}
-  order_items:
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  billing:
     readable: "*"
-    editable: {}
-  invoices:
-    readable: "*"
-    editable:
-      status:
-        allowed_values: [draft, sent, paid, overdue, cancelled]
-  payments:
-    readable: "*"
-    editable: {}
-  tickets:
-    readable: "*"
-    editable: "*"
-  tasks:
-    readable: "*"
-    editable: "*"
-  notes:
-    readable: "*"
-    editable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
   communications:
     readable: "*"
-    editable: "*"
-  products:
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  contacts:
     readable: "*"
-    editable:
-      name: {}
-      description: {}
-      price: {}
-      stock_quantity: {}
-      is_active: {}
-  tags:
-    readable: "*"
-    editable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
   customer_tags:
     readable: "*"
-    editable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
 
-# Still blocked from the most sensitive tables
-blocked_tables:
-  - users           # User management is not for AI
-  - api_keys        # Secrets
-  - billing         # Payment data
-  - audit_logs      # System audit trail
-  - organizations   # Tenant configuration
+  customers:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
 
-max_rows_per_query: 1000
-max_affected_rows: 100
+  invoices:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
 
-blocked_operations:
-  - TRUNCATE
-  - DROP
+  notes:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
 
+  opportunities:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  order_items:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  orders:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  organizations:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  payments:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  products:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  tags:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  tasks:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  tickets:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+  users:
+    readable: "*"
+    creatable: "*"
+    updatable: "*"
+    deletable: true
+
+blocked_tables: []
+
+max_rows_per_query: 10000
+max_affected_rows: 1000

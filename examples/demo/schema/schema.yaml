@@ -1,0 +1,1286 @@
+# =============================================================================
+# Schema Definition
+# =============================================================================
+# Auto-generated database schema. DO NOT EDIT manually.
+# Run 'cori db sync' to update from live database.
+# Conforms to: SchemaDefinition.schema.json
+# =============================================================================
+
+version: "1.0.0"
+captured_at: "2026-01-09T15:01:40.369023+00:00"
+
+database:
+  engine: postgres
+  version: "unknown"
+
+
+tables:
+  - name: addresses
+    schema: public
+    columns:
+      - name: address_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: street
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: city
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: state
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: zip
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: country
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: is_billing
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: is_shipping
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [address_id]
+    foreign_keys:
+      - name: addresses_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: addresses_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: api_keys
+    schema: public
+    columns:
+      - name: api_key_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: key_prefix
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: key_hash
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: scopes
+        type: unknown
+        native_type: "ARRAY"
+        nullable: true
+      - name: expires_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: last_used_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: created_by
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: revoked_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [api_key_id]
+    foreign_keys:
+      - name: api_keys_created_by_fkey
+        columns: [created_by]
+        references:
+          table: users
+          columns: [user_id]
+      - name: api_keys_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: audit_logs
+    schema: public
+    columns:
+      - name: log_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: user_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: entity_type
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: entity_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: action
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: old_values
+        type: jsonb
+        native_type: "jsonb"
+        nullable: true
+      - name: new_values
+        type: jsonb
+        native_type: "jsonb"
+        nullable: true
+      - name: ip_address
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: user_agent
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [log_id]
+    foreign_keys:
+      - name: audit_logs_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: audit_logs_user_id_fkey
+        columns: [user_id]
+        references:
+          table: users
+          columns: [user_id]
+
+  - name: billing
+    schema: public
+    columns:
+      - name: billing_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: stripe_customer_id
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: current_plan
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: billing_email
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: billing_name
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: tax_id
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: card_last_four
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: card_brand
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: billing_address
+        type: jsonb
+        native_type: "jsonb"
+        nullable: true
+      - name: monthly_spend
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [billing_id]
+    foreign_keys:
+      - name: billing_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: communications
+    schema: public
+    columns:
+      - name: communication_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: user_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: contact_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: opportunity_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: type
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: direction
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: subject
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: content
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: communication_date
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: false
+      - name: duration_minutes
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: outcome
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [communication_id]
+    foreign_keys:
+      - name: communications_contact_id_fkey
+        columns: [contact_id]
+        references:
+          table: contacts
+          columns: [contact_id]
+      - name: communications_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: communications_opportunity_id_fkey
+        columns: [opportunity_id]
+        references:
+          table: opportunities
+          columns: [opportunity_id]
+      - name: communications_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: communications_user_id_fkey
+        columns: [user_id]
+        references:
+          table: users
+          columns: [user_id]
+
+  - name: contacts
+    schema: public
+    columns:
+      - name: contact_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: first_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: last_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: position
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: email
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: phone
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: is_primary
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [contact_id]
+    foreign_keys:
+      - name: contacts_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: contacts_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: customer_tags
+    schema: public
+    columns:
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: tag_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [customer_id, tag_id]
+    foreign_keys:
+      - name: customer_tags_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: customer_tags_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: customer_tags_tag_id_fkey
+        columns: [tag_id]
+        references:
+          table: tags
+          columns: [tag_id]
+
+  - name: customers
+    schema: public
+    columns:
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: first_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: last_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: email
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: phone
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: company
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: status
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: notes
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: lifetime_value
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [customer_id]
+    foreign_keys:
+      - name: customers_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: invoices
+    schema: public
+    columns:
+      - name: invoice_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: order_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: invoice_number
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: invoice_date
+        type: date
+        native_type: "date"
+        nullable: false
+      - name: due_date
+        type: date
+        native_type: "date"
+        nullable: false
+      - name: status
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: total_amount
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: paid_amount
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [invoice_id]
+    foreign_keys:
+      - name: invoices_order_id_fkey
+        columns: [order_id]
+        references:
+          table: orders
+          columns: [order_id]
+      - name: invoices_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: notes
+    schema: public
+    columns:
+      - name: note_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: created_by
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: opportunity_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: ticket_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: content
+        type: text
+        native_type: "text"
+        nullable: false
+      - name: is_internal
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [note_id]
+    foreign_keys:
+      - name: notes_created_by_fkey
+        columns: [created_by]
+        references:
+          table: users
+          columns: [user_id]
+      - name: notes_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: notes_opportunity_id_fkey
+        columns: [opportunity_id]
+        references:
+          table: opportunities
+          columns: [opportunity_id]
+      - name: notes_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: notes_ticket_id_fkey
+        columns: [ticket_id]
+        references:
+          table: tickets
+          columns: [ticket_id]
+
+  - name: opportunities
+    schema: public
+    columns:
+      - name: opportunity_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: assigned_to
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: description
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: stage
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: estimated_value
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: probability
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: expected_close_date
+        type: date
+        native_type: "date"
+        nullable: true
+      - name: actual_close_date
+        type: date
+        native_type: "date"
+        nullable: true
+      - name: lost_reason
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [opportunity_id]
+    foreign_keys:
+      - name: opportunities_assigned_to_fkey
+        columns: [assigned_to]
+        references:
+          table: users
+          columns: [user_id]
+      - name: opportunities_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: opportunities_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: order_items
+    schema: public
+    columns:
+      - name: order_item_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: order_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: product_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: quantity
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: unit_price
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: discount_percentage
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: line_total
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [order_item_id]
+    foreign_keys:
+      - name: order_items_order_id_fkey
+        columns: [order_id]
+        references:
+          table: orders
+          columns: [order_id]
+      - name: order_items_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: order_items_product_id_fkey
+        columns: [product_id]
+        references:
+          table: products
+          columns: [product_id]
+
+  - name: orders
+    schema: public
+    columns:
+      - name: order_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: opportunity_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: created_by
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: order_number
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: order_date
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: status
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: shipping_address_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: billing_address_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: shipping_cost
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: tax_amount
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: discount_amount
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: subtotal
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: total_amount
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: notes
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [order_id]
+    foreign_keys:
+      - name: orders_billing_address_id_fkey
+        columns: [billing_address_id]
+        references:
+          table: addresses
+          columns: [address_id]
+      - name: orders_created_by_fkey
+        columns: [created_by]
+        references:
+          table: users
+          columns: [user_id]
+      - name: orders_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: orders_opportunity_id_fkey
+        columns: [opportunity_id]
+        references:
+          table: opportunities
+          columns: [opportunity_id]
+      - name: orders_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: orders_shipping_address_id_fkey
+        columns: [shipping_address_id]
+        references:
+          table: addresses
+          columns: [address_id]
+
+  - name: organizations
+    schema: public
+    columns:
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: slug
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: plan
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: settings
+        type: jsonb
+        native_type: "jsonb"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [organization_id]
+
+  - name: payments
+    schema: public
+    columns:
+      - name: payment_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: invoice_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: payment_date
+        type: date
+        native_type: "date"
+        nullable: false
+      - name: amount
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: payment_method
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: reference_number
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: notes
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [payment_id]
+    foreign_keys:
+      - name: payments_invoice_id_fkey
+        columns: [invoice_id]
+        references:
+          table: invoices
+          columns: [invoice_id]
+      - name: payments_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: products
+    schema: public
+    columns:
+      - name: product_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: description
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: sku
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: price
+        type: decimal
+        native_type: "numeric"
+        nullable: false
+      - name: cost
+        type: decimal
+        native_type: "numeric"
+        nullable: true
+      - name: category
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: stock_quantity
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: is_active
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [product_id]
+    foreign_keys:
+      - name: products_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: tags
+    schema: public
+    columns:
+      - name: tag_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: color
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [tag_id]
+    foreign_keys:
+      - name: tags_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: tasks
+    schema: public
+    columns:
+      - name: task_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: assigned_to
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: opportunity_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: ticket_id
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: title
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: description
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: due_date
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: priority
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: status
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: completed_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [task_id]
+    foreign_keys:
+      - name: tasks_assigned_to_fkey
+        columns: [assigned_to]
+        references:
+          table: users
+          columns: [user_id]
+      - name: tasks_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: tasks_opportunity_id_fkey
+        columns: [opportunity_id]
+        references:
+          table: opportunities
+          columns: [opportunity_id]
+      - name: tasks_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+      - name: tasks_ticket_id_fkey
+        columns: [ticket_id]
+        references:
+          table: tickets
+          columns: [ticket_id]
+
+  - name: tickets
+    schema: public
+    columns:
+      - name: ticket_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: customer_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: assigned_to
+        type: integer
+        native_type: "integer"
+        nullable: true
+      - name: ticket_number
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: subject
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: description
+        type: text
+        native_type: "text"
+        nullable: true
+      - name: status
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: priority
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: category
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: resolved_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [ticket_id]
+    foreign_keys:
+      - name: tickets_assigned_to_fkey
+        columns: [assigned_to]
+        references:
+          table: users
+          columns: [user_id]
+      - name: tickets_customer_id_fkey
+        columns: [customer_id]
+        references:
+          table: customers
+          columns: [customer_id]
+      - name: tickets_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+
+  - name: users
+    schema: public
+    columns:
+      - name: user_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: organization_id
+        type: integer
+        native_type: "integer"
+        nullable: false
+      - name: username
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: email
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: password_hash
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: first_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: last_name
+        type: string
+        native_type: "character varying"
+        nullable: false
+      - name: role
+        type: string
+        native_type: "character varying"
+        nullable: true
+      - name: is_active
+        type: boolean
+        native_type: "boolean"
+        nullable: true
+      - name: last_login_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: created_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+      - name: updated_at
+        type: timestamp
+        native_type: "timestamp without time zone"
+        nullable: true
+    primary_key: [user_id]
+    foreign_keys:
+      - name: users_organization_id_fkey
+        columns: [organization_id]
+        references:
+          table: organizations
+          columns: [organization_id]
+

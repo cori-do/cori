@@ -42,7 +42,7 @@ impl DashboardServer {
 
     /// Start the dashboard server.
     pub async fn run(&self) -> Result<(), DashboardError> {
-        let addr = format!("0.0.0.0:{}", self.config.listen_port);
+        let addr = format!("0.0.0.0:{}", self.config.get_port());
         tracing::info!(address = %addr, "Starting Cori dashboard");
 
         let app = if let Some(state) = &self.state {
@@ -84,7 +84,7 @@ impl DashboardServer {
 
     /// Get the configured listen port.
     pub fn listen_port(&self) -> u16 {
-        self.config.listen_port
+        self.config.get_port()
     }
     
     /// Get a reference to the application state if available.

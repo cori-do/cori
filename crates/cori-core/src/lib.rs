@@ -6,9 +6,15 @@ pub mod config;
 
 // Re-export commonly used config types for convenience
 pub use config::{
-    AuditConfig, BiscuitConfig, ColumnConstraints, CoriConfig, CustomAction, DashboardConfig,
-    EditableColumns, GuardrailsConfig, McpConfig, Operation, ReadableColumns,
-    RoleConfig, TablePermissions, TenancyConfig, UpstreamConfig, VirtualSchemaConfig,
+    // Main config
+    AuditConfig, BiscuitConfig, CoriConfig, DashboardConfig,
+    GuardrailsConfig, McpConfig, UpstreamConfig, VirtualSchemaConfig,
+    // New schema-based config types
+    SchemaDefinition, RulesDefinition, TypesDefinition, RoleDefinition, GroupDefinition,
+    TablePermissions, TableRules, TenantConfig, SoftDeleteConfig, TypeDef, ApprovalConfig,
+    CreatableColumnConstraints, UpdatableColumnConstraints,
+    // Role definition types needed by cori-mcp
+    ColumnList, CreatableColumns, UpdatableColumns, DeletablePermission, ApprovalRequirement,
 };
 
 /// Top-level intent (idempotent) that can be executed or previewed.

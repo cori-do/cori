@@ -333,11 +333,9 @@ pub struct GuardrailsSettingsResponse {
     pub blocked_operations: Vec<String>,
 }
 
-/// Tenancy settings.
+/// Tenancy settings (from rules definition).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TenancySettingsResponse {
-    pub tenant_id_type: String,
-    pub default_column: String,
     pub table_count: usize,
     pub global_table_count: usize,
 }

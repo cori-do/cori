@@ -43,7 +43,7 @@
     "max_affected_rows": {
       "type": "integer",
       "description": "Maximum number of rows that can be affected by a single mutation (INSERT, UPDATE, DELETE).",
-      "minimum": 1,
+      "minimum": 0,
       "default": 10,
       "examples": [10, 50, 100]
     },

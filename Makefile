@@ -21,6 +21,9 @@ test: build demo-up
 	@sleep 5
 	cd examples && ./test-all-commands.sh
 
+test-e2e: build
+	@echo "Running end-to-end tests..."
+	cargo test -p cori-mcp --test e2e -- --nocapture --test-threads=1
 # Run demo database (PostgreSQL)
 demo-up:
 	docker compose -f examples/docker-compose.demo.yml up -d

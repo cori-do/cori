@@ -4,9 +4,10 @@
 
 use cori_audit::AuditLogger;
 use cori_biscuit::PublicKey;
+use cori_core::config::role_definition::RoleDefinition;
+use cori_core::config::rules_definition::RulesDefinition;
 use cori_core::config::{
-    AuditConfig, DashboardConfig, McpConfig, RoleConfig, TenancyConfig, Transport,
-    UpstreamConfig,
+    AuditConfig, DashboardConfig, McpConfig, Transport, UpstreamConfig,
 };
 use cori_dashboard::DashboardServer;
 use cori_mcp::approval::ApprovalManager;
@@ -26,16 +27,6 @@ pub struct ServeConfig {
 
     /// Biscuit configuration.
     pub biscuit: BiscuitConfig,
-
-    /// Path to external tenancy configuration file.
-    /// If specified, this takes precedence over inline tenancy config.
-    #[serde(default)]
-    pub tenancy_file: Option<PathBuf>,
-
-    /// Inline tenancy configuration.
-    /// Used if tenancy_file is not specified.
-    #[serde(default)]
-    pub tenancy: TenancyConfigFile,
 
     /// Audit configuration.
     #[serde(default)]
@@ -64,17 +55,19 @@ pub struct ServeConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct UpstreamConfigFile {
-    /// Hostname (optional if credentials_env is set)
+    /// Hostname (optional if database_url_env is set)
     pub host: Option<String>,
     #[serde(default = "default_upstream_port")]
     pub port: u16,
-    /// Database name (optional if credentials_env is set)
+    /// Database name (optional if database_url_env is set)
     pub database: Option<String>,
-    /// Username (optional if credentials_env is set)
+    /// Username (optional if database_url_env is set)
     pub username: Option<String>,
     pub password: Option<String>,
-    /// Environment variable containing DATABASE_URL
-    pub credentials_env: Option<String>,
+    /// Environment variable containing DATABASE_URL (recommended)
+    pub database_url_env: Option<String>,
+    /// Direct database URL (for development only)
+    pub database_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,23 +78,6 @@ pub struct BiscuitConfig {
     #[allow(dead_code)]
     pub private_key_file: Option<PathBuf>,
     pub public_key_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TenancyConfigFile {
-    #[serde(default = "default_tenant_column")]
-    pub default_column: String,
-    #[serde(default)]
-    pub global_tables: Vec<String>,
-}
-
-impl Default for TenancyConfigFile {
-    fn default() -> Self {
-        Self {
-            default_column: default_tenant_column(),
-            global_tables: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -128,22 +104,6 @@ pub struct McpConfigFile {
     /// HTTP port (only used when transport is HTTP).
     #[serde(default = "default_mcp_port")]
     pub http_port: u16,
-
-    /// Whether dry-run mode is enabled.
-    #[serde(default = "default_enabled")]
-    pub dry_run_enabled: bool,
-
-    /// Whether to auto-generate MCP tools from schema.
-    #[serde(default = "default_enabled")]
-    pub auto_generate_tools: bool,
-
-    /// Actions that require human approval.
-    #[serde(default)]
-    pub require_approval: Vec<String>,
-
-    /// Exceptions to approval requirements.
-    #[serde(default)]
-    pub approval_exceptions: Vec<String>,
 }
 
 impl Default for McpConfigFile {
@@ -152,10 +112,6 @@ impl Default for McpConfigFile {
             enabled: true,
             transport: Some("http".to_string()),
             http_port: default_mcp_port(),
-            dry_run_enabled: true,
-            auto_generate_tools: true,
-            require_approval: Vec::new(),
-            approval_exceptions: Vec::new(),
         }
     }
 }
@@ -392,10 +348,6 @@ fn default_upstream_port() -> u16 {
     5432
 }
 
-fn default_tenant_column() -> String {
-    "tenant_id".to_string()
-}
-
 fn default_enabled() -> bool {
     true
 }
@@ -470,8 +422,8 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         }
     };
 
-    // Build tenancy config - load from file if specified, otherwise use inline config
-    let tenancy_config = load_tenancy_config(&serve_config, &config_dir)?;
+    // Load rules configuration from schema/rules.yaml
+    let rules = load_rules(&config_dir)?;
 
     // Build audit logger if enabled
     let audit_logger = if serve_config.audit.enabled {
@@ -489,10 +441,10 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     // Create shared approval manager for MCP and dashboard
     let approval_manager = Arc::new(ApprovalManager::default());
 
-    // Convert loaded roles to cori_core RoleConfig for MCP
-    let core_roles: HashMap<String, RoleConfig> = roles
+    // Convert loaded roles to cori_core RoleDefinition for MCP
+    let core_roles: HashMap<String, RoleDefinition> = roles
         .iter()
-        .map(|r| (r.name.clone(), convert_to_core_role_config(r)))
+        .map(|r| (r.name.clone(), convert_to_role_definition(r)))
         .collect();
 
     // Log startup information
@@ -558,15 +510,12 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
             let mcp_config = McpConfig {
                 enabled: true,
                 transport: Transport::Http,
-                http_port: serve_config.mcp.http_port,
-                dry_run_enabled: serve_config.mcp.dry_run_enabled,
-                auto_generate_tools: serve_config.mcp.auto_generate_tools,
-                require_approval: serve_config.mcp.require_approval.clone(),
-                approval_exceptions: serve_config.mcp.approval_exceptions.clone(),
+                host: "127.0.0.1".to_string(),
+                port: serve_config.mcp.http_port,
             };
 
             let database_url = database_url.clone();
-            let tenancy_for_mcp = tenancy_config.clone();
+            let rules_for_mcp = rules.clone();
             let schema = schema.clone();
             let core_roles = core_roles.clone();
             let approval_manager = approval_manager.clone();
@@ -574,7 +523,7 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 
             let handle = tokio::spawn(async move {
                 tracing::info!(
-                    port = mcp_config.http_port,
+                    port = mcp_config.port,
                     auth_enabled = public_key.is_some(),
                     "Starting MCP HTTP server"
                 );
@@ -589,8 +538,12 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
                         // Create MCP server
                         let mut server = McpServer::new(mcp_config)
                             .with_pool(pool)
-                            .with_tenancy_config(tenancy_for_mcp)
                             .with_approval_manager(approval_manager);
+
+                        // Add rules if loaded
+                        if let Some(r) = rules_for_mcp {
+                            server = server.with_rules(r);
+                        }
 
                         // Add public key for authentication if available
                         if let Some(pk) = public_key {
@@ -603,7 +556,7 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 
                         // If there's a default role, use it for tool generation
                         if let Some((_name, role_config)) = core_roles.iter().next() {
-                            server = server.with_role_config(role_config.clone());
+                            server = server.with_role(role_config.clone());
                             server.generate_tools();
                         }
 
@@ -630,12 +583,13 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     if serve_config.dashboard.enabled {
         let dashboard_config = DashboardConfig {
             enabled: true,
-            listen_port: serve_config.dashboard.listen_port,
+            host: "127.0.0.1".to_string(),
+            port: serve_config.dashboard.listen_port,
             ..Default::default()
         };
 
         // Build CoriConfig for dashboard state
-        let cori_config = build_cori_config(&serve_config, &config_dir, &tenancy_config, &core_roles)?;
+        let cori_config = build_cori_config(&serve_config, &config_dir, &rules, &core_roles)?;
 
         let audit_logger_for_dashboard = audit_logger
             .clone()
@@ -676,16 +630,16 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 
 /// Build database URL from upstream config.
 fn build_database_url(upstream: &UpstreamConfigFile) -> anyhow::Result<String> {
-    // First check for credentials_env
-    if let Some(env_var) = &upstream.credentials_env {
+    // First check for database_url_env
+    if let Some(env_var) = &upstream.database_url_env {
         if let Ok(url) = std::env::var(env_var) {
             return Ok(url);
         }
     }
 
-    // Also check DATABASE_URL directly
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return Ok(url);
+    // Check for direct database_url
+    if let Some(url) = &upstream.database_url {
+        return Ok(url.clone());
     }
 
     // Build from individual components
@@ -702,66 +656,108 @@ fn build_database_url(upstream: &UpstreamConfigFile) -> anyhow::Result<String> {
     ))
 }
 
-/// Convert a LoadedRole to cori_core RoleConfig.
-fn convert_to_core_role_config(loaded: &LoadedRole) -> RoleConfig {
-    use cori_core::config::{
-        ColumnConstraints as CoreColumnConstraints, EditableColumns as CoreEditableColumns,
-        ReadableColumns as CoreReadableColumns, TablePermissions,
+/// Convert a LoadedRole to cori_core RoleDefinition.
+fn convert_to_role_definition(loaded: &LoadedRole) -> RoleDefinition {
+    use cori_core::config::role_definition::{
+        AllColumns, ColumnList, CreatableColumns, CreatableColumnConstraints,
+        DeletablePermission, TablePermissions, UpdatableColumns,
+        UpdatableColumnConstraints,
     };
 
     let mut tables = HashMap::new();
 
     for (table_name, table_config) in &loaded.config.tables {
         let readable = match &table_config.readable {
-            ReadableColumnsConfig::All => CoreReadableColumns::All("*".to_string()),
-            ReadableColumnsConfig::List(cols) => CoreReadableColumns::List(cols.clone()),
-            ReadableColumnsConfig::None => CoreReadableColumns::List(Vec::new()),
+            ReadableColumnsConfig::All => ColumnList::All(AllColumns),
+            ReadableColumnsConfig::List(cols) => ColumnList::List(cols.clone()),
+            ReadableColumnsConfig::None => ColumnList::List(Vec::new()),
         };
 
-        let editable = match &table_config.editable {
-            EditableColumnsConfig::All => CoreEditableColumns::All("*".to_string()),
+        // Convert editable to both creatable and updatable (old model didn't distinguish)
+        let (creatable, updatable) = match &table_config.editable {
+            EditableColumnsConfig::All => (
+                CreatableColumns::All(AllColumns),
+                UpdatableColumns::All(AllColumns),
+            ),
             EditableColumnsConfig::Map(map) => {
-                let converted: HashMap<String, CoreColumnConstraints> = map
+                use cori_core::config::role_definition::ApprovalRequirement;
+                
+                let creatable_map: HashMap<String, CreatableColumnConstraints> = map
                     .iter()
                     .map(|(col, constraints)| {
+                        let restrict_to = constraints.allowed_values.as_ref().map(|vals| {
+                            vals.iter().map(|v| serde_json::Value::String(v.clone())).collect()
+                        });
                         (
                             col.clone(),
-                            CoreColumnConstraints {
-                                allowed_values: constraints.allowed_values.clone(),
-                                pattern: constraints.pattern.clone(),
-                                min: constraints.min,
-                                max: constraints.max,
-                                requires_approval: constraints.requires_approval,
+                            CreatableColumnConstraints {
+                                required: false,
+                                default: None,
+                                restrict_to,
+                                requires_approval: if constraints.requires_approval { 
+                                    Some(ApprovalRequirement::Simple(true)) 
+                                } else { 
+                                    None 
+                                },
+                                guidance: None,
                             },
                         )
                     })
                     .collect();
-                CoreEditableColumns::Map(converted)
+                let updatable_map: HashMap<String, UpdatableColumnConstraints> = map
+                    .iter()
+                    .map(|(col, constraints)| {
+                        let restrict_to = constraints.allowed_values.as_ref().map(|vals| {
+                            vals.iter().map(|v| serde_json::Value::String(v.clone())).collect()
+                        });
+                        (
+                            col.clone(),
+                            UpdatableColumnConstraints {
+                                restrict_to,
+                                transitions: None,
+                                only_when: None,
+                                increment_only: false,
+                                append_only: false,
+                                requires_approval: if constraints.requires_approval { 
+                                    Some(ApprovalRequirement::Simple(true)) 
+                                } else { 
+                                    None 
+                                },
+                                guidance: None,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    CreatableColumns::Map(creatable_map),
+                    UpdatableColumns::Map(updatable_map),
+                )
             }
-            EditableColumnsConfig::None => CoreEditableColumns::Map(HashMap::new()),
+            EditableColumnsConfig::None => (
+                CreatableColumns::Map(HashMap::new()),
+                UpdatableColumns::Map(HashMap::new()),
+            ),
         };
 
         tables.insert(
             table_name.clone(),
             TablePermissions {
                 readable,
-                editable,
-                tenant_column: table_config.tenant_column.clone(),
-                operations: None,
+                creatable,
+                updatable,
+                deletable: DeletablePermission::Allowed(false), // Default to no delete
             },
         );
     }
 
-    RoleConfig {
+    RoleDefinition {
         name: loaded.name.clone(),
         description: loaded.config.description.clone(),
+        approvals: None,
         tables,
         blocked_tables: loaded.config.blocked_tables.clone(),
         max_rows_per_query: loaded.config.max_rows_per_query,
         max_affected_rows: loaded.config.max_affected_rows,
-        blocked_operations: loaded.config.blocked_operations.clone(),
-        custom_actions: Vec::new(),
-        include_actions: Vec::new(),
     }
 }
 
@@ -769,8 +765,8 @@ fn convert_to_core_role_config(loaded: &LoadedRole) -> RoleConfig {
 fn build_cori_config(
     serve_config: &ServeConfig,
     _config_dir: &Path,
-    tenancy_config: &TenancyConfig,
-    roles: &HashMap<String, RoleConfig>,
+    rules: &Option<RulesDefinition>,
+    roles: &HashMap<String, RoleDefinition>,
 ) -> anyhow::Result<cori_core::config::CoriConfig> {
     use cori_core::config::CoriConfig;
 
@@ -792,7 +788,9 @@ fn build_cori_config(
             .clone()
             .unwrap_or_else(|| "postgres".to_string()),
         password: serve_config.upstream.password.clone(),
-        credentials_env: serve_config.upstream.credentials_env.clone(),
+        database_url_env: serve_config.upstream.database_url_env.clone(),
+        database_url: serve_config.upstream.database_url.clone(),
+        ..Default::default()
     };
 
     let mcp = McpConfig {
@@ -801,16 +799,14 @@ fn build_cori_config(
             Some("http") => Transport::Http,
             _ => Transport::Stdio,
         },
-        http_port: serve_config.mcp.http_port,
-        dry_run_enabled: serve_config.mcp.dry_run_enabled,
-        auto_generate_tools: serve_config.mcp.auto_generate_tools,
-        require_approval: serve_config.mcp.require_approval.clone(),
-        approval_exceptions: serve_config.mcp.approval_exceptions.clone(),
+        host: "127.0.0.1".to_string(),
+        port: serve_config.mcp.http_port,
     };
 
     let dashboard = DashboardConfig {
         enabled: serve_config.dashboard.enabled,
-        listen_port: serve_config.dashboard.listen_port,
+        host: "127.0.0.1".to_string(),
+        port: serve_config.dashboard.listen_port,
         ..Default::default()
     };
 
@@ -832,17 +828,15 @@ fn build_cori_config(
             private_key_file: serve_config.biscuit.private_key_file.clone(),
             ..Default::default()
         },
-        tenancy: tenancy_config.clone(),
-        tenancy_file: serve_config.tenancy_file.clone(),
         mcp,
         dashboard,
         audit,
+        rules: rules.clone(),
         virtual_schema: Default::default(),
         guardrails: Default::default(),
         observability: Default::default(),
-        roles_dir: serve_config.roles_dir.clone(),
-        role_files: serve_config.role_files.clone(),
         roles: roles.clone(),
+        ..Default::default()
     })
 }
 
@@ -882,39 +876,27 @@ fn resolve_keypair(config: &BiscuitConfig, config_dir: &Path) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("Failed to generate ephemeral keypair: {}", e))
 }
 
-/// Load tenancy configuration from file or inline config.
-fn load_tenancy_config(config: &ServeConfig, config_dir: &Path) -> anyhow::Result<TenancyConfig> {
-    if let Some(tenancy_file) = &config.tenancy_file {
-        tracing::info!(path = %tenancy_file.display(), "Loading tenancy configuration from file");
-        match TenancyConfig::load_from_path(tenancy_file, config_dir) {
-            Ok(tenancy) => {
-                tracing::debug!(
-                    default_column = %tenancy.default_column,
-                    tables = tenancy.tables.len(),
-                    global_tables = tenancy.global_tables.len(),
-                    "Tenancy configuration loaded"
+/// Load rules definition from schema/rules.yaml.
+fn load_rules(config_dir: &Path) -> anyhow::Result<Option<RulesDefinition>> {
+    let rules_path = config_dir.join("schema/rules.yaml");
+    if rules_path.exists() {
+        match RulesDefinition::from_file(&rules_path) {
+            Ok(rules) => {
+                tracing::info!(
+                    tables = rules.tables.len(),
+                    path = %rules_path.display(),
+                    "Loaded rules configuration"
                 );
-                Ok(tenancy)
+                Ok(Some(rules))
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to load tenancy file, using inline configuration"
-                );
-                Ok(TenancyConfig {
-                    default_column: config.tenancy.default_column.clone(),
-                    global_tables: config.tenancy.global_tables.clone(),
-                    ..Default::default()
-                })
+                tracing::warn!("Failed to load rules file: {}", e);
+                Ok(None)
             }
         }
     } else {
-        // Use inline configuration
-        Ok(TenancyConfig {
-            default_column: config.tenancy.default_column.clone(),
-            global_tables: config.tenancy.global_tables.clone(),
-            ..Default::default()
-        })
+        tracing::debug!("No rules file found at {}", rules_path.display());
+        Ok(None)
     }
 }
 
@@ -948,8 +930,13 @@ fn resolve_public_key(config: &BiscuitConfig) -> anyhow::Result<String> {
 pub fn load_roles(config: &ServeConfig, config_dir: &Path) -> anyhow::Result<Vec<LoadedRole>> {
     let mut roles: HashMap<String, RoleConfigFile> = HashMap::new();
 
-    // 1. Load from roles_dir if specified
-    if let Some(roles_dir) = &config.roles_dir {
+    // 1. Load from roles_dir if specified, otherwise try convention default "roles/"
+    let roles_dir = config
+        .roles_dir
+        .clone()
+        .or_else(|| Some(PathBuf::from("roles")));
+    
+    if let Some(roles_dir) = &roles_dir {
         let resolved_dir = if roles_dir.is_absolute() {
             roles_dir.clone()
         } else {
@@ -963,9 +950,16 @@ pub fn load_roles(config: &ServeConfig, config_dir: &Path) -> anyhow::Result<Vec
                 roles.insert(role.name.clone(), role.config);
             }
         } else if config.roles_dir.is_some() {
+            // Only warn if explicitly configured (not just default)
             tracing::warn!(
                 dir = %resolved_dir.display(),
                 "Roles directory does not exist or is not a directory"
+            );
+        } else {
+            // Debug only for default directory not existing
+            tracing::debug!(
+                dir = %resolved_dir.display(),
+                "Default roles directory not found, skipping"
             );
         }
     }
@@ -1082,12 +1076,6 @@ upstream:
 biscuit:
   public_key_env: BISCUIT_PUBLIC_KEY
 
-tenancy:
-  default_column: organization_id
-  global_tables:
-    - products
-    - categories
-
 audit:
   enabled: true
   log_queries: true
@@ -1096,8 +1084,7 @@ audit:
 
         let serve_config: ServeConfig = serde_yaml::from_str(config).unwrap();
         assert_eq!(serve_config.upstream.host.as_deref(), Some("localhost"));
-        assert_eq!(serve_config.tenancy.default_column, "organization_id");
-        assert_eq!(serve_config.tenancy.global_tables.len(), 2);
+        // Note: tenancy config is now in schema/rules.yaml, not in ServeConfig
     }
 
     #[test]
@@ -1113,7 +1100,7 @@ biscuit:
 
         let serve_config: ServeConfig = serde_yaml::from_str(config).unwrap();
         assert_eq!(serve_config.upstream.port, 5432);
-        assert_eq!(serve_config.tenancy.default_column, "tenant_id");
+        // Note: tenancy config is now in schema/rules.yaml, not in ServeConfig
     }
 
     #[test]

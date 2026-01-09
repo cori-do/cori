@@ -10,7 +10,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-[Quick Start](#-quick-start) • [Why Cori](#-the-problem) • [How It Works](#-how-it-works) • [Documentation](AGENTS.md)
+[Quick Start](#-quick-start) • [Why Cori](#-the-problem) • [How It Works](#-how-it-works) 
 
 </div>
 
@@ -347,6 +347,6 @@ Apache 2.0 — Use it, fork it, build on it.
 
 **Cori: Because AI agents shouldn't have `sudo` on your database.**
 
-[Get Started](#-quick-start) • [Read the Docs](AGENTS.md) • [Star on GitHub ⭐](https://github.com/cori-do/cori)
+[Get Started](#-quick-start) • [Star on GitHub ⭐](https://github.com/cori-do/cori)
 
 </div>

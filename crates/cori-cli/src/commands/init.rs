@@ -71,11 +71,6 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
         .await
         .context("Failed to introspect database schema")?;
 
-    // Write schema snapshot
-    let schema_path = project_dir.join("schema").join("snapshot.json");
-    fs::write(&schema_path, serde_json::to_vec_pretty(&schema)?)?;
-    println!("   ✓ Schema snapshot written to schema/snapshot.json");
-
     // Analyze schema for tenant columns and FK relationships
     let tables = extract_tables(&schema);
     let tenant_column = detect_tenant_column(&tables);
@@ -90,7 +85,7 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     if let Some(ref col) = tenant_column {
         println!("   ✓ Auto-detected tenant column: {}", col);
     } else {
-        println!("   ⚠ No tenant column auto-detected (configure manually in tenancy.yaml)");
+        println!("   ⚠ No tenant column auto-detected (configure manually in schema/rules.yaml)");
     }
 
     // Analyze tenancy including FK chain resolution
@@ -141,12 +136,6 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
         println!("   {}", warning);
     }
 
-    // Generate tenancy.yaml
-    let tenancy_yaml = generate_tenancy_yaml(&tenancy_analysis);
-    let tenancy_path = project_dir.join("tenancy.yaml");
-    fs::write(&tenancy_path, &tenancy_yaml)?;
-    println!("   ✓ Tenancy configuration written to tenancy.yaml");
-
     // Identify sensitive tables
     let sensitive_tables = identify_sensitive_tables(&tables);
     if !sensitive_tables.is_empty() {
@@ -156,18 +145,43 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
         );
     }
 
-    // Generate configuration file
+    // Generate schema files (per AGENTS.md Section 11)
+    println!("📄 Generating schema files...");
+    let schema_dir = project_dir.join("schema");
+
+    // 1. schema/schema.yaml - Auto-generated database schema (SchemaDefinition.schema.json)
+    let schema_yaml = generate_schema_yaml(&schema, &tables);
+    fs::write(schema_dir.join("schema.yaml"), &schema_yaml)?;
+    println!("   ✓ schema/schema.yaml (auto-generated database schema)");
+
+    // 2. schema/rules.yaml - User-editable tenancy and validation rules (RulesDefinition.schema.json)
+    let rules_yaml = generate_rules_yaml(&tenancy_analysis, &tables);
+    fs::write(schema_dir.join("rules.yaml"), &rules_yaml)?;
+    println!("   ✓ schema/rules.yaml (tenancy, soft-delete, validation rules)");
+
+    // 3. schema/types.yaml - Reusable semantic types (TypesDefinition.schema.json)
+    let types_yaml = generate_types_yaml();
+    fs::write(schema_dir.join("types.yaml"), &types_yaml)?;
+    println!("   ✓ schema/types.yaml (reusable semantic types)");
+
+    // Generate configuration file (CoriDefinition.schema.json)
     println!("⚙️  Generating configuration...");
-    let config = generate_config(project, &tenant_column, &sensitive_tables);
+    let config = generate_config(project, &sensitive_tables);
     let config_path = project_dir.join("cori.yaml");
     fs::write(&config_path, config)?;
-    println!("   ✓ Configuration written to cori.yaml");
+    println!("   ✓ cori.yaml (main configuration)");
 
-    // Generate sample roles
+    // Generate sample roles (RoleDefinition.schema.json)
     println!("👥 Generating sample roles...");
     let roles_dir = project_dir.join("roles");
     generate_sample_roles(&roles_dir, &tables, &tenant_column, &sensitive_tables)?;
     println!("   ✓ Sample roles written to roles/");
+
+    // Generate sample approval group (GroupDefinition.schema.json)
+    println!("👥 Generating sample approval group...");
+    let groups_dir = project_dir.join("groups");
+    generate_sample_groups(&groups_dir)?;
+    println!("   ✓ Sample group written to groups/");
 
     // Generate README
     let readme_path = project_dir.join("README.md");
@@ -182,25 +196,29 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     println!("📂 Project structure:");
     println!("   {}/", project);
     println!("   ├── cori.yaml           # Main configuration");
-    println!("   ├── tenancy.yaml        # Tenant column mapping & FK chains");
-    println!("   ├── keys/               # Biscuit keypair (keep private.key secret!)");
-    println!("   │   ├── private.key");
-    println!("   │   └── public.key");
-    println!("   ├── roles/              # Role definitions");
+    println!("   ├── schema/             # Database schema files");
+    println!("   │   ├── schema.yaml     # Auto-generated DB schema (DO NOT EDIT)");
+    println!("   │   ├── rules.yaml      # Tenancy, soft-delete, validation rules");
+    println!("   │   └── types.yaml      # Reusable semantic types");
+    println!("   ├── roles/              # Role definitions (one file per role)");
     println!("   │   ├── admin_agent.yaml");
     println!("   │   ├── readonly_agent.yaml");
     println!("   │   └── support_agent.yaml");
-    println!("   ├── schema/             # Schema snapshots");
-    println!("   │   └── snapshot.json");
-    println!("   └── tokens/             # Generated tokens (gitignore these)");
+    println!("   ├── groups/             # Approval groups");
+    println!("   │   └── support_managers.yaml");
+    println!("   ├── keys/               # Biscuit keypair (keep private.key secret!)");
+    println!("   │   ├── private.key");
+    println!("   │   └── public.key");
+    println!("   └── tokens/             # Generated tokens (gitignored)");
     println!();
     println!("🚦 Next steps:");
     println!("   1. cd {}", project);
-    println!("   2. Review tenancy.yaml - especially tables with FK-inherited tenancy");
+    println!("   2. Review schema/rules.yaml - especially tables with FK-inherited tenancy");
     println!("   3. Review and customize roles in roles/*.yaml");
     println!("   4. Set DATABASE_URL environment variable");
     println!("   5. Start the server: cori serve --config cori.yaml");
-    println!("   6. Mint a token: cori token mint --role support_agent --tenant <tenant_id> --expires 24h");
+    println!("   6. Mint a token: cori token mint --role support_agent --output role.token");
+    println!("   7. Attenuate for tenant: cori token attenuate --base role.token --tenant <id> --output agent.token");
     println!();
     println!("📚 See README.md for detailed instructions.");
 
@@ -208,8 +226,15 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
 }
 
 /// Create the project directory structure.
+/// 
+/// Creates the following structure per AGENTS.md:
+/// - schema/           # Database schema files
+/// - roles/            # Role definitions (one file per role)
+/// - groups/           # Approval groups
+/// - keys/             # Biscuit keypair
+/// - tokens/           # Generated tokens (gitignored)
 fn create_project_structure(project_dir: &PathBuf) -> Result<()> {
-    let dirs = ["schema", "roles", "keys", "tokens"];
+    let dirs = ["schema", "roles", "groups", "keys", "tokens"];
 
     for dir in dirs {
         fs::create_dir_all(project_dir.join(dir))?;
@@ -231,6 +256,9 @@ tokens/*.biscuit
 
 # Local development
 *.local.yaml
+
+# Logs
+logs/
 "#;
     fs::write(project_dir.join(".gitignore"), gitignore)?;
 
@@ -410,17 +438,6 @@ fn analyze_tenancy(tables: &[TableInfo], tenant_column: &Option<String>) -> Tena
     let mut table_tenancy: HashMap<String, TenancySource> = HashMap::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    // Detect tenant type from the first table with the tenant column
-    let tenant_type = tables
-        .iter()
-        .find_map(|t| {
-            t.columns
-                .iter()
-                .find(|c| c.name == tenant_col)
-                .map(|c| normalize_tenant_type(&c.data_type))
-        })
-        .unwrap_or_else(|| "uuid".to_string());
-
     // First pass: identify tables with direct tenant columns
     for table in tables {
         if let Some(col) = table.columns.iter().find(|c| c.name == tenant_col) {
@@ -475,7 +492,6 @@ fn analyze_tenancy(tables: &[TableInfo], tenant_column: &Option<String>) -> Tena
     }
 
     TenancyAnalysis {
-        tenant_type,
         tenant_column: Some(tenant_col),
         table_tenancy,
         warnings,
@@ -610,162 +626,416 @@ fn is_likely_global_table(name: &str, table: &TableInfo) -> bool {
     false
 }
 
-/// Generate tenancy.yaml content from analysis.
-fn generate_tenancy_yaml(analysis: &TenancyAnalysis) -> String {
+/// Generate schema/schema.yaml content matching SchemaDefinition.schema.json.
+/// This is an auto-generated file that captures the database structure.
+fn generate_schema_yaml(raw_schema: &JsonValue, tables: &[TableInfo]) -> String {
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    // Extract database info
+    let db_version = raw_schema
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    
+    // Extract enums
+    let enums_yaml = raw_schema
+        .get("enums")
+        .and_then(|e| e.as_array())
+        .map(|enums| {
+            enums
+                .iter()
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?;
+                    let schema = e.get("schema").and_then(|s| s.as_str()).unwrap_or("public");
+                    let values: Vec<&str> = e
+                        .get("values")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect();
+                    Some(format!(
+                        "  - name: {}\n    schema: {}\n    values: [{}]",
+                        name,
+                        schema,
+                        values.join(", ")
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    // Generate table entries
+    let tables_yaml: Vec<String> = tables
+        .iter()
+        .map(|table| {
+            let columns_yaml: Vec<String> = table
+                .columns
+                .iter()
+                .map(|col| {
+                    let generic_type = normalize_column_type(&col.data_type);
+                    let nullable = if col.nullable { "true" } else { "false" };
+                    format!(
+                        "      - name: {}\n        type: {}\n        native_type: \"{}\"\n        nullable: {}",
+                        col.name, generic_type, col.data_type, nullable
+                    )
+                })
+                .collect();
+
+            let pk_yaml = if table.primary_key.is_empty() {
+                String::new()
+            } else {
+                format!("    primary_key: [{}]\n", table.primary_key.join(", "))
+            };
+
+            let fk_yaml = if table.foreign_keys.is_empty() {
+                String::new()
+            } else {
+                let fks: Vec<String> = table
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| {
+                        format!(
+                            "      - name: {}\n        columns: [{}]\n        references:\n          table: {}\n          columns: [{}]",
+                            fk.name, fk.column, fk.references_table, fk.references_column
+                        )
+                    })
+                    .collect();
+                format!("    foreign_keys:\n{}\n", fks.join("\n"))
+            };
+
+            format!(
+                "  - name: {}\n    schema: {}\n    columns:\n{}\n{}{}",
+                table.name,
+                table.schema,
+                columns_yaml.join("\n"),
+                pk_yaml,
+                fk_yaml
+            )
+        })
+        .collect();
+
+    format!(
+        r#"# =============================================================================
+# Schema Definition
+# =============================================================================
+# Auto-generated database schema. DO NOT EDIT manually.
+# Run 'cori db sync' to update from live database.
+# Conforms to: SchemaDefinition.schema.json
+# =============================================================================
+
+version: "1.0.0"
+captured_at: "{now}"
+
+database:
+  engine: postgres
+  version: "{db_version}"
+
+{enums_section}
+tables:
+{tables}
+"#,
+        now = now,
+        db_version = db_version,
+        enums_section = if enums_yaml.is_empty() {
+            String::new()
+        } else {
+            format!("enums:\n{}\n\n", enums_yaml)
+        },
+        tables = tables_yaml.join("\n")
+    )
+}
+
+/// Normalize SQL data type to generic schema type (matching SchemaDefinition.schema.json)
+fn normalize_column_type(data_type: &str) -> &'static str {
+    let lower = data_type.to_lowercase();
+    if lower.contains("uuid") {
+        "uuid"
+    } else if lower.contains("serial") || lower.contains("bigint") {
+        "bigint"
+    } else if lower.contains("int") {
+        "integer"
+    } else if lower.contains("numeric") || lower.contains("decimal") {
+        "decimal"
+    } else if lower.contains("float") || lower.contains("double") || lower.contains("real") {
+        "float"
+    } else if lower.contains("bool") {
+        "boolean"
+    } else if lower.contains("timestamp") {
+        "timestamp"
+    } else if lower.contains("date") {
+        "date"
+    } else if lower.contains("time") {
+        "time"
+    } else if lower.contains("jsonb") {
+        "jsonb"
+    } else if lower.contains("json") {
+        "json"
+    } else if lower.contains("text") {
+        "text"
+    } else if lower.contains("varchar") || lower.contains("char") {
+        "string"
+    } else if lower.contains("bytea") || lower.contains("binary") {
+        "binary"
+    } else {
+        "unknown"
+    }
+}
+
+/// Generate schema/rules.yaml content matching RulesDefinition.schema.json.
+/// This defines tenancy, soft-delete, and validation rules.
+fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> String {
     let tenant_col = analysis
         .tenant_column
         .clone()
         .unwrap_or_else(|| "organization_id".to_string());
 
-    let mut direct_tables = Vec::new();
-    let mut fk_tables = Vec::new();
-    let mut global_tables = Vec::new();
-    let mut unknown_tables = Vec::new();
-
-    // Sort tables into categories
+    let mut table_entries = Vec::new();
+    
+    // Sort tables for consistent output
     let mut sorted_tables: Vec<_> = analysis.table_tenancy.iter().collect();
     sorted_tables.sort_by_key(|(name, _)| name.as_str());
 
     for (table_name, source) in sorted_tables {
-        match source {
-            TenancySource::Direct { column, data_type } => {
-                direct_tables.push(format!(
+        // Find the original table info for column details
+        let table_info = tables.iter().find(|t| &t.name == table_name);
+        
+        let entry = match source {
+            TenancySource::Direct { column, .. } => {
+                let columns_yaml = generate_column_rules(table_info);
+                format!(
                     r#"  {}:
-    tenant_column: {}
-    tenant_type: {}"#,
-                    table_name, column, data_type
-                ));
+    tenant: {}{}
+"#,
+                    table_name, 
+                    column,
+                    columns_yaml
+                )
             }
-            TenancySource::ViaForeignKey {
-                fk_column, chain, ..
-            } => {
-                let via_path = format!("{}.{}", chain[0].0, chain[0].1);
-                fk_tables.push(format!(
+            TenancySource::ViaForeignKey { fk_column, chain, .. } => {
+                let ref_table = &chain[0].0;
+                let columns_yaml = generate_column_rules(table_info);
+                format!(
                     r#"  {}:
-    # No direct tenant column - tenant context inherited via FK
-    tenant_via: {}
-    fk_column: {}
-    # NOTE: Queries on this table will need JOIN to enforce tenant isolation"#,
-                    table_name, via_path, fk_column
-                ));
+    tenant:
+      via: {}
+      references: {}{}
+"#,
+                    table_name, 
+                    fk_column, 
+                    ref_table,
+                    columns_yaml
+                )
             }
             TenancySource::Global => {
-                global_tables.push(format!("  {}:\n    global: true", table_name));
+                let columns_yaml = generate_column_rules(table_info);
+                format!(
+                    r#"  {}:
+    global: true{}
+"#,
+                    table_name,
+                    columns_yaml
+                )
             }
             TenancySource::Unknown => {
-                unknown_tables.push(format!(
-                    r#"  # {}:
-    # ⚠️  NEEDS CONFIGURATION - no tenant column or FK path detected
-    # Options:
-    #   - Add 'tenant_column: <column_name>' if it has tenant data
-    #   - Add 'global: true' if this is shared reference data
-    #   - Add 'tenant_via: <parent_table>.<fk_column>' for FK inheritance"#,
-                    table_name
-                ));
+                let columns_yaml = generate_column_rules(table_info);
+                format!(
+                    r#"  # {}: 
+    # ⚠️ NEEDS CONFIGURATION - no tenant column or FK path detected
+    # Uncomment one of the following options:
+    # tenant: {}           # If this table has the tenant column
+    # tenant:
+    #   via: <fk_column>   # If tenant is inherited via FK
+    #   references: <parent_table>
+    # global: true         # If this is shared reference data{}
+"#,
+                    table_name,
+                    tenant_col,
+                    columns_yaml
+                )
             }
-        }
-    }
-
-    let mut sections = Vec::new();
-
-    // Direct tenant tables section
-    if !direct_tables.is_empty() {
-        sections.push(format!(
-            r#"  # ---------------------------------------------------------------------------
-  # Tables with direct tenant column
-  # ---------------------------------------------------------------------------
-{}"#,
-            direct_tables.join("\n\n")
-        ));
-    }
-
-    // FK-inherited tables section
-    if !fk_tables.is_empty() {
-        sections.push(format!(
-            r#"
-  # ---------------------------------------------------------------------------
-  # Tables with tenant context via foreign key (requires JOIN for RLS)
-  # ---------------------------------------------------------------------------
-{}"#,
-            fk_tables.join("\n\n")
-        ));
-    }
-
-    // Global tables section
-    if !global_tables.is_empty() {
-        sections.push(format!(
-            r#"
-  # ---------------------------------------------------------------------------
-  # Global tables (shared across all tenants)
-  # ---------------------------------------------------------------------------
-{}"#,
-            global_tables.join("\n\n")
-        ));
-    }
-
-    // Unknown tables section
-    if !unknown_tables.is_empty() {
-        sections.push(format!(
-            r#"
-  # ---------------------------------------------------------------------------
-  # Tables requiring manual configuration
-  # ---------------------------------------------------------------------------
-{}"#,
-            unknown_tables.join("\n\n")
-        ));
+        };
+        table_entries.push(entry);
     }
 
     format!(
         r#"# =============================================================================
-# Tenancy Configuration
+# Rules Definition
 # =============================================================================
-# This file declares HOW multi-tenancy is structured for this database.
-# Generated by: cori init
+# User-modifiable column rules for tenancy, validation, and soft-delete.
+# Conforms to: RulesDefinition.schema.json
 #
-# It defines:
-#   - The tenant identifier type
-#   - Which column holds tenant IDs in each table
-#   - Tables that inherit tenant via FK relationships
-#   - Which tables are global (shared across tenants)
-#
-# This is separate from roles (access control) — tenancy is about database
-# structure, roles are about who can do what.
+# This file defines:
+#   - Which column holds tenant IDs in each table (tenant: <column>)
+#   - Inherited tenancy via FK relationships (tenant.via + tenant.references)
+#   - Global tables shared across tenants (global: true)
+#   - Soft-delete configuration (soft_delete.column)
+#   - Column validation and tagging (columns.<name>.type, tags)
 # =============================================================================
 
-# =============================================================================
-# TENANT IDENTIFIER
-# =============================================================================
-# The canonical tenant identifier used in Biscuit tokens and RLS predicates.
-
-tenant_id:
-  type: {}
-  description: "Tenant identifier"
-
-# =============================================================================
-# TABLE CONFIGURATION
-# =============================================================================
+version: "1.0.0"
 
 tables:
-{}
-
-# =============================================================================
-# AUTO-DETECTION (Fallback)
-# =============================================================================
-# For tables not explicitly configured, Cori will look for these columns.
-
-auto_detect:
-  enabled: true
-  columns:
-    - {}
-    - tenant_id
-    - org_id
-    - customer_id
-    - account_id
+{tables}
 "#,
-        analysis.tenant_type,
-        sections.join("\n"),
-        tenant_col
+        tables = table_entries.join("")
     )
+}
+
+/// Generate column rules for a table (PII detection, etc.)
+fn generate_column_rules(table_info: Option<&TableInfo>) -> String {
+    let Some(table) = table_info else {
+        return String::new();
+    };
+
+    let mut column_rules = Vec::new();
+
+    for col in &table.columns {
+        let lower = col.name.to_lowercase();
+        let mut rules = Vec::new();
+
+        // Detect email columns
+        if lower == "email" || lower.ends_with("_email") {
+            rules.push("type: email".to_string());
+            rules.push("tags: [pii]".to_string());
+        }
+        // Detect phone columns
+        else if lower == "phone" || lower.ends_with("_phone") || lower == "phone_number" {
+            rules.push("type: phone".to_string());
+            rules.push("tags: [pii]".to_string());
+        }
+        // Detect SSN/sensitive ID columns
+        else if lower == "ssn" || lower.contains("social_security") {
+            rules.push("tags: [pii, sensitive]".to_string());
+        }
+        // Detect address columns
+        else if lower.contains("address") && !lower.contains("ip") {
+            rules.push("tags: [pii]".to_string());
+        }
+        // Detect status columns with common values
+        else if lower == "status" {
+            rules.push("allowed_values: [active, inactive, pending, archived]".to_string());
+        }
+
+        if !rules.is_empty() {
+            column_rules.push(format!(
+                "      {}:\n        {}",
+                col.name,
+                rules.join("\n        ")
+            ));
+        }
+    }
+
+    // Check for soft-delete columns
+    let soft_delete_col = table.columns.iter().find(|c| {
+        let lower = c.name.to_lowercase();
+        lower == "deleted_at" || lower == "is_deleted" || lower == "deleted"
+    });
+
+    let soft_delete_yaml = soft_delete_col.map(|col| {
+        let lower = col.name.to_lowercase();
+        if lower == "deleted_at" {
+            format!(
+                "\n    soft_delete:\n      column: {}\n      deleted_value: \"NOW()\"\n      active_value: null",
+                col.name
+            )
+        } else {
+            format!(
+                "\n    soft_delete:\n      column: {}\n      deleted_value: true\n      active_value: false",
+                col.name
+            )
+        }
+    }).unwrap_or_default();
+
+    if column_rules.is_empty() && soft_delete_yaml.is_empty() {
+        String::new()
+    } else {
+        let columns_section = if column_rules.is_empty() {
+            String::new()
+        } else {
+            format!("\n    columns:\n{}", column_rules.join("\n"))
+        };
+        format!("{}{}", soft_delete_yaml, columns_section)
+    }
+}
+
+/// Generate schema/types.yaml content matching TypesDefinition.schema.json.
+/// This defines reusable semantic types for validation.
+fn generate_types_yaml() -> String {
+    r#"# =============================================================================
+# Types Definition
+# =============================================================================
+# Reusable semantic types for input validation.
+# Referenced by column rules in schema/rules.yaml.
+# Conforms to: TypesDefinition.schema.json
+# =============================================================================
+
+version: "1.0.0"
+
+types:
+  email:
+    description: "Email address"
+    pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+    tags: [pii]
+
+  phone:
+    description: "Phone number (E.164 format)"
+    pattern: "^\\+[1-9]\\d{1,14}$"
+    tags: [pii]
+
+  url:
+    description: "HTTP/HTTPS URL"
+    pattern: "^https?://[^\\s]+$"
+
+  uuid:
+    description: "UUID v4 format"
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+
+  slug:
+    description: "URL-safe slug"
+    pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+
+  currency_code:
+    description: "ISO 4217 currency code"
+    pattern: "^[A-Z]{3}$"
+
+  country_code:
+    description: "ISO 3166-1 alpha-2 country code"
+    pattern: "^[A-Z]{2}$"
+
+  # Sensitive types - always tagged for special handling
+  ssn:
+    description: "Social Security Number (US)"
+    pattern: "^\\d{3}-\\d{2}-\\d{4}$"
+    tags: [pii, sensitive]
+
+  credit_card:
+    description: "Credit card number (basic validation)"
+    pattern: "^\\d{13,19}$"
+    tags: [pii, sensitive]
+"#
+    .to_string()
+}
+
+/// Generate a sample approval group (GroupDefinition.schema.json)
+fn generate_sample_groups(groups_dir: &PathBuf) -> Result<()> {
+    let support_managers = r#"# =============================================================================
+# Approval Group: Support Managers
+# =============================================================================
+# Managers who can approve support ticket priority changes and escalations.
+# Conforms to: GroupDefinition.schema.json
+# =============================================================================
+
+name: support_managers
+description: "Managers who can approve support ticket priority changes"
+members:
+  - manager@example.com
+  - lead@example.com
+  # Add actual team member emails here
+"#;
+
+    fs::write(groups_dir.join("support_managers.yaml"), support_managers)?;
+    Ok(())
 }
 
 /// Identify potentially sensitive tables that should be blocked by default.
@@ -815,37 +1085,28 @@ fn identify_sensitive_tables(tables: &[TableInfo]) -> Vec<String> {
 }
 
 /// Generate the cori.yaml configuration file content.
+/// Conforms to CoriDefinition.schema.json
 fn generate_config(
     project: &str,
-    tenant_column: &Option<String>,
-    sensitive_tables: &[String],
+    _sensitive_tables: &[String],
 ) -> String {
-    let tenant_col = tenant_column
-        .clone()
-        .unwrap_or_else(|| "organization_id".to_string());
-
-    let blocked_tables_yaml = if sensitive_tables.is_empty() {
-        "  # No sensitive tables detected - add any that should be globally blocked\n  # - users\n  # - api_keys".to_string()
-    } else {
-        sensitive_tables
-            .iter()
-            .map(|t| format!("    - {}", t))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
 
     format!(
         r#"# =============================================================================
-# Cori MCP Server Configuration
+# Cori Configuration
 # =============================================================================
 # Project: {project}
 # Generated by: cori init
+# Conforms to: CoriDefinition.schema.json
 #
-# This configuration defines how Cori protects your database:
-#   - Multi-tenant isolation via cryptographic Biscuit tokens
-#   - Role-based access control with fine-grained permissions
-#   - MCP protocol for AI agent integration
-#   - Audit logging
+# This is the main configuration file for Cori - The Secure Kernel for AI.
+# It defines database connection, Biscuit tokens, MCP server, and audit logging.
+#
+# Convention over configuration:
+#   - Schema files are loaded from schema/ directory
+#   - Role files are loaded from roles/ directory  
+#   - Group files are loaded from groups/ directory
+#   - Keys are loaded from keys/ directory
 # =============================================================================
 
 project: {project}
@@ -855,73 +1116,42 @@ version: "1.0"
 # UPSTREAM DATABASE
 # =============================================================================
 # The PostgreSQL database that Cori protects.
+# Three configuration methods supported (choose one):
 
 upstream:
-  # Recommended: use environment variable (don't commit secrets!)
-  credentials_env: DATABASE_URL
+  # Method 1: Environment variable (RECOMMENDED for production)
+  database_url_env: DATABASE_URL
   
-  # Or explicit configuration (for local development only)
+  # Method 2: Direct URL (for development only - don't commit secrets!)
+  # database_url: postgres://user:pass@localhost:5432/mydb
+  
+  # Method 3: Individual fields
   # host: localhost
   # port: 5432
   # database: mydb
   # username: postgres
-  # password: postgres
+  # password_env: POSTGRES_PASSWORD  # Reference env var for password
+  
+  # Optional: SSL and connection pool settings
+  # ssl_mode: prefer  # disable, allow, prefer, require, verify-ca, verify-full
+  # pool:
+  #   min_connections: 1
+  #   max_connections: 10
+  #   acquire_timeout_seconds: 30
+  #   idle_timeout_seconds: 600
 
 # =============================================================================
 # BISCUIT TOKEN CONFIGURATION
 # =============================================================================
 # Authentication via cryptographic Biscuit tokens.
-# Keys generated in keys/ directory during init.
+# Keys are auto-generated in keys/ directory during init.
 
 biscuit:
   public_key_file: keys/public.key
   private_key_file: keys/private.key
-  # Or via environment variables:
+  # Or via environment variables (for production):
   # public_key_env: BISCUIT_PUBLIC_KEY
   # private_key_env: BISCUIT_PRIVATE_KEY
-  require_expiration: true
-  max_token_lifetime: "30d"
-
-# =============================================================================
-# TENANT ISOLATION
-# =============================================================================
-# Multi-tenant isolation configuration.
-# Detailed table-by-table configuration is in tenancy.yaml
-
-tenancy_file: tenancy.yaml
-
-# Quick reference (see tenancy.yaml for full configuration):
-#   - Default tenant column: {tenant_col}
-#   - Tables with FK-inherited tenancy will use JOINs
-#   - Global tables (no tenant isolation) are marked in tenancy.yaml
-
-# =============================================================================
-# VIRTUAL SCHEMA
-# =============================================================================
-# Control what AI agents see in schema introspection.
-
-virtual_schema:
-  enabled: true
-  
-  # Tables to hide from schema introspection
-  always_hidden:
-{blocked_tables_yaml}
-  
-  expose_row_counts: false
-  expose_indexes: false
-
-# =============================================================================
-# ROLES
-# =============================================================================
-# Load role definitions from the roles/ directory.
-# Each .yaml file defines one role with table/column permissions.
-
-roles_dir: roles
-
-# Or list specific role files:
-# role_files:
-#   - roles/support_agent.yaml
-#   - roles/readonly_agent.yaml
 
 # =============================================================================
 # MCP SERVER (Model Context Protocol)
@@ -930,10 +1160,12 @@ roles_dir: roles
 
 mcp:
   enabled: true
-  transport: stdio
-  http_port: 8989  # if transport: http
-  auto_generate_tools: true
-  dry_run_enabled: true
+  transport: stdio  # For Claude Desktop and local agents
+  
+  # For HTTP transport (remote agents, API integrations):
+  # transport: http
+  # host: 127.0.0.1
+  # port: 3000
 
 # =============================================================================
 # ADMIN DASHBOARD
@@ -941,7 +1173,8 @@ mcp:
 
 dashboard:
   enabled: true
-  listen_port: 8080
+  host: 127.0.0.1
+  port: 8080
   auth:
     type: basic
     users:
@@ -949,38 +1182,30 @@ dashboard:
         password_env: DASHBOARD_ADMIN_PASSWORD
 
 # =============================================================================
-# GUARDRAILS
-# =============================================================================
-# Global safety limits for all queries.
-
-guardrails:
-  max_rows_per_query: 10000
-  max_affected_rows: 1000
-  blocked_operations:
-    - TRUNCATE
-    - DROP
-    - ALTER
-    - CREATE
-    - GRANT
-    - REVOKE
-
-# =============================================================================
 # AUDIT LOGGING
 # =============================================================================
 
 audit:
   enabled: true
-  log_queries: true
-  log_results: false  # Don't log actual data
-  log_errors: true
+  directory: logs/
+  stdout: false
   retention_days: 90
-  output:
-    - type: file
-      path: logs/audit.jsonl
+
+# =============================================================================
+# OBSERVABILITY (optional)
+# =============================================================================
+
+# observability:
+#   metrics:
+#     enabled: true
+#     port: 9090
+#     path: /metrics
+#   health:
+#     enabled: true
+#     port: 8081
+#     path: /health
 "#,
         project = project,
-        tenant_col = tenant_col,
-        blocked_tables_yaml = blocked_tables_yaml
     )
 }
 
@@ -1013,6 +1238,7 @@ fn generate_sample_roles(
 }
 
 /// Generate admin role with full access.
+/// Conforms to RoleDefinition.schema.json
 fn generate_admin_role(tables: &[TableInfo], _tenant_column: &Option<String>) -> String {
     let table_entries: Vec<String> = tables
         .iter()
@@ -1020,7 +1246,9 @@ fn generate_admin_role(tables: &[TableInfo], _tenant_column: &Option<String>) ->
             format!(
                 r#"  {}:
     readable: "*"
-    editable: "*""#,
+    creatable: "*"
+    updatable: "*"
+    deletable: true"#,
                 t.name
             )
         })
@@ -1032,6 +1260,8 @@ fn generate_admin_role(tables: &[TableInfo], _tenant_column: &Option<String>) ->
 # =============================================================================
 # Full administrative access to all tables and columns.
 # Use with extreme caution - typically for internal tools only.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
 
 name: admin_agent
 description: "Administrative agent with full database access"
@@ -1043,14 +1273,13 @@ blocked_tables: []
 
 max_rows_per_query: 10000
 max_affected_rows: 1000
-
-blocked_operations: []
 "#,
         table_entries.join("\n\n")
     )
 }
 
 /// Generate readonly role.
+/// Conforms to RoleDefinition.schema.json
 fn generate_readonly_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> String {
     let table_entries: Vec<String> = tables
         .iter()
@@ -1060,7 +1289,7 @@ fn generate_readonly_role(tables: &[&TableInfo], sensitive_tables: &[String]) ->
             format!(
                 r#"  {}:
     readable: [{}]
-    editable: {{}}"#,
+    # No creatable, updatable, or deletable = read-only"#,
                 t.name,
                 columns.join(", ")
             )
@@ -1086,6 +1315,8 @@ fn generate_readonly_role(tables: &[&TableInfo], sensitive_tables: &[String]) ->
 # =============================================================================
 # Read-only access to non-sensitive tables.
 # Suitable for analytics and reporting agents.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
 
 name: readonly_agent
 description: "Read-only agent for analytics and reporting"
@@ -1097,12 +1328,6 @@ tables:
 
 max_rows_per_query: 5000
 max_affected_rows: 0
-
-blocked_operations:
-  - INSERT
-  - UPDATE
-  - DELETE
-  - TRUNCATE
 "#,
         table_entries.join("\n\n"),
         blocked_yaml
@@ -1110,6 +1335,7 @@ blocked_operations:
 }
 
 /// Generate support agent role.
+/// Conforms to RoleDefinition.schema.json
 fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> String {
     // Common customer-facing table patterns
     let customer_tables = ["customers", "customer", "contacts", "contact", "clients", "client"];
@@ -1134,7 +1360,7 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
         .collect();
 
     let table_entries: Vec<String> = if support_tables.is_empty() {
-        // If no common tables found, use first few tables
+        // If no common tables found, use first few tables (read-only)
         tables
             .iter()
             .take(5)
@@ -1143,7 +1369,7 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
                 format!(
                     r#"  {}:
     readable: [{}]
-    editable: {{}}"#,
+    # No creatable, updatable, or deletable = read-only"#,
                     t.name,
                     columns.join(", ")
                 )
@@ -1154,26 +1380,33 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
             .iter()
             .map(|t| {
                 let columns: Vec<String> = t.columns.iter().map(|c| c.name.clone()).collect();
-                // Check if this looks like a tickets table (allow status edits)
+                // Check if this looks like a tickets table (allow status updates)
                 let is_ticket = ticket_tables
                     .iter()
                     .any(|p| t.name.to_lowercase().contains(p));
 
                 if is_ticket && t.columns.iter().any(|c| c.name == "status") {
+                    // Ticket table with status - allow updating status
                     format!(
                         r#"  {}:
     readable: [{}]
-    editable:
+    updatable:
       status:
-        allowed_values: [open, in_progress, pending, resolved, closed]"#,
+        restrict_to: [open, in_progress, pending, resolved, closed]
+        guidance: "Update ticket status based on resolution progress"
+      priority:
+        requires_approval: true
+        guidance: "Priority changes require manager approval"
+    deletable: false"#,
                         t.name,
                         columns.join(", ")
                     )
                 } else {
+                    // Other tables - read-only
                     format!(
                         r#"  {}:
     readable: [{}]
-    editable: {{}}"#,
+    # Read-only access for this table"#,
                         t.name,
                         columns.join(", ")
                     )
@@ -1201,9 +1434,16 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
 # =============================================================================
 # Customer support agent with access to customer-facing data.
 # Can view most data, limited write access to tickets/issues.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
 
 name: support_agent
 description: "AI agent for customer support operations"
+
+# Default approval group for requires_approval flags
+approvals:
+  group: support_managers
+  notify_on_pending: true
 
 tables:
 {}
@@ -1212,10 +1452,6 @@ tables:
 
 max_rows_per_query: 100
 max_affected_rows: 10
-
-blocked_operations:
-  - DELETE
-  - TRUNCATE
 "#,
         table_entries.join("\n\n"),
         blocked_yaml
@@ -1299,18 +1535,21 @@ enforcing tenant isolation and role-based access control via the Model Context P
 
 ```
 {project}/
-├── cori.yaml           # Main configuration
-├── tenancy.yaml        # Tenant column mapping & FK chains
-├── keys/               # Biscuit keypair
-│   ├── private.key     # ⚠️ Keep secret! Don't commit!
-│   └── public.key
-├── roles/              # Role definitions
+├── cori.yaml              # Main configuration
+├── schema/                # Database schema files
+│   ├── schema.yaml        # Auto-generated DB schema (DO NOT EDIT)
+│   ├── rules.yaml         # Tenancy, soft-delete, validation rules
+│   └── types.yaml         # Reusable semantic types for validation
+├── roles/                 # Role definitions (one file per role)
 │   ├── admin_agent.yaml
 │   ├── readonly_agent.yaml
 │   └── support_agent.yaml
-├── schema/             # Schema snapshots
-│   └── snapshot.json
-└── tokens/             # Generated tokens (gitignored)
+├── groups/                # Approval groups for human-in-the-loop
+│   └── support_managers.yaml
+├── keys/                  # Biscuit keypair
+│   ├── private.key        # ⚠️ Keep secret! Don't commit!
+│   └── public.key
+└── tokens/                # Generated tokens (gitignored)
 ```
 
 ## Quick Start
@@ -1323,13 +1562,20 @@ Set the database URL via environment variable:
 export DATABASE_URL="postgres://user:password@host:5432/database"
 ```
 
-### 2. Review Role Definitions
+### 2. Review Configuration Files
 
-Edit the role files in `roles/` to match your access control requirements:
+**Schema rules** (`schema/rules.yaml`):
+- Defines which column holds tenant IDs in each table
+- Configures soft-delete behavior
+- Sets up column validation and PII tagging
 
+**Role definitions** (`roles/`):
 - `admin_agent.yaml` - Full access (use sparingly)
-- `readonly_agent.yaml` - Read-only analytics access
+- `readonly_agent.yaml` - Read-only analytics access  
 - `support_agent.yaml` - Customer support operations
+
+**Approval groups** (`groups/`):
+- Define who can approve human-in-the-loop actions
 
 ### 3. Start the Server
 
@@ -1338,18 +1584,18 @@ cori serve --config cori.yaml
 ```
 
 This starts:
-- MCP server (HTTP on port **8989** or stdio mode)
+- MCP server (stdio mode for Claude Desktop, or HTTP)
 - Admin dashboard on port **8080**
 
 ### 4. Mint Tokens
 
-Create a role token (base token without tenant restriction):
+**Step 1: Create a role token** (base token without tenant restriction):
 
 ```bash
 cori token mint --role support_agent --output tokens/support_role.token
 ```
 
-Attenuate to a specific tenant:
+**Step 2: Attenuate to a specific tenant** (when deploying to an AI agent):
 
 ```bash
 cori token attenuate \
@@ -1359,7 +1605,7 @@ cori token attenuate \
     --output tokens/acme_support.token
 ```
 
-Or mint a tenant-specific token directly:
+**Or mint a tenant-specific token directly:**
 
 ```bash
 cori token mint \
@@ -1400,7 +1646,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {{
     "cori": {{
       "command": "cori",
-      "args": ["mcp", "serve", "--config", "cori.yaml"],
+      "args": ["mcp", "--config", "cori.yaml"],
       "env": {{"CORI_TOKEN": "<base64 token>"}}
     }}
   }}
@@ -1409,11 +1655,14 @@ Add to `claude_desktop_config.json`:
 
 ### HTTP Transport
 
-For agents that prefer HTTP, start with `--http`:
+For agents that prefer HTTP, update `cori.yaml`:
 
-```bash
-cori serve --config cori.yaml
-# MCP HTTP server on port 8989
+```yaml
+mcp:
+  enabled: true
+  transport: http
+  host: 127.0.0.1
+  port: 3000
 ```
 
 ## Commands Reference
@@ -1421,22 +1670,22 @@ cori serve --config cori.yaml
 | Command | Description |
 |---------|-------------|
 | `cori serve` | Start the MCP server and dashboard |
-| `cori mcp serve` | Start MCP server (stdio mode) |
+| `cori mcp` | Start MCP server (stdio mode) |
+| `cori db sync` | Update schema/schema.yaml from database |
 | `cori keys generate` | Generate new Biscuit keypair |
-| `cori token mint` | Mint a new token |
+| `cori token mint` | Mint a new role token |
 | `cori token attenuate` | Attenuate a token to a tenant |
 | `cori token inspect` | Inspect token claims |
 | `cori token verify` | Verify token validity |
-| `cori schema snapshot` | Capture current schema |
-| `cori schema diff` | Compare schema to snapshot |
 
 ## Security Notes
 
 1. **Never commit `keys/private.key`** - It's gitignored by default
 2. **Use short token lifetimes** - Default is 24h, adjust as needed
 3. **Review role permissions** - Generated roles are starting points
-4. **Review `tenancy.yaml`** - Especially tables with FK-inherited tenancy
+4. **Review `schema/rules.yaml`** - Especially tables with FK-inherited tenancy
 5. **Enable TLS in production** - Use a reverse proxy like nginx or Caddy
+6. **Update `groups/`** - Add actual team member emails for approvals
 
 ## Documentation
 
@@ -1505,8 +1754,6 @@ enum TenancySource {
 /// Analysis result for tenancy configuration
 #[derive(Debug)]
 struct TenancyAnalysis {
-    /// Detected tenant column type (uuid, integer, string)
-    tenant_type: String,
     /// Detected tenant column name
     tenant_column: Option<String>,
     /// Per-table tenancy source

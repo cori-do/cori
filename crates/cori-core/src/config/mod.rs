@@ -1,22 +1,29 @@
 //! Configuration types for Cori MCP Server.
 //!
 //! This module provides the unified configuration types used across all Cori crates.
-//! Configuration can be loaded from YAML files (cori.yaml, tenancy.yaml, roles/*.yaml)
-//! and combined into a single `CoriConfig` structure.
+//! Configuration follows a convention-over-configuration approach:
 //!
 //! # Configuration Files
 //!
-//! - **cori.yaml**: Main configuration file with upstream DB, biscuit, MCP, and feature settings
-//! - **tenancy.yaml**: Defines how multi-tenancy is structured (tenant columns per table)
-//! - **roles/*.yaml**: Individual role definitions with table permissions and constraints
+//! ```text
+//! cori.yaml              → Main configuration (CoriConfig)
+//! schema/schema.yaml     → Auto-generated database schema (SchemaDefinition)
+//! schema/rules.yaml      → User-edited tenancy and validation rules (RulesDefinition)
+//! schema/types.yaml      → Reusable semantic types (TypesDefinition)
+//! roles/*.yaml           → Role definitions (RoleDefinition)
+//! groups/*.yaml          → Approval groups (GroupDefinition)
+//! ```
 
 pub mod audit;
 pub mod biscuit;
 pub mod dashboard;
+pub mod group_definition;
 pub mod mcp;
 pub mod proxy;
-pub mod role;
-pub mod tenancy;
+pub mod role_definition;
+pub mod rules_definition;
+pub mod schema_definition;
+pub mod types_definition;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,14 +32,25 @@ use std::path::{Path, PathBuf};
 
 pub use audit::AuditConfig;
 pub use biscuit::BiscuitConfig;
-pub use dashboard::DashboardConfig;
+pub use dashboard::{AuthConfig, AuthType, BasicAuthUser, DashboardConfig, OidcConfig};
+pub use group_definition::GroupDefinition;
 pub use mcp::{McpConfig, Transport};
-pub use proxy::UpstreamConfig;
-pub use role::{
-    ColumnConstraints, CustomAction, CustomActionInput, EditableColumns, Operation,
-    ReadableColumns, RoleConfig, TablePermissions,
+pub use proxy::{ConnectionPoolConfig, SslMode, UpstreamConfig};
+pub use role_definition::{
+    AllColumns, ApprovalConfig, ApprovalRequirement, ColumnCondition, ColumnList,
+    ComparisonCondition, CreatableColumnConstraints, CreatableColumns, DeletableConstraints,
+    DeletablePermission, RoleDefinition, TablePermissions, UpdatableColumnConstraints,
+    UpdatableColumns,
 };
-pub use tenancy::{TableTenancyConfig, TenancyConfig};
+pub use rules_definition::{
+    ColumnRules, InheritedTenant, RulesDefinition, SoftDeleteConfig, SoftDeleteValue, TableRules,
+    TenantConfig,
+};
+pub use schema_definition::{
+    ColumnSchema, ColumnType, DatabaseEngine, DatabaseInfo, EnumDefinition, ForeignKey,
+    ForeignKeyAction, ForeignKeyReference, Index, SchemaDefinition, TableSchema,
+};
+pub use types_definition::{TypeDef, TypesDefinition};
 
 /// Complete Cori configuration loaded from files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,14 +69,6 @@ pub struct CoriConfig {
     /// Biscuit token configuration.
     #[serde(default)]
     pub biscuit: BiscuitConfig,
-
-    /// Tenancy configuration (inline or from file).
-    #[serde(default)]
-    pub tenancy: TenancyConfig,
-
-    /// Path to tenancy configuration file (alternative to inline).
-    #[serde(default)]
-    pub tenancy_file: Option<PathBuf>,
 
     /// MCP server configuration.
     #[serde(default)]
@@ -84,17 +94,35 @@ pub struct CoriConfig {
     #[serde(default)]
     pub observability: ObservabilityConfig,
 
-    /// Directory containing role definition files.
+    // Convention-based directories (override defaults)
+    /// Directory containing schema files (default: "schema/").
     #[serde(default)]
-    pub roles_dir: Option<PathBuf>,
+    pub schema_dir: Option<PathBuf>,
 
-    /// List of individual role definition files.
+    /// Directory containing group files (default: "groups/").
     #[serde(default)]
-    pub role_files: Vec<PathBuf>,
+    pub groups_dir: Option<PathBuf>,
 
-    /// Inline role definitions.
+    // Loaded data (populated by load_with_context)
+    /// Role definitions loaded from roles/*.yaml.
     #[serde(default)]
-    pub roles: HashMap<String, RoleConfig>,
+    pub roles: HashMap<String, RoleDefinition>,
+
+    /// Group definitions loaded from groups/*.yaml.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub groups: HashMap<String, GroupDefinition>,
+
+    /// Schema definition loaded from schema/schema.yaml.
+    #[serde(default, skip_serializing)]
+    pub schema: Option<SchemaDefinition>,
+
+    /// Rules definition loaded from schema/rules.yaml.
+    #[serde(default, skip_serializing)]
+    pub rules: Option<RulesDefinition>,
+
+    /// Types definition loaded from schema/types.yaml.
+    #[serde(default, skip_serializing)]
+    pub types: Option<TypesDefinition>,
 }
 
 impl Default for CoriConfig {
@@ -104,17 +132,19 @@ impl Default for CoriConfig {
             version: None,
             upstream: UpstreamConfig::default(),
             biscuit: BiscuitConfig::default(),
-            tenancy: TenancyConfig::default(),
-            tenancy_file: None,
             mcp: McpConfig::default(),
             dashboard: DashboardConfig::default(),
             audit: AuditConfig::default(),
             virtual_schema: VirtualSchemaConfig::default(),
             guardrails: GuardrailsConfig::default(),
             observability: ObservabilityConfig::default(),
-            roles_dir: None,
-            role_files: Vec::new(),
+            schema_dir: None,
+            groups_dir: None,
             roles: HashMap::new(),
+            groups: HashMap::new(),
+            schema: None,
+            rules: None,
+            types: None,
         }
     }
 }
@@ -364,9 +394,12 @@ impl CoriConfig {
 
     /// Load configuration and resolve all external references.
     ///
-    /// This loads:
-    /// - Tenancy configuration from `tenancy_file` if specified
-    /// - Role configurations from `roles_dir` and `role_files`
+    /// This loads configuration following the convention-over-configuration approach:
+    /// - `schema/schema.yaml` → SchemaDefinition (auto-generated)
+    /// - `schema/rules.yaml` → RulesDefinition (user-edited tenancy/validation)
+    /// - `schema/types.yaml` → TypesDefinition (reusable semantic types)
+    /// - `roles/*.yaml` → RoleDefinition (one per file)
+    /// - `groups/*.yaml` → GroupDefinition (one per file)
     pub fn load_with_context(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let mut config = Self::from_file(path)?;
@@ -376,65 +409,99 @@ impl CoriConfig {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Load tenancy configuration from file if specified
-        if let Some(tenancy_file) = &config.tenancy_file {
-            let tenancy_path = if tenancy_file.is_absolute() {
-                tenancy_file.clone()
-            } else {
-                base_dir.join(tenancy_file)
-            };
+        // Determine schema directory (default: "schema/")
+        let schema_dir = config
+            .schema_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("schema"));
+        let schema_path = if schema_dir.is_absolute() {
+            schema_dir
+        } else {
+            base_dir.join(schema_dir)
+        };
 
-            if tenancy_path.exists() {
-                let tenancy_content = fs::read_to_string(&tenancy_path)?;
-                config.tenancy = TenancyConfig::from_yaml(&tenancy_content)?;
-            }
+        // Load schema definition from schema/schema.yaml
+        let schema_file = schema_path.join("schema.yaml");
+        if schema_file.exists() {
+            config.schema = Some(SchemaDefinition::from_file(&schema_file)?);
         }
 
-        // Load roles from directory
-        if let Some(roles_dir) = &config.roles_dir {
-            let roles_path = if roles_dir.is_absolute() {
-                roles_dir.clone()
-            } else {
-                base_dir.join(roles_dir)
-            };
+        // Load rules definition from schema/rules.yaml
+        let rules_file = schema_path.join("rules.yaml");
+        if rules_file.exists() {
+            config.rules = Some(RulesDefinition::from_file(&rules_file)?);
+        }
 
-            if roles_path.exists() && roles_path.is_dir() {
-                for entry in fs::read_dir(&roles_path)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-                        let role = RoleConfig::from_file(&path)?;
+        // Load types definition from schema/types.yaml
+        let types_file = schema_path.join("types.yaml");
+        if types_file.exists() {
+            config.types = Some(TypesDefinition::from_file(&types_file)?);
+        }
+
+        // Load roles from roles/*.yaml (convention)
+        let roles_path = base_dir.join("roles");
+        if roles_path.exists() && roles_path.is_dir() {
+            for entry in fs::read_dir(&roles_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                    // Load as RoleDefinition
+                    if let Ok(role) = RoleDefinition::from_file(&path) {
                         config.roles.insert(role.name.clone(), role);
                     }
                 }
             }
         }
 
-        // Load roles from individual files
-        for role_file in &config.role_files.clone() {
-            let role_path = if role_file.is_absolute() {
-                role_file.clone()
-            } else {
-                base_dir.join(role_file)
-            };
+        // Determine groups directory (default: "groups/")
+        let groups_dir = config
+            .groups_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("groups"));
+        let groups_path = if groups_dir.is_absolute() {
+            groups_dir
+        } else {
+            base_dir.join(groups_dir)
+        };
 
-            if role_path.exists() {
-                let role = RoleConfig::from_file(&role_path)?;
-                config.roles.insert(role.name.clone(), role);
+        // Load groups from groups/*.yaml
+        if groups_path.exists() && groups_path.is_dir() {
+            for entry in fs::read_dir(&groups_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                    let group = GroupDefinition::from_file(&path)?;
+                    config.groups.insert(group.name.clone(), group);
+                }
             }
         }
 
         Ok(config)
     }
 
-    /// Get a role by name.
-    pub fn get_role(&self, name: &str) -> Option<&RoleConfig> {
+    /// Get a role definition by name.
+    pub fn get_role(&self, name: &str) -> Option<&RoleDefinition> {
         self.roles.get(name)
     }
 
-    /// Get the tenancy configuration, resolving any file references.
-    pub fn get_tenancy(&self) -> &TenancyConfig {
-        &self.tenancy
+    /// Get the rules definition.
+    pub fn get_rules(&self) -> Option<&RulesDefinition> {
+        self.rules.as_ref()
+    }
+
+    /// Get the schema definition.
+    pub fn get_schema(&self) -> Option<&SchemaDefinition> {
+        self.schema.as_ref()
+    }
+
+    /// Get the types definition.
+    pub fn get_types(&self) -> Option<&TypesDefinition> {
+        self.types.as_ref()
+    }
+
+    /// Get a group by name.
+    pub fn get_group(&self, name: &str) -> Option<&GroupDefinition> {
+        self.groups.get(name)
     }
 
     /// Check if a table is globally hidden from schema introspection.
@@ -445,5 +512,23 @@ impl CoriConfig {
     /// Check if a table is globally visible in schema introspection.
     pub fn is_table_always_visible(&self, table: &str) -> bool {
         self.virtual_schema.always_visible.iter().any(|t| t == table)
+    }
+
+    /// Get tenant configuration for a table from rules.
+    pub fn get_table_tenant_config(&self, table: &str) -> Option<&TenantConfig> {
+        if let Some(rules) = &self.rules {
+            if let Some(config) = rules.get_tenant_config(table) {
+                return Some(config);
+            }
+        }
+        None
+    }
+
+    /// Check if a table is global (no tenant scoping).
+    pub fn is_global_table(&self, table: &str) -> bool {
+        if let Some(rules) = &self.rules {
+            return rules.is_global_table(table);
+        }
+        false
     }
 }

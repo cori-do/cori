@@ -139,6 +139,18 @@ enum Command {
 
     /// MCP server for AI agent integration.
     Mcp(commands::mcp::McpCommand),
+
+    /// Validate configuration files for consistency and correctness.
+    ///
+    /// This command performs comprehensive validation:
+    /// - JSON Schema validation against schemas in schemas/
+    /// - Cross-file consistency checks (tables, columns, groups)
+    /// - Best practice warnings (soft delete, approval groups)
+    Check {
+        /// Path to configuration file (YAML).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+    },
 }
 
 // ===== Phase 1: Core Command Definitions =====
@@ -272,6 +284,21 @@ enum PlanCommand {
     Preview { file: PathBuf },
 }
 
+/// Run configuration check as a pre-hook before commands that depend on config.
+/// Only runs if cori.yaml exists in the current directory.
+async fn run_pre_hook_check() -> anyhow::Result<()> {
+    let default_config = PathBuf::from("cori.yaml");
+    if default_config.exists() {
+        commands::check::run_pre_hook(&default_config).await?;
+    }
+    Ok(())
+}
+
+/// Run configuration check as a pre-hook with a custom config path.
+async fn run_pre_hook_check_with_config(config_path: &Path) -> anyhow::Result<()> {
+    commands::check::run_pre_hook(config_path).await
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Configure tracing to write to stderr (not stdout) to avoid contaminating
@@ -291,15 +318,30 @@ async fn main() -> anyhow::Result<()> {
             force,
         } => commands::init::run(&from_db, &project, force).await?,
 
-        Command::Schema { cmd } => run_schema(cmd).await?,
+        Command::Schema { cmd } => {
+            run_pre_hook_check().await?;
+            run_schema(cmd).await?
+        }
 
-        Command::Generate { cmd } => run_generate(cmd).await?,
+        Command::Generate { cmd } => {
+            run_pre_hook_check().await?;
+            run_generate(cmd).await?
+        }
 
-        Command::Actions { cmd } => run_actions(cmd).await?,
+        Command::Actions { cmd } => {
+            run_pre_hook_check().await?;
+            run_actions(cmd).await?
+        }
 
-        Command::Plan { cmd } => run_plan(cmd).await?,
+        Command::Plan { cmd } => {
+            run_pre_hook_check().await?;
+            run_plan(cmd).await?
+        }
 
-        Command::Apply { file, preview } => run_apply(&file, preview).await?,
+        Command::Apply { file, preview } => {
+            run_pre_hook_check().await?;
+            run_apply(&file, preview).await?
+        }
         Command::Approve {
             intent_id,
             reason,
@@ -438,11 +480,19 @@ async fn main() -> anyhow::Result<()> {
         },
 
         Command::Serve { config } => {
+            run_pre_hook_check_with_config(&config).await?;
             commands::serve::serve(config).await?;
         }
 
         Command::Mcp(cmd) => {
+            // For MCP, check the config path from the command args if available
+            let config_path = cmd.get_config_path();
+            run_pre_hook_check_with_config(&config_path).await?;
             commands::mcp::execute(cmd).await?;
+        }
+
+        Command::Check { config } => {
+            commands::check::run(&config).await?;
         }
     }
 

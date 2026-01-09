@@ -1,4 +1,7 @@
 //! MCP server configuration.
+//!
+//! This module defines configuration for the MCP (Model Context Protocol) server.
+//! Tools are auto-generated from schema and role permissions.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,25 +16,13 @@ pub struct McpConfig {
     #[serde(default)]
     pub transport: Transport,
 
+    /// HTTP host (only used when transport is HTTP).
+    #[serde(default = "default_http_host")]
+    pub host: String,
+
     /// HTTP port (only used when transport is HTTP).
     #[serde(default = "default_http_port")]
-    pub http_port: u16,
-
-    /// Whether dry-run mode is enabled.
-    #[serde(default = "default_dry_run_enabled")]
-    pub dry_run_enabled: bool,
-
-    /// Whether to auto-generate MCP tools from schema.
-    #[serde(default = "default_enabled")]
-    pub auto_generate_tools: bool,
-
-    /// Actions that require human approval (glob patterns).
-    #[serde(default)]
-    pub require_approval: Vec<String>,
-
-    /// Exceptions to approval requirements.
-    #[serde(default)]
-    pub approval_exceptions: Vec<String>,
+    pub port: u16,
 }
 
 /// MCP transport type.
@@ -50,12 +41,26 @@ impl Default for McpConfig {
         Self {
             enabled: default_enabled(),
             transport: Transport::default(),
-            http_port: default_http_port(),
-            dry_run_enabled: default_dry_run_enabled(),
-            auto_generate_tools: default_enabled(),
-            require_approval: Vec::new(),
-            approval_exceptions: Vec::new(),
+            host: default_http_host(),
+            port: default_http_port(),
         }
+    }
+}
+
+impl McpConfig {
+    /// Get the HTTP port.
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
+
+    /// Check if using HTTP transport.
+    pub fn is_http(&self) -> bool {
+        self.transport == Transport::Http
+    }
+
+    /// Check if using stdio transport.
+    pub fn is_stdio(&self) -> bool {
+        self.transport == Transport::Stdio
     }
 }
 
@@ -63,10 +68,10 @@ fn default_enabled() -> bool {
     true
 }
 
-fn default_http_port() -> u16 {
-    3000
+fn default_http_host() -> String {
+    "127.0.0.1".to_string()
 }
 
-fn default_dry_run_enabled() -> bool {
-    true
+fn default_http_port() -> u16 {
+    3000
 }

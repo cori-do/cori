@@ -2,7 +2,8 @@
 
 use crate::templates::{badge, empty_state, input, layout, select, tabs};
 use cori_audit::{AuditEvent, AuditEventType};
-use cori_core::{RoleConfig, CoriConfig};
+use cori_core::config::role_definition::RoleDefinition;
+use cori_core::CoriConfig;
 use cori_mcp::{ApprovalRequest, ApprovalStatus};
 use std::collections::HashMap;
 
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 // Tokens Page
 // =============================================================================
 
-pub fn tokens_page(roles: &HashMap<String, RoleConfig>, selected_role: Option<&str>) -> String {
+pub fn tokens_page(roles: &HashMap<String, RoleDefinition>, selected_role: Option<&str>) -> String {
     let role_options: Vec<(String, String, bool)> = std::iter::once(("".to_string(), "Select a role...".to_string(), selected_role.is_none()))
         .chain(roles.keys().map(|name| {
             (name.clone(), name.clone(), selected_role == Some(name.as_str()))
@@ -682,8 +683,8 @@ fn connection_settings(config: &CoriConfig) -> String {
         ssl_mode = "default",
         mcp_enabled = if config.mcp.enabled { "Yes" } else { "No" },
         mcp_transport = format!("{:?}", config.mcp.transport),
-        mcp_http_port = config.mcp.http_port,
-        dashboard_port = config.dashboard.listen_port,
+        mcp_http_port = config.mcp.get_port(),
+        dashboard_port = config.dashboard.get_port(),
         auth_type = config.dashboard.auth.auth_type,
     )
 }
@@ -836,46 +837,35 @@ fn audit_settings(config: &CoriConfig) -> String {
 }
 
 fn tenancy_settings(config: &CoriConfig) -> String {
-    let table_rows: String = config.tenancy.tables.iter().map(|(name, tc)| {
-        let column = tc.tenant_column.as_deref()
-            .or(tc.column.as_deref())
-            .unwrap_or(&config.tenancy.default_column);
-        let is_global = tc.global;
-        
-        format!(
-            r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                <td class="px-4 py-3 font-medium">{name}</td>
-                <td class="px-4 py-3"><code class="text-sm">{column}</code></td>
-                <td class="px-4 py-3">{global}</td>
-            </tr>"#,
-            name = name,
-            column = column,
-            global = if is_global { badge("Global", "blue") } else { badge("Scoped", "green") },
-        )
-    }).collect();
+    let rules = config.rules.as_ref();
+    
+    let table_rows: String = rules
+        .map(|r| {
+            r.tables.iter().map(|(name, tr)| {
+                let tenant_column = tr.get_direct_tenant_column()
+                    .unwrap_or("-");
+                let is_global = tr.global.unwrap_or(false);
+                
+                format!(
+                    r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                        <td class="px-4 py-3 font-medium">{name}</td>
+                        <td class="px-4 py-3"><code class="text-sm">{column}</code></td>
+                        <td class="px-4 py-3">{global}</td>
+                    </tr>"#,
+                    name = name,
+                    column = tenant_column,
+                    global = if is_global { badge("Global", "blue") } else { badge("Scoped", "green") },
+                )
+            }).collect::<String>()
+        })
+        .unwrap_or_default();
+
+    let table_count = rules.map(|r| r.tables.len()).unwrap_or(0);
 
     format!(
-        r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6 mb-6">
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Tenant Configuration</h3>
-            <div class="space-y-4">
-                <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                    <span class="text-gray-600 dark:text-gray-400">Tenant ID Type</span>
-                    <code class="text-sm">{tenant_type}</code>
-                </div>
-                <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                    <span class="text-gray-600 dark:text-gray-400">Default Column</span>
-                    <code class="text-sm">{default_column}</code>
-                </div>
-                <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                    <span class="text-gray-600 dark:text-gray-400">Auto-Detection</span>
-                    <span class="font-medium">{auto_detect}</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+        r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Table Configuration</h3>
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Table Configuration (from schema/rules.yaml)</h3>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full">
@@ -898,17 +888,14 @@ fn tenancy_settings(config: &CoriConfig) -> String {
             <div class="flex items-start gap-3">
                 <i class="fas fa-info-circle text-blue-500 mt-0.5"></i>
                 <div class="text-sm text-blue-700 dark:text-blue-300">
-                    <strong>Tenancy Configuration:</strong> Edit the <code>tenancy.yaml</code> file to modify table-level tenant configuration. 
+                    <strong>Rules Configuration:</strong> Edit the <code>schema/rules.yaml</code> file to modify tenancy configuration. 
                     Changes require a server restart.
                 </div>
             </div>
         </div>"##,
-        tenant_type = config.tenancy.tenant_id.id_type,
-        default_column = config.tenancy.default_column,
-        auto_detect = if config.tenancy.auto_detect.enabled { "Enabled" } else { "Disabled" },
         table_rows = table_rows,
-        empty_state = if config.tenancy.tables.is_empty() {
-            r#"<div class="text-center py-8 text-gray-500">No tables configured</div>"#
+        empty_state = if table_count == 0 {
+            r#"<div class="text-center py-8 text-gray-500">No tables configured in schema/rules.yaml</div>"#
         } else { "" },
     )
 }

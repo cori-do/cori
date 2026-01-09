@@ -1,0 +1,84 @@
+# =============================================================================
+# READONLY AGENT ROLE
+# =============================================================================
+# Read-only access to non-sensitive tables.
+# Suitable for analytics and reporting agents.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
+
+name: readonly_agent
+description: "Read-only agent for analytics and reporting"
+
+tables:
+  addresses:
+    readable: [address_id, organization_id, customer_id, street, city, state, zip, country, is_billing, is_shipping, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  communications:
+    readable: [communication_id, organization_id, user_id, customer_id, contact_id, opportunity_id, type, direction, subject, content, communication_date, duration_minutes, outcome, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  contacts:
+    readable: [contact_id, organization_id, customer_id, first_name, last_name, position, email, phone, is_primary, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  customer_tags:
+    readable: [customer_id, tag_id, organization_id, created_at]
+    # No creatable, updatable, or deletable = read-only
+
+  customers:
+    readable: [customer_id, organization_id, first_name, last_name, email, phone, company, status, notes, lifetime_value, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  invoices:
+    readable: [invoice_id, organization_id, order_id, invoice_number, invoice_date, due_date, status, total_amount, paid_amount, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  notes:
+    readable: [note_id, organization_id, created_by, customer_id, opportunity_id, ticket_id, content, is_internal, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  opportunities:
+    readable: [opportunity_id, organization_id, customer_id, assigned_to, name, description, stage, estimated_value, probability, expected_close_date, actual_close_date, lost_reason, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  order_items:
+    readable: [order_item_id, organization_id, order_id, product_id, quantity, unit_price, discount_percentage, line_total, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  orders:
+    readable: [order_id, organization_id, customer_id, opportunity_id, created_by, order_number, order_date, status, shipping_address_id, billing_address_id, shipping_cost, tax_amount, discount_amount, subtotal, total_amount, notes, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  organizations:
+    readable: [organization_id, name, slug, plan, settings, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  payments:
+    readable: [payment_id, organization_id, invoice_id, payment_date, amount, payment_method, reference_number, notes, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  products:
+    readable: [product_id, organization_id, name, description, sku, price, cost, category, stock_quantity, is_active, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  tags:
+    readable: [tag_id, organization_id, name, color, created_at]
+    # No creatable, updatable, or deletable = read-only
+
+  tasks:
+    readable: [task_id, organization_id, assigned_to, customer_id, opportunity_id, ticket_id, title, description, due_date, priority, status, completed_at, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+  tickets:
+    readable: [ticket_id, organization_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
+    # No creatable, updatable, or deletable = read-only
+
+blocked_tables:
+  - users
+  - api_keys
+  - billing
+  - audit_logs
+
+max_rows_per_query: 5000
+max_affected_rows: 0

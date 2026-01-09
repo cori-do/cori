@@ -9,8 +9,9 @@
 
 use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
-use cori_core::{RoleConfig, TenancyConfig};
 use crate::schema::DatabaseSchema;
+use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
+use cori_core::RoleDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
@@ -92,29 +93,26 @@ pub struct ExecutionContext {
 
 /// The tool executor handles running tools against the database.
 pub struct ToolExecutor {
-    /// Role configuration for permission checks.
-    role_config: RoleConfig,
+    /// Role definition for permission checks.
+    role: RoleDefinition,
     /// Approval manager for human-in-the-loop.
     approval_manager: Arc<ApprovalManager>,
     /// Database connection pool.
     pool: Option<PgPool>,
-    /// Tenancy configuration (per-table tenant columns + global tables).
-    tenancy: TenancyConfig,
+    /// Rules definition for tenant configuration.
+    rules: Option<RulesDefinition>,
     /// Database schema for primary key lookup.
     schema: Option<DatabaseSchema>,
 }
 
 impl ToolExecutor {
     /// Create a new tool executor.
-    pub fn new(role_config: RoleConfig, approval_manager: Arc<ApprovalManager>) -> Self {
+    pub fn new(role: RoleDefinition, approval_manager: Arc<ApprovalManager>) -> Self {
         Self {
-            role_config,
+            role,
             approval_manager,
             pool: None,
-            tenancy: TenancyConfig {
-                default_column: "organization_id".to_string(),
-                ..TenancyConfig::default()
-            },
+            rules: None,
             schema: None,
         }
     }
@@ -135,9 +133,9 @@ impl ToolExecutor {
         Ok(self)
     }
 
-    /// Set the tenancy configuration (per-table tenant columns + global tables).
-    pub fn with_tenancy_config(mut self, tenancy: TenancyConfig) -> Self {
-        self.tenancy = tenancy;
+    /// Set the rules definition for tenant configuration.
+    pub fn with_rules(mut self, rules: RulesDefinition) -> Self {
+        self.rules = Some(rules);
         self
     }
 
@@ -148,13 +146,30 @@ impl ToolExecutor {
     }
 
     fn tenant_column_for_table(&self, table: &str) -> Option<String> {
-        self.tenancy.get_tenant_column(table).map(|c| c.to_string())
+        let rules = self.rules.as_ref()?;
+        let table_rules = rules.get_table_rules(table)?;
+
+        // Check if global table
+        if table_rules.global.unwrap_or(false) {
+            return None;
+        }
+
+        // Get tenant config
+        match &table_rules.tenant {
+            Some(TenantConfig::Direct(column)) => Some(column.clone()),
+            Some(TenantConfig::Inherited(_)) => {
+                // For inherited tenancy, we need to JOIN through FK
+                // For now, return None (handled separately in query building)
+                None
+            }
+            None => None,
+        }
     }
 
     fn validate_tenant_for_table(&self, table: &str, tenant_id: &str) -> Result<(), String> {
         let tenant_column = self.tenant_column_for_table(table);
         if tenant_column.is_none() {
-            // Global / unscoped table: tenant not required.
+            // Global / unscoped table or inherited tenancy: tenant not required at this level.
             return Ok(());
         }
 
@@ -165,19 +180,7 @@ impl ToolExecutor {
             ));
         }
 
-        match self.tenancy.tenant_id.id_type.as_str() {
-            "integer" => {
-                if tenant_id.parse::<i64>().is_err() {
-                    return Err(format!(
-                        "Invalid tenant id '{}': expected integer (per tenancy.yaml tenant_id.type) for table '{}'.",
-                        tenant_id, table
-                    ));
-                }
-            }
-            // uuid/string: no extra validation here (DB will validate if needed).
-            _ => {}
-        }
-
+        // No type validation here - database will validate
         Ok(())
     }
 
@@ -521,8 +524,8 @@ impl ToolExecutor {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        // Apply max rows limit from role config
-        let max_rows = self.role_config.max_rows_per_query.unwrap_or(1000);
+        // Apply max rows limit from role
+        let max_rows = self.role.max_rows_per_query.unwrap_or(1000);
         let effective_limit = limit.min(max_rows);
         let tenant_column = self.tenant_column_for_table(table);
 
@@ -626,12 +629,11 @@ impl ToolExecutor {
         }
     }
 
-    /// Get readable columns for a table from role config.
+    /// Get readable columns for a table from role.
     fn get_readable_columns(&self, table: &str) -> Vec<String> {
-        self.role_config
-            .tables
-            .get(table)
-            .and_then(|t| t.readable.as_list())
+        self.role
+            .get_readable_columns(table)
+            .and_then(|cols| cols.as_list())
             .map(|cols| cols.to_vec())
             .unwrap_or_default()
     }
@@ -674,8 +676,47 @@ impl ToolExecutor {
         // Build INSERT statement from arguments
         let empty_map = serde_json::Map::new();
         let obj = arguments.as_object().unwrap_or(&empty_map);
-        
+
+        // SECURITY: Remove tenant column from user input - tenant is ALWAYS set from Biscuit token
+        // This prevents any attempt by users to override tenant isolation
+        let mut final_args = obj.clone();
+        if let Some(tc) = &tenant_column {
+            final_args.remove(tc);
+        }
+
+        // Validate required fields and apply default values from role's creatable column constraints
+        if let Some(creatable) = self.role.get_creatable_columns(table) {
+            if let Some(constraints_map) = creatable.as_map() {
+                for (col_name, constraints) in constraints_map {
+                    // Skip tenant column - it's handled separately from the token
+                    if let Some(tc) = &tenant_column {
+                        if col_name == tc {
+                            continue;
+                        }
+                    }
+
+                    let has_value = final_args.contains_key(col_name);
+
+                    // Check required constraint
+                    if constraints.required && !has_value {
+                        return ExecutionResult::error(format!(
+                            "Missing required field: '{}'",
+                            col_name
+                        ));
+                    }
+
+                    // If column not provided and has a default, apply it
+                    if !has_value {
+                        if let Some(default_val) = &constraints.default {
+                            final_args.insert(col_name.clone(), default_val.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         // Start with tenant column (if table is tenant-scoped)
+        // SECURITY: Tenant value ALWAYS comes from the Biscuit token, never from user input
         let mut columns: Vec<String> = Vec::new();
         let mut value_strs: Vec<String> = Vec::new();
         if let Some(tc) = &tenant_column {
@@ -688,7 +729,7 @@ impl ToolExecutor {
             value_strs.push(tenant_value);
         }
 
-        for (key, value) in obj {
+        for (key, value) in &final_args {
             // Validate column name (alphanumeric and underscore only)
             if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 continue;
@@ -775,10 +816,14 @@ impl ToolExecutor {
             None => return ExecutionResult::error("Missing required field: id"),
         };
 
+        // Get updatable columns for this table from role definition
+        let updatable_columns = self.role.tables.get(table).map(|p| &p.updatable);
+
         // Build UPDATE statement from arguments (excluding id)
         let empty_map = serde_json::Map::new();
         let obj = arguments.as_object().unwrap_or(&empty_map);
         let mut set_clauses = Vec::new();
+        let mut rejected_columns = Vec::new();
 
         for (key, value) in obj {
             if key == "id" {
@@ -788,6 +833,32 @@ impl ToolExecutor {
             if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 continue;
             }
+
+            // Check if column is updatable according to role permissions
+            let is_updatable = match updatable_columns {
+                Some(cols) => cols.contains(key),
+                None => false, // If no table permissions, default to not updatable
+            };
+
+            if !is_updatable {
+                rejected_columns.push(key.clone());
+                continue; // Skip non-updatable columns
+            }
+
+            // Check restrict_to constraint from role definition
+            if let Some(cols) = updatable_columns {
+                if let Some(constraints) = cols.get_constraints(key) {
+                    if let Some(restrict_to) = &constraints.restrict_to {
+                        if !restrict_to.contains(value) {
+                            return ExecutionResult::error(format!(
+                                "Value '{}' for column '{}' not in allowed values: {:?}",
+                                value, key, restrict_to
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Build SET clause with inline values
             if let Some(s) = value.as_str() {
                 set_clauses.push(format!("{} = '{}'", key, s.replace("'", "''")));
@@ -800,8 +871,20 @@ impl ToolExecutor {
             }
         }
 
+        // Log rejected columns for audit/debugging
+        if !rejected_columns.is_empty() {
+            tracing::warn!(
+                "UPDATE on {} rejected non-updatable columns: {:?}",
+                table,
+                rejected_columns
+            );
+        }
+
         if set_clauses.is_empty() {
-            return ExecutionResult::error("No fields to update");
+            return ExecutionResult::error(format!(
+                "No updatable fields provided. Rejected columns: {:?}",
+                rejected_columns
+            ));
         }
 
         // Build optional tenant condition - embed directly since it comes from trusted token
@@ -929,46 +1012,19 @@ impl ToolExecutor {
         }
     }
 
-    /// Execute a custom action.
+    /// Execute a custom action (not currently supported).
     async fn execute_custom(
         &self,
         name: &str,
-        arguments: &Value,
-        options: &CallToolOptions,
-        context: &ExecutionContext,
+        _arguments: &Value,
+        _options: &CallToolOptions,
+        _context: &ExecutionContext,
     ) -> ExecutionResult {
-        // Look up custom action in role config
-        let action = self
-            .role_config
-            .custom_actions
-            .iter()
-            .find(|a| a.name == name);
-
-        if action.is_none() {
-            return ExecutionResult::error(format!("Unknown custom action: {}", name));
-        }
-
-        if options.dry_run {
-            return ExecutionResult::dry_run(DryRunResult {
-                dry_run: true,
-                would_affect: json!({
-                    "custom_action": name
-                }),
-                preview: Some(json!({
-                    "action": name,
-                    "arguments": arguments,
-                    "tenant_id": context.tenant_id
-                })),
-            });
-        }
-
-        // TODO: Execute custom action logic
-        ExecutionResult::success_json(json!({
-            "message": format!("Would execute custom action '{}' for tenant {}", name, context.tenant_id),
-            "action": name,
-            "arguments": arguments,
-            "tenant_id": context.tenant_id
-        }))
+        // Custom actions are not supported in the current version
+        ExecutionResult::error(format!(
+            "Custom action '{}' is not supported. Only standard CRUD operations (get, list, create, update, delete) are available.",
+            name
+        ))
     }
 }
 
@@ -1057,56 +1113,147 @@ fn pluralize(s: &str) -> String {
 
 /// Convert a sqlx row to JSON, using provided columns or all columns if empty.
 fn row_to_json(row: &sqlx::postgres::PgRow, columns: &[String]) -> Value {
+    use bigdecimal::BigDecimal;
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use sqlx::Column;
-    
+
     let mut obj = serde_json::Map::new();
-    
+
     for col in row.columns() {
         let name = col.name();
-        
+
         // If columns list is provided and non-empty, filter
         if !columns.is_empty() && !columns.iter().any(|c| c == name) {
             continue;
         }
-        
+
         // Try to extract the value as different types
-        // We use try_get with various types and fall back to string/null
-        let value: Value = if let Ok(v) = row.try_get::<i64, _>(name) {
-            json!(v)
-        } else if let Ok(v) = row.try_get::<i32, _>(name) {
-            json!(v)
-        } else if let Ok(v) = row.try_get::<f64, _>(name) {
-            json!(v)
-        } else if let Ok(v) = row.try_get::<bool, _>(name) {
-            json!(v)
-        } else if let Ok(v) = row.try_get::<String, _>(name) {
-            json!(v)
-        } else if let Ok(v) = row.try_get::<serde_json::Value, _>(name) {
-            v
-        } else if let Ok(v) = row.try_get::<Option<String>, _>(name) {
-            match v {
-                Some(s) => json!(s),
-                None => Value::Null,
+        // Order matters: try more specific types first
+        let value: Value = 
+            // Integer types
+            if let Ok(v) = row.try_get::<i64, _>(name) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<i32, _>(name) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<i16, _>(name) {
+                json!(v)
+            } 
+            // Floating point
+            else if let Ok(v) = row.try_get::<f64, _>(name) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<f32, _>(name) {
+                json!(v)
             }
-        } else {
-            Value::Null
-        };
-        
+            // BigDecimal for DECIMAL/NUMERIC columns
+            else if let Ok(v) = row.try_get::<BigDecimal, _>(name) {
+                // Convert to f64 for JSON, preserving precision
+                use bigdecimal::ToPrimitive;
+                json!(v.to_f64().unwrap_or(0.0))
+            }
+            // Optional BigDecimal
+            else if let Ok(v) = row.try_get::<Option<BigDecimal>, _>(name) {
+                match v {
+                    Some(d) => {
+                        use bigdecimal::ToPrimitive;
+                        json!(d.to_f64().unwrap_or(0.0))
+                    }
+                    None => Value::Null,
+                }
+            }
+            // Boolean
+            else if let Ok(v) = row.try_get::<bool, _>(name) {
+                json!(v)
+            }
+            // Timestamp with timezone
+            else if let Ok(v) = row.try_get::<DateTime<Utc>, _>(name) {
+                json!(v.to_rfc3339())
+            }
+            // Optional timestamp with timezone
+            else if let Ok(v) = row.try_get::<Option<DateTime<Utc>>, _>(name) {
+                match v {
+                    Some(dt) => json!(dt.to_rfc3339()),
+                    None => Value::Null,
+                }
+            }
+            // Timestamp without timezone
+            else if let Ok(v) = row.try_get::<NaiveDateTime, _>(name) {
+                json!(v.format("%Y-%m-%dT%H:%M:%S").to_string())
+            }
+            // Optional timestamp without timezone
+            else if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(name) {
+                match v {
+                    Some(dt) => json!(dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                    None => Value::Null,
+                }
+            }
+            // Date
+            else if let Ok(v) = row.try_get::<NaiveDate, _>(name) {
+                json!(v.format("%Y-%m-%d").to_string())
+            }
+            // Optional date
+            else if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(name) {
+                match v {
+                    Some(d) => json!(d.format("%Y-%m-%d").to_string()),
+                    None => Value::Null,
+                }
+            }
+            // Time
+            else if let Ok(v) = row.try_get::<NaiveTime, _>(name) {
+                json!(v.format("%H:%M:%S").to_string())
+            }
+            // Optional time
+            else if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(name) {
+                match v {
+                    Some(t) => json!(t.format("%H:%M:%S").to_string()),
+                    None => Value::Null,
+                }
+            }
+            // UUID
+            else if let Ok(v) = row.try_get::<uuid::Uuid, _>(name) {
+                json!(v.to_string())
+            }
+            // Optional UUID
+            else if let Ok(v) = row.try_get::<Option<uuid::Uuid>, _>(name) {
+                match v {
+                    Some(u) => json!(u.to_string()),
+                    None => Value::Null,
+                }
+            }
+            // String
+            else if let Ok(v) = row.try_get::<String, _>(name) {
+                json!(v)
+            }
+            // JSON/JSONB
+            else if let Ok(v) = row.try_get::<serde_json::Value, _>(name) {
+                v
+            }
+            // Optional string (fallback)
+            else if let Ok(v) = row.try_get::<Option<String>, _>(name) {
+                match v {
+                    Some(s) => json!(s),
+                    None => Value::Null,
+                }
+            }
+            // String array
+            else if let Ok(v) = row.try_get::<Vec<String>, _>(name) {
+                json!(v)
+            }
+            // Optional string array
+            else if let Ok(v) = row.try_get::<Option<Vec<String>>, _>(name) {
+                match v {
+                    Some(arr) => json!(arr),
+                    None => Value::Null,
+                }
+            }
+            // Final fallback
+            else {
+                Value::Null
+            };
+
         obj.insert(name.to_string(), value);
     }
-    
-    Value::Object(obj)
-}
 
-/// Convert a JSON value to a string for binding.
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "".to_string(),
-        _ => value.to_string(),
-    }
+    Value::Object(obj)
 }
 
 #[cfg(test)]
@@ -1130,16 +1277,14 @@ mod tests {
 
     #[test]
     fn test_parse_tool_operation() {
-        let role = RoleConfig {
+        let role = RoleDefinition {
             name: "test".to_string(),
             description: None,
+            approvals: None,
             tables: std::collections::HashMap::new(),
             blocked_tables: Vec::new(),
             max_rows_per_query: None,
             max_affected_rows: None,
-            blocked_operations: Vec::new(),
-            custom_actions: Vec::new(),
-            include_actions: Vec::new(),
         };
         let approval_manager = Arc::new(ApprovalManager::default());
         let executor = ToolExecutor::new(role, approval_manager);

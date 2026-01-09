@@ -2,7 +2,8 @@
 
 use cori_audit::AuditLogger;
 use cori_biscuit::KeyPair;
-use cori_core::{CoriConfig, RoleConfig, TenancyConfig};
+use cori_core::config::role_definition::RoleDefinition;
+use cori_core::{CoriConfig, RulesDefinition};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -113,33 +114,33 @@ impl AppState {
     }
 
     /// Get all roles from configuration.
-    pub fn get_roles(&self) -> HashMap<String, RoleConfig> {
+    pub fn get_roles(&self) -> HashMap<String, RoleDefinition> {
         self.inner.config.read().unwrap().roles.clone()
     }
 
     /// Get a specific role by name.
-    pub fn get_role(&self, name: &str) -> Option<RoleConfig> {
+    pub fn get_role(&self, name: &str) -> Option<RoleDefinition> {
         self.inner.config.read().unwrap().roles.get(name).cloned()
     }
 
     /// Add or update a role.
-    pub fn save_role(&self, name: String, role: RoleConfig) {
+    pub fn save_role(&self, name: String, role: RoleDefinition) {
         self.inner.config.write().unwrap().roles.insert(name, role);
     }
 
     /// Delete a role.
-    pub fn delete_role(&self, name: &str) -> Option<RoleConfig> {
+    pub fn delete_role(&self, name: &str) -> Option<RoleDefinition> {
         self.inner.config.write().unwrap().roles.remove(name)
     }
 
-    /// Get tenancy configuration.
-    pub fn get_tenancy(&self) -> TenancyConfig {
-        self.inner.config.read().unwrap().tenancy.clone()
+    /// Get rules configuration.
+    pub fn get_rules(&self) -> Option<RulesDefinition> {
+        self.inner.config.read().unwrap().rules.clone()
     }
 
-    /// Update tenancy configuration.
-    pub fn set_tenancy(&self, tenancy: TenancyConfig) {
-        self.inner.config.write().unwrap().tenancy = tenancy;
+    /// Update rules configuration.
+    pub fn set_rules(&self, rules: RulesDefinition) {
+        self.inner.config.write().unwrap().rules = Some(rules);
     }
 }
 

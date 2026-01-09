@@ -1,0 +1,51 @@
+# =============================================================================
+# Types Definition
+# =============================================================================
+# Reusable semantic types for input validation.
+# Referenced by column rules in schema/rules.yaml.
+# Conforms to: TypesDefinition.schema.json
+# =============================================================================
+
+version: "1.0.0"
+
+types:
+  email:
+    description: "Email address"
+    pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+    tags: [pii]
+
+  phone:
+    description: "Phone number (E.164 format)"
+    pattern: "^\\+[1-9]\\d{1,14}$"
+    tags: [pii]
+
+  url:
+    description: "HTTP/HTTPS URL"
+    pattern: "^https?://[^\\s]+$"
+
+  uuid:
+    description: "UUID v4 format"
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+
+  slug:
+    description: "URL-safe slug"
+    pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+
+  currency_code:
+    description: "ISO 4217 currency code"
+    pattern: "^[A-Z]{3}$"
+
+  country_code:
+    description: "ISO 3166-1 alpha-2 country code"
+    pattern: "^[A-Z]{2}$"
+
+  # Sensitive types - always tagged for special handling
+  ssn:
+    description: "Social Security Number (US)"
+    pattern: "^\\d{3}-\\d{2}-\\d{4}$"
+    tags: [pii, sensitive]
+
+  credit_card:
+    description: "Credit card number (basic validation)"
+    pattern: "^\\d{13,19}$"
+    tags: [pii, sensitive]

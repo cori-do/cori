@@ -1,4 +1,7 @@
 //! Audit logging configuration.
+//!
+//! This module defines configuration for audit logging. Every MCP action is
+//! logged with tenant, role, timing, and outcome.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +12,19 @@ pub struct AuditConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
+    /// Directory for audit log files.
+    #[serde(default = "default_directory")]
+    pub directory: String,
+
+    /// Whether to also output audit logs to stdout.
+    #[serde(default)]
+    pub stdout: bool,
+
+    /// Number of days to retain audit log files.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+
+    // Legacy fields for backwards compatibility
     /// Whether to log queries.
     #[serde(default = "default_log_queries")]
     pub log_queries: bool,
@@ -25,11 +41,7 @@ pub struct AuditConfig {
     #[serde(default)]
     pub include: Vec<String>,
 
-    /// Retention period in days.
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u32,
-
-    /// Output destinations.
+    /// Output destinations (legacy).
     #[serde(default)]
     pub output: Vec<AuditOutput>,
 
@@ -91,11 +103,13 @@ impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            directory: default_directory(),
+            stdout: false,
+            retention_days: default_retention_days(),
             log_queries: default_log_queries(),
             log_results: false,
             log_errors: true,
             include: Vec::new(),
-            retention_days: default_retention_days(),
             output: Vec::new(),
             storage: StorageConfig::default(),
             integrity_enabled: false,
@@ -105,6 +119,10 @@ impl Default for AuditConfig {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_directory() -> String {
+    "logs/".to_string()
 }
 
 fn default_log_queries() -> bool {

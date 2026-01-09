@@ -1,0 +1,101 @@
+# =============================================================================
+# Rules Definition
+# =============================================================================
+# User-modifiable column rules for tenancy, validation, and soft-delete.
+# Conforms to: RulesDefinition.schema.json
+#
+# This file defines:
+#   - Which column holds tenant IDs in each table (tenant: <column>)
+#   - Inherited tenancy via FK relationships (tenant.via + tenant.references)
+#   - Global tables shared across tenants (global: true)
+#   - Soft-delete configuration (soft_delete.column)
+#   - Column validation and tagging (columns.<name>.type, tags)
+# =============================================================================
+
+version: "1.0.0"
+
+tables:
+  addresses:
+    tenant: organization_id
+    columns:
+      address_id:
+        tags: [pii]
+  api_keys:
+    tenant: organization_id
+  audit_logs:
+    tenant: organization_id
+  billing:
+    tenant: organization_id
+    columns:
+      billing_email:
+        type: email
+        tags: [pii]
+      billing_address:
+        tags: [pii]
+  communications:
+    tenant: organization_id
+  contacts:
+    tenant: organization_id
+    columns:
+      email:
+        type: email
+        tags: [pii]
+      phone:
+        type: phone
+        tags: [pii]
+  customer_tags:
+    tenant: organization_id
+  customers:
+    tenant: organization_id
+    columns:
+      email:
+        type: email
+        tags: [pii]
+      phone:
+        type: phone
+        tags: [pii]
+      status:
+        allowed_values: [active, inactive, pending, archived]
+  invoices:
+    tenant: organization_id
+    columns:
+      status:
+        allowed_values: [active, inactive, pending, archived]
+  notes:
+    tenant: organization_id
+  opportunities:
+    tenant: organization_id
+  order_items:
+    tenant: organization_id
+  orders:
+    tenant: organization_id
+    columns:
+      status:
+        allowed_values: [active, inactive, pending, archived]
+      billing_address_id:
+        tags: [pii]
+  organizations:
+    tenant: organization_id
+  payments:
+    tenant: organization_id
+  products:
+    tenant: organization_id
+  tags:
+    tenant: organization_id
+  tasks:
+    tenant: organization_id
+    columns:
+      status:
+        allowed_values: [active, inactive, pending, archived]
+  tickets:
+    tenant: organization_id
+    columns:
+      status:
+        allowed_values: [active, inactive, pending, archived]
+  users:
+    tenant: organization_id
+    columns:
+      email:
+        type: email
+        tags: [pii]
+

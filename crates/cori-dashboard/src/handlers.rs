@@ -28,9 +28,9 @@ pub async fn home(State(state): State<AppState>) -> Html<String> {
 /// Handler for the schema browser page.
 pub async fn schema_browser(State(state): State<AppState>) -> Html<String> {
     let schema = state.schema_cache();
-    let tenancy = state.get_tenancy();
+    let rules = state.get_rules();
     
-    Html(pages::schema_browser_page(schema.as_ref(), &tenancy))
+    Html(pages::schema_browser_page(schema.as_ref(), rules.as_ref()))
 }
 
 /// Handler for the roles list page.
@@ -161,13 +161,20 @@ pub mod api {
 
     pub async fn schema_get(State(state): State<AppState>) -> Json<Option<SchemaResponse>> {
         let schema = state.schema_cache();
+        let rules = state.get_rules();
         Json(schema.map(|s| SchemaResponse {
             tables: s.tables.iter().map(|t| {
-                let tenancy = state.get_tenancy();
-                let configured_tc = tenancy.tables.get(&t.name)
-                    .and_then(|tc| tc.tenant_column.clone().or(tc.column.clone()));
-                let is_global = tenancy.tables.get(&t.name).map(|tc| tc.global).unwrap_or(false)
-                    || tenancy.global_tables.contains(&t.name);
+                // Get tenant column from rules
+                let configured_tc = rules.as_ref()
+                    .and_then(|r| r.get_table_rules(&t.name))
+                    .and_then(|tr| tr.get_direct_tenant_column())
+                    .map(|s| s.to_string());
+                
+                // Check if table is global
+                let is_global = rules.as_ref()
+                    .and_then(|r| r.get_table_rules(&t.name))
+                    .map(|tr| tr.global.unwrap_or(false))
+                    .unwrap_or(false);
                 
                 TableSchemaResponse {
                     schema: t.schema.clone(),
@@ -227,7 +234,7 @@ pub mod api {
                 name: name.clone(),
                 description: role.description.clone(),
                 table_count: role.tables.len(),
-                has_custom_actions: !role.custom_actions.is_empty(),
+                has_custom_actions: false, // Custom actions removed from new model
             }).collect(),
         })
     }
@@ -245,7 +252,7 @@ pub mod api {
         State(state): State<AppState>,
         Form(form): Form<RoleFormData>,
     ) -> Result<Html<String>, (StatusCode, String)> {
-        let role = form_to_role_config(&form);
+        let role = form_to_role_definition(&form);
         state.save_role(form.name.clone(), role);
         
         Ok(Html(format!(
@@ -263,7 +270,7 @@ pub mod api {
             return Err((StatusCode::NOT_FOUND, "Role not found".to_string()));
         }
         
-        let role = form_to_role_config(&form);
+        let role = form_to_role_definition(&form);
         state.save_role(name.clone(), role);
         
         Ok(Html(format!(
@@ -332,7 +339,7 @@ pub mod api {
         let role = state.get_role(&form.role)
             .ok_or((StatusCode::NOT_FOUND, "Role not found".to_string()))?;
         
-        let claims = crate::token_helpers::role_config_to_claims(&role);
+        let claims = crate::token_helpers::role_definition_to_claims(&role);
         let builder = cori_biscuit::TokenBuilder::new(keypair.clone());
         
         let token = builder.mint_role_token(&claims)
@@ -357,7 +364,7 @@ pub mod api {
         let role = state.get_role(&form.role)
             .ok_or((StatusCode::NOT_FOUND, "Role not found".to_string()))?;
         
-        let claims = crate::token_helpers::role_config_to_claims(&role);
+        let claims = crate::token_helpers::role_definition_to_claims(&role);
         let builder = cori_biscuit::TokenBuilder::new(keypair.clone());
         
         // First mint role token
@@ -555,11 +562,11 @@ pub mod api {
             mcp: McpSettingsResponse {
                 enabled: config.mcp.enabled,
                 transport: format!("{:?}", config.mcp.transport),
-                http_port: Some(config.mcp.http_port),
+                http_port: Some(config.mcp.get_port()),
             },
             dashboard: DashboardSettingsResponse {
                 enabled: config.dashboard.enabled,
-                listen_port: config.dashboard.listen_port,
+                listen_port: config.dashboard.get_port(),
                 auth_type: format!("{:?}", config.dashboard.auth.auth_type),
             },
             audit: AuditSettingsResponse {
@@ -575,10 +582,10 @@ pub mod api {
                 blocked_operations: config.guardrails.blocked_operations.clone(),
             },
             tenancy: TenancySettingsResponse {
-                tenant_id_type: config.tenancy.tenant_id.id_type.clone(),
-                default_column: config.tenancy.default_column.clone(),
-                table_count: config.tenancy.tables.len(),
-                global_table_count: config.tenancy.global_tables.len(),
+                table_count: config.rules.as_ref().map(|r| r.tables.len()).unwrap_or(0),
+                global_table_count: config.rules.as_ref()
+                    .map(|r| r.tables.iter().filter(|(_, tr)| tr.global.unwrap_or(false)).count())
+                    .unwrap_or(0),
             },
         })
     }
@@ -673,58 +680,84 @@ pub mod api {
     // Conversion Helpers
     // -------------------------------------------------------------------------
 
-    fn role_to_response(name: &str, role: &cori_core::RoleConfig) -> RoleResponse {
+    fn role_to_response(name: &str, role: &cori_core::RoleDefinition) -> RoleResponse {
+        use cori_core::config::role_definition::{ColumnList, CreatableColumns, UpdatableColumns};
+        
         RoleResponse {
             name: name.to_string(),
             description: role.description.clone(),
             tables: role.tables.iter().map(|(tname, perms)| {
-                let ops = perms.operations.as_ref()
-                    .map(|ops| ops.iter().map(|o| format!("{:?}", o).to_lowercase()).collect())
-                    .unwrap_or_else(|| vec!["read".to_string()]);
+                let mut ops = Vec::new();
+                if !perms.readable.is_empty() { ops.push("read".to_string()); }
+                if !perms.creatable.is_empty() { ops.push("create".to_string()); }
+                if !perms.updatable.is_empty() { ops.push("update".to_string()); }
+                if perms.deletable.is_allowed() { ops.push("delete".to_string()); }
                 
                 let (readable, readable_all) = match &perms.readable {
-                    cori_core::ReadableColumns::All(_) => (vec![], true),
-                    cori_core::ReadableColumns::List(cols) => (cols.clone(), false),
+                    ColumnList::All(_) => (vec![], true),
+                    ColumnList::List(cols) => (cols.clone(), false),
                 };
+                
+                // Helper to convert Value vec to String vec
+                fn values_to_strings(values: &Option<Vec<serde_json::Value>>) -> Option<Vec<String>> {
+                    values.as_ref().map(|vals| {
+                        vals.iter()
+                            .filter_map(|v| v.as_str().map(String::from).or_else(|| Some(v.to_string())))
+                            .collect()
+                    })
+                }
+                
+                // Combine creatable and updatable for the editable response
+                let mut editable = std::collections::HashMap::new();
+                
+                if let CreatableColumns::Map(cols) = &perms.creatable {
+                    for (col, constraints) in cols {
+                        editable.insert(col.clone(), ColumnConstraintResponse {
+                            allowed_values: values_to_strings(&constraints.restrict_to),
+                            pattern: None,
+                            min: None,
+                            max: None,
+                            requires_approval: constraints.requires_approval.is_some(),
+                        });
+                    }
+                }
+                
+                if let UpdatableColumns::Map(cols) = &perms.updatable {
+                    for (col, constraints) in cols {
+                        editable.insert(col.clone(), ColumnConstraintResponse {
+                            allowed_values: values_to_strings(&constraints.restrict_to),
+                            pattern: None,
+                            min: None,
+                            max: None,
+                            requires_approval: constraints.requires_approval.is_some(),
+                        });
+                    }
+                }
                 
                 (tname.clone(), TablePermissionResponse {
                     operations: ops,
                     readable,
                     readable_all,
-                    editable: perms.editable.iter().map(|(col, constraints)| {
-                        (col.clone(), ColumnConstraintResponse {
-                            allowed_values: constraints.allowed_values.clone(),
-                            pattern: constraints.pattern.clone(),
-                            min: constraints.min,
-                            max: constraints.max,
-                            requires_approval: constraints.requires_approval,
-                        })
-                    }).collect(),
+                    editable,
                 })
             }).collect(),
             blocked_tables: role.blocked_tables.clone(),
             max_rows_per_query: role.max_rows_per_query,
             max_affected_rows: role.max_affected_rows,
-            blocked_operations: role.blocked_operations.clone(),
-            custom_actions: role.custom_actions.iter().map(|a| CustomActionResponse {
-                name: a.name.clone(),
-                description: a.description.clone(),
-                requires_approval: a.requires_approval,
-            }).collect(),
+            blocked_operations: vec![],
+            custom_actions: vec![], // Custom actions removed from new model
         }
     }
 
-    fn form_to_role_config(form: &RoleFormData) -> cori_core::RoleConfig {
-        cori_core::RoleConfig {
+    fn form_to_role_definition(form: &RoleFormData) -> cori_core::RoleDefinition {
+        cori_core::RoleDefinition {
             name: form.name.clone(),
             description: form.description.clone(),
+            approvals: None,
             tables: std::collections::HashMap::new(), // Would parse from form
             blocked_tables: vec![],
             max_rows_per_query: form.max_rows_per_query,
             max_affected_rows: form.max_affected_rows,
-            blocked_operations: vec![],
-            custom_actions: vec![],
-            include_actions: vec![],
         }
     }
 

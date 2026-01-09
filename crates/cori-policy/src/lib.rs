@@ -2,8 +2,6 @@
 //!
 //! Biscuit-native policy model: policy decisions are made based on Biscuit token claims
 //! and role YAML configuration. No external policy decision point (PDP) required.
-//!
-//! See AGENTS.md Section 8: "Policy Model: Biscuit-Native (No External Engine)"
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -1,67 +1,64 @@
 # =============================================================================
 # SUPPORT AGENT ROLE
 # =============================================================================
-# AI agent for customer support operations.
-# Can view most customer data, manage tickets, but limited write access.
+# Customer support agent with access to customer-facing data.
+# Can view most data, limited write access to tickets/issues.
+# Conforms to: RoleDefinition.schema.json
+# =============================================================================
 
 name: support_agent
 description: "AI agent for customer support operations"
 
-tables:
-  customers:
-    readable: [customer_id, first_name, last_name, email, phone, company, status, created_at, updated_at]
-    # Note: 'notes' and 'lifetime_value' are excluded (sensitive)
-    editable: {}  # Read-only access to customers
-  
-  contacts:
-    readable: [contact_id, customer_id, first_name, last_name, position, email, phone, is_primary, created_at]
-    editable: {}
-  
-  tickets:
-    readable: [ticket_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
-    editable:
-      status:
-        allowed_values: [open, in_progress, pending_customer, resolved]
-        # Note: 'closed' is excluded - requires manager approval
-      priority:
-        requires_approval: true  # Human must approve priority changes
-  
-  orders:
-    readable: [order_id, customer_id, order_number, order_date, status, total_amount, created_at]
-    # Note: shipping_cost, tax_amount, discount_amount excluded
-    editable: {}
-  
-  products:
-    readable: [product_id, name, description, sku, price, category]
-    # Note: 'cost' excluded (internal pricing)
-    editable: {}
-  
-  communications:
-    readable: "*"  # All columns
-    editable: {}
-  
-  notes:
-    readable: [note_id, customer_id, ticket_id, content, created_at]
-    # Note: is_internal excluded (support shouldn't see internal flags)
-    editable: {}
+# Default approval group for requires_approval flags
+approvals:
+  group: support_managers
+  notify_on_pending: true
 
-# Tables this role cannot access at all
+tables:
+  contacts:
+    readable: [contact_id, organization_id, customer_id, first_name, last_name, position, email, phone, is_primary, created_at, updated_at]
+    # Read-only access for this table
+
+  customer_tags:
+    readable: [customer_id, tag_id, organization_id, created_at]
+    # Read-only access for this table
+
+  customers:
+    readable: [customer_id, organization_id, first_name, last_name, email, phone, company, status, notes, lifetime_value, created_at, updated_at]
+    # Read-only access for this table
+
+  notes:
+    readable: [note_id, organization_id, created_by, customer_id, opportunity_id, ticket_id, content, is_internal, created_at, updated_at]
+    # Read-only access for this table
+
+  order_items:
+    readable: [order_item_id, organization_id, order_id, product_id, quantity, unit_price, discount_percentage, line_total, created_at, updated_at]
+    # Read-only access for this table
+
+  orders:
+    readable: [order_id, organization_id, customer_id, opportunity_id, created_by, order_number, order_date, status, shipping_address_id, billing_address_id, shipping_cost, tax_amount, discount_amount, subtotal, total_amount, notes, created_at, updated_at]
+    # Read-only access for this table
+
+  products:
+    readable: [product_id, organization_id, name, description, sku, price, cost, category, stock_quantity, is_active, created_at, updated_at]
+    # Read-only access for this table
+
+  tickets:
+    readable: [ticket_id, organization_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
+    updatable:
+      status:
+        restrict_to: [open, in_progress, pending, resolved, closed]
+        guidance: "Update ticket status based on resolution progress"
+      priority:
+        requires_approval: true
+        guidance: "Priority changes require manager approval"
+    deletable: false
+
 blocked_tables:
   - users
   - api_keys
   - billing
   - audit_logs
-  - opportunities  # Sales data, not for support
-  - invoices       # Financial data
-  - payments       # Financial data
 
-# Query limits
 max_rows_per_query: 100
 max_affected_rows: 10
-
-# Blocked operations
-blocked_operations:
-  - DELETE
-  - TRUNCATE
-  - DROP
-

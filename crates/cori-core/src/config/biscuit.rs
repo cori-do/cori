@@ -21,14 +21,6 @@ pub struct BiscuitConfig {
     /// Path to the private key file.
     #[serde(default)]
     pub private_key_file: Option<PathBuf>,
-
-    /// Whether to require tokens to have an expiration claim.
-    #[serde(default = "default_true")]
-    pub require_expiration: bool,
-
-    /// Maximum token lifetime for newly minted tokens (e.g., "30d", "24h").
-    #[serde(default)]
-    pub max_token_lifetime: Option<String>,
 }
 
 impl BiscuitConfig {
@@ -71,8 +63,4 @@ impl BiscuitConfig {
 
         Ok(None)
     }
-}
-
-fn default_true() -> bool {
-    true
 }

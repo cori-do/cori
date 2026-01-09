@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cori.do/schemas/AuditEvent.schema.json",
+  "title": "AuditEvent",
+  "description": "Portable audit evidence event for Cori database operations",
+  "type": "object",
+  "required": [
+    "event_id",
+    "occurred_at",
+    "tenant_id",
+    "intent_id",
+    "principal_id",
+    "step_id",
+    "event_type",
+    "action",
+    "allowed"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this audit event"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in RFC3339 format"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional sequence number for ordering within an intent"
+    },
+    "tenant_id": {
+      "type": "string",
+      "description": "Tenant identifier the event relates to"
+    },
+    "intent_id": {
+      "type": "string",
+      "description": "The mutation intent this event is part of"
+    },
+    "principal_id": {
+      "type": "string",
+      "description": "The principal (user/agent) that initiated the action"
+    },
+    "step_id": {
+      "type": "string",
+      "description": "The specific step within the plan (or '__intent__' for intent-level events)"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "intent_received",
+        "plan_validated",
+        "policy_checked",
+        "approval_required",
+        "approved",
+        "action_previewed",
+        "action_executed",
+        "verification_failed",
+        "committed",
+        "compensated",
+        "failed"
+      ],
+      "description": "The type of audit event"
+    },
+    "action": {
+      "type": "string",
+      "description": "The action being performed (e.g., 'insert', 'update', 'delete')"
+    },
+    "resource_kind": {
+      "type": "string",
+      "description": "Optional kind of resource being acted upon (e.g., 'table')"
+    },
+    "resource_id": {
+      "type": "string",
+      "description": "Optional identifier of the resource being acted upon"
+    },
+    "allowed": {
+      "type": "boolean",
+      "description": "Whether the action was allowed by policy"
+    },
+    "preview": {
+      "type": "boolean",
+      "description": "Whether this is a preview/dry-run operation"
+    },
+    "decision": {
+      "type": "object",
+      "description": "Policy decision payload including obligations and explanation",
+      "additionalProperties": true
+    },
+    "outcome": {
+      "type": "object",
+      "description": "Execution outcome (affected_count, diff summary, errors)",
+      "additionalProperties": true
+    },
+    "integrity": {
+      "type": "object",
+      "description": "Optional tamper-evident fields for enterprise/WORM storage",
+      "properties": {
+        "hash": {
+          "type": "string",
+          "description": "Hash of this event for tamper detection"
+        },
+        "prev_hash": {
+          "type": "string",
+          "description": "Hash of the previous event in the chain"
+        }
+      }
+    },
+    "meta": {
+      "description": "Free-form extension metadata (non-authoritative)"
+    }
+  },
+  "additionalProperties": false
+}

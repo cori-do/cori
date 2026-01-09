@@ -1,8 +1,10 @@
 //! Page templates for dashboard views.
 
-use crate::state::{SchemaInfo, ColumnInfo};
+use crate::state::{ColumnInfo, SchemaInfo};
 use crate::templates::{badge, card, empty_state, input, layout, stats_card, tabs};
-use cori_core::{RoleConfig, TenancyConfig, CoriConfig};
+use cori_core::config::role_definition::RoleDefinition;
+use cori_core::config::rules_definition::RulesDefinition;
+use cori_core::CoriConfig;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -10,6 +12,7 @@ use std::collections::HashMap;
 // =============================================================================
 
 pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usize) -> String {
+    let table_count = config.rules.as_ref().map(|r| r.tables.len()).unwrap_or(0);
     let stats = format!(
         r##"<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             {roles_stat}
@@ -18,9 +21,9 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
             {mcp_stat}
         </div>"##,
         roles_stat = stats_card("Roles", &role_count.to_string(), "user-shield", "blue"),
-        tables_stat = stats_card("Tables", &config.tenancy.tables.len().to_string(), "database", "green"),
+        tables_stat = stats_card("Tables", &table_count.to_string(), "database", "green"),
         approvals_stat = stats_card("Pending Approvals", &pending_approvals.to_string(), "clock", "yellow"),
-        mcp_stat = stats_card("MCP Port", &config.mcp.http_port.to_string(), "server", "purple"),
+        mcp_stat = stats_card("MCP Port", &config.mcp.get_port().to_string(), "server", "purple"),
     );
 
     let quick_actions = card("Quick Actions", &format!(
@@ -83,8 +86,8 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                 <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">{upstream_host}:{upstream_port}</code>
             </div>
         </div>"##,
-        mcp_port = config.mcp.http_port,
-        dashboard_port = config.dashboard.listen_port,
+        mcp_port = config.mcp.get_port(),
+        dashboard_port = config.dashboard.get_port(),
         mcp_transport = format!("{:?}", config.mcp.transport).to_lowercase(),
         upstream_host = config.upstream.host,
         upstream_port = config.upstream.port,
@@ -113,18 +116,22 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
 // Schema Browser Page
 // =============================================================================
 
-pub fn schema_browser_page(schema: Option<&SchemaInfo>, tenancy: &TenancyConfig) -> String {
+pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefinition>) -> String {
     let content = match schema {
         Some(schema) => {
             let table_list: String = schema.tables.iter().map(|t| {
-                let tenant_column = tenancy.tables.get(&t.name)
-                    .and_then(|tc| tc.tenant_column.as_ref().or(tc.column.as_ref()))
-                    .map(|s| s.as_str())
+                // Get tenant column from RulesDefinition
+                let tenant_column = rules
+                    .and_then(|r| r.get_table_rules(&t.name))
+                    .and_then(|tr| tr.get_direct_tenant_column())
                     .or(t.detected_tenant_column.as_deref())
                     .unwrap_or("-");
                 
-                let is_global = tenancy.tables.get(&t.name).map(|tc| tc.global).unwrap_or(false)
-                    || tenancy.global_tables.contains(&t.name);
+                // Check if table is global
+                let is_global = rules
+                    .and_then(|r| r.get_table_rules(&t.name))
+                    .map(|tr| tr.global.unwrap_or(false))
+                    .unwrap_or(false);
                 
                 let status_badge = if is_global {
                     badge("Global", "blue")
@@ -284,7 +291,7 @@ fn column_row(col: &ColumnInfo, primary_key: &[String], tenant_column: &str) -> 
 // Roles Page
 // =============================================================================
 
-pub fn roles_page(roles: &HashMap<String, RoleConfig>) -> String {
+pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
     let content = if roles.is_empty() {
         empty_state(
             "user-shield",
@@ -295,10 +302,10 @@ pub fn roles_page(roles: &HashMap<String, RoleConfig>) -> String {
     } else {
         let role_cards: String = roles.iter().map(|(name, role)| {
             let table_count = role.tables.len();
-            let has_editable = role.tables.values().any(|t| !t.editable.is_empty());
-            let has_approval = role.tables.values().any(|t| {
-                t.editable.values().any(|c| c.requires_approval)
+            let has_write = role.tables.values().any(|t| {
+                !t.creatable.is_empty() || !t.updatable.is_empty()
             });
+            let has_approval = role.table_requires_approval(name);
             
             format!(
                 r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
@@ -322,7 +329,7 @@ pub fn roles_page(roles: &HashMap<String, RoleConfig>) -> String {
                         <span class="inline-flex items-center gap-1 text-sm text-gray-600 dark:text-gray-400">
                             <i class="fas fa-table text-xs"></i> {table_count} tables
                         </span>
-                        {editable_badge}
+                        {write_badge}
                         {approval_badge}
                     </div>
                     
@@ -342,7 +349,7 @@ pub fn roles_page(roles: &HashMap<String, RoleConfig>) -> String {
                 name = name,
                 description = role.description.as_deref().unwrap_or("No description"),
                 table_count = table_count,
-                editable_badge = if has_editable {
+                write_badge = if has_write {
                     badge("Read/Write", "blue")
                 } else {
                     badge("Read-Only", "gray")
@@ -388,7 +395,7 @@ pub fn roles_page(roles: &HashMap<String, RoleConfig>) -> String {
 // Role Editor Page
 // =============================================================================
 
-pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, is_new: bool) -> String {
+pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInfo>, is_new: bool) -> String {
     let name = role.map(|r| r.name.as_str()).unwrap_or("");
     let description = role.and_then(|r| r.description.as_deref()).unwrap_or("");
     let max_rows = role.and_then(|r| r.max_rows_per_query).unwrap_or(100);
@@ -403,6 +410,12 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
             let full_name = format!("{}.{}", t.schema, t.name);
             let is_selected = role.map(|r| r.tables.contains_key(&t.name)).unwrap_or(false);
             let perms = role.and_then(|r| r.tables.get(&t.name));
+            
+            // Derive checked state from permissions
+            let read_checked = perms.map(|p| !p.readable.is_empty()).unwrap_or(false);
+            let create_checked = perms.map(|p| !p.creatable.is_empty()).unwrap_or(false);
+            let update_checked = perms.map(|p| !p.updatable.is_empty()).unwrap_or(false);
+            let delete_checked = perms.map(|p| p.deletable.is_allowed()).unwrap_or(false);
             
             format!(
                 r##"<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 mb-4" x-data="{{ enabled: {enabled}, showColumns: false }}">
@@ -423,22 +436,22 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Operations</label>
                             <div class="flex flex-wrap gap-2">
                                 <label class="flex items-center gap-2">
-                                    <input type="checkbox" name="tables[{name}][operations][]" value="read" {read_checked}
+                                    <input type="checkbox" name="tables[{name}][operations][]" value="read" {read_checked_attr}
                                            class="w-4 h-4 text-primary-600 rounded border-gray-300">
                                     <span class="text-sm">Read</span>
                                 </label>
                                 <label class="flex items-center gap-2">
-                                    <input type="checkbox" name="tables[{name}][operations][]" value="create" {create_checked}
+                                    <input type="checkbox" name="tables[{name}][operations][]" value="create" {create_checked_attr}
                                            class="w-4 h-4 text-primary-600 rounded border-gray-300">
                                     <span class="text-sm">Create</span>
                                 </label>
                                 <label class="flex items-center gap-2">
-                                    <input type="checkbox" name="tables[{name}][operations][]" value="update" {update_checked}
+                                    <input type="checkbox" name="tables[{name}][operations][]" value="update" {update_checked_attr}
                                            class="w-4 h-4 text-primary-600 rounded border-gray-300">
                                     <span class="text-sm">Update</span>
                                 </label>
                                 <label class="flex items-center gap-2">
-                                    <input type="checkbox" name="tables[{name}][operations][]" value="delete" {delete_checked}
+                                    <input type="checkbox" name="tables[{name}][operations][]" value="delete" {delete_checked_attr}
                                            class="w-4 h-4 text-primary-600 rounded border-gray-300">
                                     <span class="text-sm">Delete</span>
                                 </label>
@@ -453,9 +466,9 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
                         </div>
                         
                         <div>
-                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Editable Columns</label>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Writable Columns</label>
                             <div class="flex flex-wrap gap-2">
-                                {editable_columns}
+                                {writable_columns}
                             </div>
                         </div>
                     </div>
@@ -464,10 +477,10 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
                 full_name = full_name,
                 enabled = if is_selected { "true" } else { "false" },
                 checked = if is_selected { "checked" } else { "" },
-                read_checked = if perms.map(|p| p.operations.as_ref().map(|ops| ops.iter().any(|o| matches!(o, cori_core::Operation::Read))).unwrap_or(true)).unwrap_or(false) { "checked" } else { "" },
-                create_checked = if perms.map(|p| p.operations.as_ref().map(|ops| ops.iter().any(|o| matches!(o, cori_core::Operation::Create))).unwrap_or(false)).unwrap_or(false) { "checked" } else { "" },
-                update_checked = if perms.map(|p| p.operations.as_ref().map(|ops| ops.iter().any(|o| matches!(o, cori_core::Operation::Update))).unwrap_or(false)).unwrap_or(false) { "checked" } else { "" },
-                delete_checked = if perms.map(|p| p.operations.as_ref().map(|ops| ops.iter().any(|o| matches!(o, cori_core::Operation::Delete))).unwrap_or(false)).unwrap_or(false) { "checked" } else { "" },
+                read_checked_attr = if read_checked { "checked" } else { "" },
+                create_checked_attr = if create_checked { "checked" } else { "" },
+                update_checked_attr = if update_checked { "checked" } else { "" },
+                delete_checked_attr = if delete_checked { "checked" } else { "" },
                 readable_columns = t.columns.iter().map(|c| {
                     let is_readable = perms.map(|p| p.readable.contains(&c.name)).unwrap_or(false);
                     format!(
@@ -481,17 +494,20 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
                         checked = if is_readable { "checked" } else { "" },
                     )
                 }).collect::<String>(),
-                editable_columns = t.columns.iter().map(|c| {
-                    let is_editable = perms.map(|p| p.editable.contains(&c.name)).unwrap_or(false);
+                writable_columns = t.columns.iter().map(|c| {
+                    // Check if column is in creatable OR updatable
+                    let is_writable = perms.map(|p| {
+                        p.creatable.contains(&c.name) || p.updatable.contains(&c.name)
+                    }).unwrap_or(false);
                     format!(
                         r#"<label class="flex items-center gap-1.5 text-sm">
-                            <input type="checkbox" name="tables[{table}][editable][]" value="{col}" {checked}
+                            <input type="checkbox" name="tables[{table}][writable][]" value="{col}" {checked}
                                    class="w-3 h-3 text-green-600 rounded border-gray-300">
                             <span>{col}</span>
                         </label>"#,
                         table = t.name,
                         col = c.name,
-                        checked = if is_editable { "checked" } else { "" },
+                        checked = if is_writable { "checked" } else { "" },
                     )
                 }).collect::<String>(),
             )
@@ -557,27 +573,52 @@ pub fn role_editor_page(role: Option<&RoleConfig>, schema: Option<&SchemaInfo>, 
 // Role Detail Page with MCP Preview
 // =============================================================================
 
-pub fn role_detail_page(role: &RoleConfig, mcp_tools: Option<&[serde_json::Value]>) -> String {
+pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::Value]>) -> String {
+    use cori_core::config::role_definition::{ColumnList, CreatableColumns, UpdatableColumns};
+    
     let tables_content: String = role.tables.iter().map(|(name, perms)| {
-        let ops = perms.operations.as_ref().map(|ops| {
-            ops.iter().map(|o| format!("{:?}", o).to_lowercase()).collect::<Vec<_>>().join(", ")
-        }).unwrap_or_else(|| "read".to_string());
+        let mut ops = Vec::new();
+        if !perms.readable.is_empty() { ops.push("read"); }
+        if !perms.creatable.is_empty() { ops.push("create"); }
+        if !perms.updatable.is_empty() { ops.push("update"); }
+        if perms.deletable.is_allowed() { ops.push("delete"); }
+        let ops_str = ops.join(", ");
         
         let readable = match &perms.readable {
-            cori_core::ReadableColumns::All(_) => "*".to_string(),
-            cori_core::ReadableColumns::List(cols) => cols.join(", "),
+            ColumnList::All(_) => "*".to_string(),
+            ColumnList::List(cols) => cols.join(", "),
         };
         
-        let editable: String = perms.editable.iter().map(|(col, constraints)| {
-            let mut badges = String::new();
-            if constraints.requires_approval {
-                badges.push_str(&badge("Approval", "yellow"));
+        // Combine creatable and updatable for display
+        let mut editable_parts: Vec<String> = Vec::new();
+        
+        if let CreatableColumns::Map(cols) = &perms.creatable {
+            for (col, constraints) in cols {
+                let mut badges = String::new();
+                if constraints.requires_approval.is_some() {
+                    badges.push_str(&badge("Approval", "yellow"));
+                }
+                if constraints.restrict_to.is_some() {
+                    badges.push_str(&badge("Enum", "blue"));
+                }
+                editable_parts.push(format!(r#"<span class="mr-2">{} (create){}</span>"#, col, badges));
             }
-            if constraints.allowed_values.is_some() {
-                badges.push_str(&badge("Enum", "blue"));
+        }
+        
+        if let UpdatableColumns::Map(cols) = &perms.updatable {
+            for (col, constraints) in cols {
+                let mut badges = String::new();
+                if constraints.requires_approval.is_some() {
+                    badges.push_str(&badge("Approval", "yellow"));
+                }
+                if constraints.restrict_to.is_some() {
+                    badges.push_str(&badge("Enum", "blue"));
+                }
+                editable_parts.push(format!(r#"<span class="mr-2">{} (update){}</span>"#, col, badges));
             }
-            format!(r#"<span class="mr-2">{}{}</span>"#, col, badges)
-        }).collect();
+        }
+        
+        let editable = editable_parts.join("");
 
         format!(
             r##"<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
@@ -591,13 +632,13 @@ pub fn role_detail_page(role: &RoleConfig, mcp_tools: Option<&[serde_json::Value
                         <span class="text-gray-700 dark:text-gray-300 ml-2 font-mono">{readable}</span>
                     </div>
                     <div>
-                        <span class="text-gray-500 dark:text-gray-400">Editable:</span>
+                        <span class="text-gray-500 dark:text-gray-400">Writable:</span>
                         <span class="text-gray-700 dark:text-gray-300 ml-2">{editable}</span>
                     </div>
                 </div>
             </div>"##,
             name = name,
-            ops = ops,
+            ops = if ops_str.is_empty() { "none" } else { &ops_str },
             readable = if readable.is_empty() { "-" } else { &readable },
             editable = if editable.is_empty() { "-".to_string() } else { editable },
         )

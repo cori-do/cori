@@ -10,19 +10,22 @@
 //! |--------------|----------------|-------------|
 //! | `get<Entity>(id)` | Table has readable columns | Fetch single record |
 //! | `list<Entity>(filters)` | Table has readable columns | Query multiple records |
-//! | `create<Entity>(data)` | Role has INSERT + editable columns | Create new record |
-//! | `update<Entity>(id, data)` | Role has UPDATE + editable columns | Modify record |
+//! | `create<Entity>(data)` | Role has creatable columns | Create new record |
+//! | `update<Entity>(id, data)` | Role has updatable columns | Modify record |
 //! | `delete<Entity>(id)` | Role has DELETE permission | Remove record |
 
 use crate::protocol::{ToolAnnotations, ToolDefinition};
-use cori_core::{ColumnConstraints, CustomAction, ReadableColumns, RoleConfig};
 use crate::schema::{DatabaseSchema, TableSchema};
+use cori_core::{
+    ColumnList, CreatableColumnConstraints, CreatableColumns, RoleDefinition,
+    UpdatableColumnConstraints, UpdatableColumns,
+};
 use serde_json::{json, Value};
 
 /// Generator for creating MCP tools from role permissions and schema.
 pub struct ToolGenerator {
-    /// The role configuration.
-    role: RoleConfig,
+    /// The role definition.
+    role: RoleDefinition,
     /// The database schema.
     schema: DatabaseSchema,
     /// Maximum rows limit from role config.
@@ -31,7 +34,7 @@ pub struct ToolGenerator {
 
 impl ToolGenerator {
     /// Create a new tool generator.
-    pub fn new(role: RoleConfig, schema: DatabaseSchema) -> Self {
+    pub fn new(role: RoleDefinition, schema: DatabaseSchema) -> Self {
         let max_rows = role.max_rows_per_query;
         Self {
             role,
@@ -56,11 +59,6 @@ impl ToolGenerator {
                 // Generate tools even without schema (with basic input schemas)
                 tools.extend(self.generate_table_tools_no_schema(table_name));
             }
-        }
-
-        // Generate custom action tools
-        for action in &self.role.custom_actions {
-            tools.push(self.generate_custom_action_tool(action));
         }
 
         tools
@@ -353,52 +351,7 @@ impl ToolGenerator {
         }
     }
 
-    /// Generate a custom action tool.
-    fn generate_custom_action_tool(
-        &self,
-        action: &CustomAction,
-    ) -> ToolDefinition {
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
-
-        for (name, input) in &action.inputs {
-            let mut prop = json!({
-                "type": &input.param_type
-            });
-
-            if let Some(desc) = &input.description {
-                prop["description"] = json!(desc);
-            }
-
-            if let Some(enum_values) = &input.enum_values {
-                prop["enum"] = json!(enum_values);
-            }
-
-            properties.insert(name.clone(), prop);
-
-            if input.required {
-                required.push(name.clone());
-            }
-        }
-
-        ToolDefinition {
-            name: action.name.clone(),
-            description: action.description.clone(),
-            input_schema: json!({
-                "type": "object",
-                "properties": properties,
-                "required": required
-            }),
-            annotations: Some(ToolAnnotations {
-                requires_approval: Some(action.requires_approval),
-                dry_run_supported: Some(true),
-                read_only: Some(false),
-                ..Default::default()
-            }),
-        }
-    }
-
-    /// Generate input schema properties for editable columns.
+    /// Generate input schema properties for creatable/updatable columns.
     fn generate_input_schema(
         &self,
         table_name: &str,
@@ -409,26 +362,100 @@ impl ToolGenerator {
         let mut required = Vec::new();
 
         if let Some(perms) = self.role.tables.get(table_name) {
-            for (col_name, constraints) in perms.editable.iter() {
-                if let Some(col_schema) = table_schema.get_column(col_name) {
-                    let prop = self.column_to_json_schema(col_schema, Some(constraints));
-                    properties.insert(col_name.to_string(), prop);
-
-                    // For create, non-nullable columns without defaults are required
-                    if for_create && !col_schema.nullable && col_schema.default.is_none() {
-                        required.push(col_name.to_string());
-                    }
-                } else {
-                    // Column not in schema, use basic string type
-                    properties.insert(
-                        col_name.to_string(),
-                        self.constraints_to_json_schema(constraints, "string"),
-                    );
-                }
+            if for_create {
+                // For create operations, use creatable columns
+                self.add_creatable_columns_to_schema(
+                    &perms.creatable,
+                    table_schema,
+                    &mut properties,
+                    &mut required,
+                );
+            } else {
+                // For update operations, use updatable columns
+                self.add_updatable_columns_to_schema(
+                    &perms.updatable,
+                    table_schema,
+                    &mut properties,
+                );
             }
         }
 
         (Value::Object(properties), required)
+    }
+
+    /// Add creatable columns to the JSON schema properties.
+    fn add_creatable_columns_to_schema(
+        &self,
+        creatable: &CreatableColumns,
+        table_schema: &TableSchema,
+        properties: &mut serde_json::Map<String, Value>,
+        required: &mut Vec<String>,
+    ) {
+        match creatable {
+            CreatableColumns::All(_) => {
+                // All columns are creatable
+                for col in &table_schema.columns {
+                    let prop = self.column_to_basic_json_schema(&col.name, table_schema);
+                    properties.insert(col.name.clone(), prop);
+                    if !col.nullable && col.default.is_none() {
+                        required.push(col.name.clone());
+                    }
+                }
+            }
+            CreatableColumns::Map(map) => {
+                for (col_name, constraints) in map {
+                    if let Some(col_schema) = table_schema.get_column(col_name) {
+                        let prop = self.creatable_constraints_to_json_schema(constraints, col_schema);
+                        properties.insert(col_name.clone(), prop);
+                        // Required if constraint says so, or if non-nullable without default
+                        if constraints.required || (!col_schema.nullable && col_schema.default.is_none()) {
+                            required.push(col_name.clone());
+                        }
+                    } else {
+                        // Column not in schema, use basic string type
+                        properties.insert(
+                            col_name.clone(),
+                            self.creatable_constraints_to_basic_json_schema(constraints),
+                        );
+                        if constraints.required {
+                            required.push(col_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Add updatable columns to the JSON schema properties.
+    fn add_updatable_columns_to_schema(
+        &self,
+        updatable: &UpdatableColumns,
+        table_schema: &TableSchema,
+        properties: &mut serde_json::Map<String, Value>,
+    ) {
+        match updatable {
+            UpdatableColumns::All(_) => {
+                // All columns are updatable
+                for col in &table_schema.columns {
+                    let prop = self.column_to_basic_json_schema(&col.name, table_schema);
+                    properties.insert(col.name.clone(), prop);
+                }
+            }
+            UpdatableColumns::Map(map) => {
+                for (col_name, constraints) in map {
+                    if let Some(col_schema) = table_schema.get_column(col_name) {
+                        let prop = self.updatable_constraints_to_json_schema(constraints, col_schema);
+                        properties.insert(col_name.clone(), prop);
+                    } else {
+                        // Column not in schema, use basic string type
+                        properties.insert(
+                            col_name.clone(),
+                            self.updatable_constraints_to_basic_json_schema(constraints),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Generate filter properties for readable columns.
@@ -438,10 +465,10 @@ impl ToolGenerator {
         if let Some(perms) = self.role.tables.get(table_name) {
             // Get list of readable columns
             let readable_cols: Vec<&str> = match &perms.readable {
-                ReadableColumns::All(_) => {
+                ColumnList::All(_) => {
                     table_schema.columns.iter().map(|c| c.name.as_str()).collect()
                 }
-                ReadableColumns::List(cols) => {
+                ColumnList::List(cols) => {
                     cols.iter().map(|s: &String| s.as_str()).collect()
                 }
             };
@@ -471,55 +498,125 @@ impl ToolGenerator {
         Value::Object(properties)
     }
 
-    /// Convert a column schema to JSON Schema with constraints.
-    fn column_to_json_schema(
+    /// Convert a column to basic JSON schema.
+    fn column_to_basic_json_schema(
         &self,
-        column: &crate::schema::ColumnSchema,
-        constraints: Option<&ColumnConstraints>,
+        col_name: &str,
+        table_schema: &TableSchema,
     ) -> Value {
-        let base_type = column.json_schema_type();
-        let mut schema = self.constraints_to_json_schema(
-            constraints.unwrap_or(&ColumnConstraints::default()),
-            base_type,
-        );
+        if let Some(col) = table_schema.get_column(col_name) {
+            let base_type = col.json_schema_type();
+            let mut schema = json!({ "type": base_type });
+            if let Some(format) = col.json_schema_format() {
+                schema["format"] = json!(format);
+            }
+            if let Some(desc) = &col.description {
+                schema["description"] = json!(desc);
+            }
+            schema
+        } else {
+            json!({ "type": "string" })
+        }
+    }
+
+    /// Convert creatable column constraints to JSON Schema.
+    fn creatable_constraints_to_json_schema(
+        &self,
+        constraints: &CreatableColumnConstraints,
+        col_schema: &crate::schema::ColumnSchema,
+    ) -> Value {
+        let base_type = col_schema.json_schema_type();
+        let mut schema = json!({ "type": base_type });
+
+        // Add restrict_to as enum
+        if let Some(values) = &constraints.restrict_to {
+            schema["enum"] = json!(values);
+        }
+
+        // Add default
+        if let Some(default) = &constraints.default {
+            schema["default"] = default.clone();
+        }
 
         // Add format if applicable
-        if let Some(format) = column.json_schema_format() {
+        if let Some(format) = col_schema.json_schema_format() {
             schema["format"] = json!(format);
         }
 
-        // Add description
-        if let Some(desc) = &column.description {
+        // Add description/guidance
+        if let Some(guidance) = &constraints.guidance {
+            schema["description"] = json!(guidance);
+        } else if let Some(desc) = &col_schema.description {
             schema["description"] = json!(desc);
         }
 
         schema
     }
 
-    /// Convert column constraints to JSON Schema.
-    fn constraints_to_json_schema(&self, constraints: &ColumnConstraints, base_type: &str) -> Value {
-        let mut schema = json!({
-            "type": base_type
-        });
+    /// Convert creatable constraints to basic JSON Schema (no column schema).
+    fn creatable_constraints_to_basic_json_schema(
+        &self,
+        constraints: &CreatableColumnConstraints,
+    ) -> Value {
+        let mut schema = json!({ "type": "string" });
 
-        // Add allowed_values as enum
-        if let Some(values) = &constraints.allowed_values {
+        if let Some(values) = &constraints.restrict_to {
             schema["enum"] = json!(values);
         }
 
-        // Add pattern
-        if let Some(pattern) = &constraints.pattern {
-            schema["pattern"] = json!(pattern);
+        if let Some(default) = &constraints.default {
+            schema["default"] = default.clone();
         }
 
-        // Add min/max for numeric types
-        if base_type == "integer" || base_type == "number" {
-            if let Some(min) = constraints.min {
-                schema["minimum"] = json!(min);
-            }
-            if let Some(max) = constraints.max {
-                schema["maximum"] = json!(max);
-            }
+        if let Some(guidance) = &constraints.guidance {
+            schema["description"] = json!(guidance);
+        }
+
+        schema
+    }
+
+    /// Convert updatable column constraints to JSON Schema.
+    fn updatable_constraints_to_json_schema(
+        &self,
+        constraints: &UpdatableColumnConstraints,
+        col_schema: &crate::schema::ColumnSchema,
+    ) -> Value {
+        let base_type = col_schema.json_schema_type();
+        let mut schema = json!({ "type": base_type });
+
+        // Add restrict_to as enum
+        if let Some(values) = &constraints.restrict_to {
+            schema["enum"] = json!(values);
+        }
+
+        // Add format if applicable
+        if let Some(format) = col_schema.json_schema_format() {
+            schema["format"] = json!(format);
+        }
+
+        // Add description/guidance
+        if let Some(guidance) = &constraints.guidance {
+            schema["description"] = json!(guidance);
+        } else if let Some(desc) = &col_schema.description {
+            schema["description"] = json!(desc);
+        }
+
+        schema
+    }
+
+    /// Convert updatable constraints to basic JSON Schema (no column schema).
+    fn updatable_constraints_to_basic_json_schema(
+        &self,
+        constraints: &UpdatableColumnConstraints,
+    ) -> Value {
+        let mut schema = json!({ "type": "string" });
+
+        if let Some(values) = &constraints.restrict_to {
+            schema["enum"] = json!(values);
+        }
+
+        if let Some(guidance) = &constraints.guidance {
+            schema["description"] = json!(guidance);
         }
 
         schema
@@ -598,34 +695,32 @@ fn pluralize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cori_core::{EditableColumns, ReadableColumns, TablePermissions};
     use crate::schema::ColumnSchema;
+    use cori_core::TablePermissions;
     use std::collections::HashMap;
 
     #[test]
     fn test_generate_get_tool() {
-        let mut role = RoleConfig {
+        let mut role = RoleDefinition {
             name: "test".to_string(),
             description: None,
+            approvals: None,
             tables: HashMap::new(),
             blocked_tables: Vec::new(),
             max_rows_per_query: Some(100),
             max_affected_rows: None,
-            blocked_operations: Vec::new(),
-            custom_actions: Vec::new(),
-            include_actions: Vec::new(),
         };
 
         role.tables.insert(
             "users".to_string(),
             TablePermissions {
-                readable: ReadableColumns::List(vec![
+                readable: ColumnList::List(vec![
                     "id".to_string(),
                     "name".to_string(),
                 ]),
-                editable: EditableColumns::Map(HashMap::new()),
-                operations: None,
-                tenant_column: None,
+                creatable: CreatableColumns::default(),
+                updatable: UpdatableColumns::default(),
+                deletable: Default::default(),
             },
         );
 
@@ -641,37 +736,38 @@ mod tests {
 
         assert!(tools.iter().any(|t| t.name == "getUser"));
         assert!(tools.iter().any(|t| t.name == "listUsers"));
-        // No create/update/delete since no editable columns
+        // No create/update/delete since no creatable/updatable columns
         assert!(!tools.iter().any(|t| t.name == "createUser"));
     }
 
     #[test]
     fn test_generate_update_tool_with_constraints() {
-        let mut role = RoleConfig {
+        let mut role = RoleDefinition {
             name: "test".to_string(),
             description: None,
+            approvals: None,
             tables: HashMap::new(),
             blocked_tables: Vec::new(),
             max_rows_per_query: Some(100),
             max_affected_rows: None,
-            blocked_operations: Vec::new(),
-            custom_actions: Vec::new(),
-            include_actions: Vec::new(),
         };
 
-        let mut editable = HashMap::new();
-        editable.insert(
+        let mut updatable = HashMap::new();
+        updatable.insert(
             "status".to_string(),
-            ColumnConstraints {
-                allowed_values: Some(vec!["open".to_string(), "closed".to_string()]),
-                requires_approval: false,
+            UpdatableColumnConstraints {
+                restrict_to: Some(vec![
+                    serde_json::json!("open"),
+                    serde_json::json!("closed"),
+                ]),
+                requires_approval: None,
                 ..Default::default()
             },
         );
-        editable.insert(
+        updatable.insert(
             "priority".to_string(),
-            ColumnConstraints {
-                requires_approval: true,
+            UpdatableColumnConstraints {
+                requires_approval: Some(cori_core::ApprovalRequirement::Simple(true)),
                 ..Default::default()
             },
         );
@@ -679,13 +775,13 @@ mod tests {
         role.tables.insert(
             "tickets".to_string(),
             TablePermissions {
-                readable: ReadableColumns::List(vec![
+                readable: ColumnList::List(vec![
                     "id".to_string(),
                     "status".to_string(),
                 ]),
-                editable: EditableColumns::Map(editable),
-                operations: None,
-                tenant_column: None,
+                creatable: CreatableColumns::default(),
+                updatable: UpdatableColumns::Map(updatable),
+                deletable: Default::default(),
             },
         );
 
