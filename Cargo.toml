@@ -4,11 +4,6 @@ members = [
   # Core types and schemas
   "crates/cori-core",
   
-  # Policy and runtime (existing)
-  "crates/cori-policy",
-  "crates/cori-runtime",
-  "crates/cori-planner",
-  
   # Database adapters
   "crates/cori-adapter-pg",
   
@@ -24,9 +19,8 @@ members = [
   # Admin web dashboard
   "crates/cori-dashboard",
   
-  # CLI and server binaries
+  # CLI binary
   "crates/cori-cli",
-  "crates/cori-server",
 ]
 
 [workspace.package]

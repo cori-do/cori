@@ -21,8 +21,6 @@ tracing.workspace = true
 toml = "0.9"
 
 cori-core = { path = "../cori-core" }
-cori-policy = { path = "../cori-policy" }
-cori-runtime = { path = "../cori-runtime" }
 cori-adapter-pg = { path = "../cori-adapter-pg" }
 
 cori-biscuit = { path = "../cori-biscuit" }
