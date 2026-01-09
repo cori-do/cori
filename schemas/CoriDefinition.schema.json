@@ -1,0 +1,496 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cori.do/schemas/CoriDefinition.schema.json",
+  "title": "CoriDefinition",
+  "description": "Main configuration file (cori.yaml) for Cori - The Secure Kernel for AI. Defines database connection, Biscuit tokens, MCP server, dashboard, and audit logging. Tenancy rules are defined in schema/rules.yaml, roles in roles/*.yaml (convention over configuration).",
+  "type": "object",
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "Project name identifier for this Cori instance.",
+      "examples": ["my-saas-app", "cori-demo"]
+    },
+    "version": {
+      "type": "string",
+      "description": "Configuration version string.",
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+      "examples": ["1.0", "1.0.0"]
+    },
+    "upstream": {
+      "$ref": "#/definitions/UpstreamConfig"
+    },
+    "biscuit": {
+      "$ref": "#/definitions/BiscuitConfig"
+    },
+    "mcp": {
+      "$ref": "#/definitions/McpConfig"
+    },
+    "dashboard": {
+      "$ref": "#/definitions/DashboardConfig"
+    },
+    "audit": {
+      "$ref": "#/definitions/AuditConfig"
+    },
+    "observability": {
+      "$ref": "#/definitions/ObservabilityConfig"
+    }
+  },
+  "required": ["upstream"],
+  "additionalProperties": false,
+  "definitions": {
+    "UpstreamConfig": {
+      "type": "object",
+      "description": "Configuration for the upstream PostgreSQL database connection. Three configuration methods are supported (in order of precedence): 1) database_url_env - reference an environment variable containing the connection URL, 2) database_url - provide the connection URL directly, 3) Individual fields (host, port, database, username, password). The pool configuration is always optional regardless of the method used.",
+      "oneOf": [
+        {
+          "title": "Method 1: Environment Variable",
+          "description": "Reference an environment variable containing the full connection URL. Highest precedence.",
+          "properties": {
+            "database_url_env": {
+              "type": "string",
+              "description": "Environment variable name containing the PostgreSQL connection URL.",
+              "examples": ["DATABASE_URL", "POSTGRES_URL"]
+            },
+            "ssl_mode": {
+              "type": "string",
+              "description": "SSL mode for the connection (can override URL settings).",
+              "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
+              "default": "prefer"
+            },
+            "pool": {
+              "$ref": "#/definitions/ConnectionPoolConfig"
+            }
+          },
+          "required": ["database_url_env"],
+          "additionalProperties": false
+        },
+        {
+          "title": "Method 2: Direct URL",
+          "description": "Provide the full PostgreSQL connection URL directly in the config.",
+          "properties": {
+            "database_url": {
+              "type": "string",
+              "description": "Full PostgreSQL connection URL.",
+              "format": "uri",
+              "examples": ["postgres://user:pass@localhost:5432/mydb", "postgresql://postgres:postgres@db.example.com/production"]
+            },
+            "ssl_mode": {
+              "type": "string",
+              "description": "SSL mode for the connection (can override URL settings).",
+              "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
+              "default": "prefer"
+            },
+            "pool": {
+              "$ref": "#/definitions/ConnectionPoolConfig"
+            }
+          },
+          "required": ["database_url"],
+          "additionalProperties": false
+        },
+        {
+          "title": "Method 3: Individual Fields",
+          "description": "Specify connection parameters individually.",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Hostname of the upstream Postgres server.",
+              "default": "localhost",
+              "examples": ["localhost", "db.example.com", "192.168.1.100"]
+            },
+            "port": {
+              "type": "integer",
+              "description": "Port of the upstream Postgres server.",
+              "default": 5432,
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "database": {
+              "type": "string",
+              "description": "Database name to connect to.",
+              "default": "postgres",
+              "examples": ["myapp", "cori_demo", "production"]
+            },
+            "username": {
+              "type": "string",
+              "description": "Username for upstream connection.",
+              "default": "postgres"
+            },
+            "password": {
+              "type": "string",
+              "description": "Password for upstream connection."
+            },
+            "password_env": {
+              "type": "string",
+              "description": "Environment variable containing the password (alternative to password field).",
+              "examples": ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+            },
+            "ssl_mode": {
+              "type": "string",
+              "description": "SSL mode for the connection.",
+              "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
+              "default": "prefer"
+            },
+            "pool": {
+              "$ref": "#/definitions/ConnectionPoolConfig"
+            }
+          },
+          "required": ["database"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ConnectionPoolConfig": {
+      "type": "object",
+      "description": "Connection pool configuration for upstream database.",
+      "properties": {
+        "min_connections": {
+          "type": "integer",
+          "description": "Minimum number of connections to maintain.",
+          "default": 1,
+          "minimum": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "Maximum number of connections in the pool.",
+          "default": 10,
+          "minimum": 1
+        },
+        "acquire_timeout_seconds": {
+          "type": "integer",
+          "description": "Timeout in seconds when acquiring a connection from the pool.",
+          "default": 30,
+          "minimum": 1
+        },
+        "idle_timeout_seconds": {
+          "type": "integer",
+          "description": "How long a connection can remain idle before being closed.",
+          "default": 600,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "BiscuitConfig": {
+      "type": "object",
+      "description": "Configuration for Biscuit token authentication and signing. Keys can be provided via environment variables or files (convention: keys/ directory).",
+      "properties": {
+        "public_key_env": {
+          "type": "string",
+          "description": "Environment variable containing the public key (hex-encoded).",
+          "examples": ["BISCUIT_PUBLIC_KEY"]
+        },
+        "public_key_file": {
+          "type": "string",
+          "description": "Path to the public key file.",
+          "default": "keys/public.key",
+          "examples": ["keys/public.key"]
+        },
+        "private_key_env": {
+          "type": "string",
+          "description": "Environment variable containing the private key (hex-encoded). Required for token minting.",
+          "examples": ["BISCUIT_PRIVATE_KEY"]
+        },
+        "private_key_file": {
+          "type": "string",
+          "description": "Path to the private key file.",
+          "default": "keys/private.key",
+          "examples": ["keys/private.key"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpConfig": {
+      "type": "object",
+      "description": "Configuration for the MCP (Model Context Protocol) server. Tools are auto-generated from schema and role permissions.",
+      "oneOf": [
+        {
+          "title": "Stdio Transport",
+          "description": "Use stdio transport for Claude Desktop and local AI agents. The MCP server communicates via stdin/stdout.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether the MCP server is enabled.",
+              "default": true
+            },
+            "transport": {
+              "type": "string",
+              "const": "stdio",
+              "description": "Stdio transport for Claude Desktop and local integrations."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "HTTP Transport",
+          "description": "Use HTTP transport for remote AI agents and API integrations. Requires host and port configuration.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether the MCP server is enabled.",
+              "default": true
+            },
+            "transport": {
+              "type": "string",
+              "const": "http",
+              "description": "HTTP transport for remote agents and API integrations."
+            },
+            "port": {
+              "type": "integer",
+              "description": "HTTP port to listen on.",
+              "default": 3000,
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "host": {
+              "type": "string",
+              "description": "HTTP host to bind to.",
+              "default": "127.0.0.1",
+              "examples": ["127.0.0.1", "0.0.0.0", "localhost"]
+            }
+          },
+          "required": ["transport"],
+          "additionalProperties": false
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "transport": "stdio"
+      }
+    },
+    "DashboardConfig": {
+      "type": "object",
+      "description": "Configuration for the admin dashboard web UI.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the dashboard is enabled.",
+          "default": true
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port to listen on for the dashboard.",
+          "default": 8080,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "host": {
+          "type": "string",
+          "description": "Host to bind the dashboard to.",
+          "default": "127.0.0.1",
+          "examples": ["127.0.0.1", "0.0.0.0", "localhost"]
+        },
+        "auth": {
+          "$ref": "#/definitions/DashboardAuthConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DashboardAuthConfig": {
+      "type": "object",
+      "description": "Authentication configuration for the dashboard.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Authentication type.",
+          "enum": ["basic", "oidc"],
+          "default": "basic"
+        },
+        "users": {
+          "type": "array",
+          "description": "Users for basic authentication.",
+          "items": {
+            "$ref": "#/definitions/BasicAuthUser"
+          }
+        },
+        "oidc": {
+          "$ref": "#/definitions/OidcConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "BasicAuthUser": {
+      "type": "object",
+      "description": "Basic authentication user configuration.",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Username for authentication."
+        },
+        "password": {
+          "type": "string",
+          "description": "Password (prefer password_env for security)."
+        },
+        "password_env": {
+          "type": "string",
+          "description": "Environment variable containing the password.",
+          "examples": ["DASHBOARD_ADMIN_PASSWORD"]
+        }
+      },
+      "required": ["username"],
+      "additionalProperties": false
+    },
+    "OidcConfig": {
+      "type": "object",
+      "description": "OpenID Connect authentication configuration.",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "description": "OIDC issuer URL.",
+          "format": "uri",
+          "examples": ["https://accounts.google.com", "https://auth.example.com"]
+        },
+        "client_id": {
+          "type": "string",
+          "description": "OIDC client ID."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "OIDC client secret (prefer client_secret_env for security)."
+        },
+        "client_secret_env": {
+          "type": "string",
+          "description": "Environment variable containing the client secret.",
+          "examples": ["OIDC_CLIENT_SECRET"]
+        },
+        "scopes": {
+          "type": "array",
+          "description": "OIDC scopes to request.",
+          "items": {
+            "type": "string"
+          },
+          "default": ["openid", "profile", "email"]
+        },
+        "redirect_uri": {
+          "type": "string",
+          "description": "OAuth redirect URI. Auto-generated if not specified.",
+          "format": "uri"
+        }
+      },
+      "required": ["issuer", "client_id"],
+      "additionalProperties": false
+    },
+    "AuditConfig": {
+      "type": "object",
+      "description": "Configuration for audit logging. Every MCP action is logged with tenant, role, timing, and outcome.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether audit logging is enabled.",
+          "default": true
+        },
+        "directory": {
+          "type": "string",
+          "description": "Directory for audit log files. Logs are written as JSONL files with daily rotation.",
+          "default": "logs/",
+          "examples": ["logs/", "/var/log/cori/", "./audit/"]
+        },
+        "stdout": {
+          "type": "boolean",
+          "description": "Whether to also output audit logs to stdout (in addition to files).",
+          "default": false
+        },
+        "retention_days": {
+          "type": "integer",
+          "description": "Number of days to retain audit log files. Older files are automatically deleted.",
+          "default": 90,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ObservabilityConfig": {
+      "type": "object",
+      "description": "Observability configuration for metrics, health checks, and tracing.",
+      "properties": {
+        "metrics": {
+          "$ref": "#/definitions/MetricsConfig"
+        },
+        "health": {
+          "$ref": "#/definitions/HealthConfig"
+        },
+        "tracing": {
+          "$ref": "#/definitions/TracingConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricsConfig": {
+      "type": "object",
+      "description": "Prometheus metrics configuration.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether metrics are enabled.",
+          "default": true
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port for metrics endpoint.",
+          "default": 9090,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "path": {
+          "type": "string",
+          "description": "Path for metrics endpoint.",
+          "default": "/metrics"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HealthConfig": {
+      "type": "object",
+      "description": "Health check configuration.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether health checks are enabled.",
+          "default": true
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port for health check endpoint.",
+          "default": 8081,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "path": {
+          "type": "string",
+          "description": "Path for health check endpoint.",
+          "default": "/health"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TracingConfig": {
+      "type": "object",
+      "description": "OpenTelemetry tracing configuration.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether tracing is enabled.",
+          "default": false
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "OpenTelemetry collector endpoint (OTLP/gRPC).",
+          "format": "uri",
+          "examples": ["http://localhost:4317", "https://otel.example.com:4317"]
+        },
+        "service_name": {
+          "type": "string",
+          "description": "Service name reported in traces.",
+          "default": "cori"
+        },
+        "sample_rate": {
+          "type": "number",
+          "description": "Trace sampling rate (0.0 to 1.0).",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
