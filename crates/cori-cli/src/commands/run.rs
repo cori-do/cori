@@ -89,6 +89,12 @@ pub struct BiscuitConfig {
 pub struct AuditConfigFile {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_directory")]
+    pub directory: String,
+    #[serde(default)]
+    pub stdout: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
     #[serde(default = "default_enabled")]
     pub log_queries: bool,
     #[serde(default)]
@@ -345,6 +351,14 @@ fn default_enabled() -> bool {
     true
 }
 
+fn default_directory() -> String {
+    "logs/".to_string()
+}
+
+fn default_retention_days() -> u32 {
+    90
+}
+
 fn default_mcp_port() -> u16 {
     3000
 }
@@ -448,10 +462,21 @@ pub async fn run(
     let audit_logger = if run_config.audit.enabled {
         let audit_config = AuditConfig {
             enabled: run_config.audit.enabled,
+            directory: run_config.audit.directory.clone(),
+            stdout: run_config.audit.stdout,
+            retention_days: run_config.audit.retention_days,
             log_queries: run_config.audit.log_queries,
             log_results: run_config.audit.log_results,
             ..Default::default()
         };
+        
+        tracing::info!(
+            enabled = audit_config.enabled,
+            stdout = audit_config.stdout,
+            directory = %audit_config.directory,
+            "Creating audit logger"
+        );
+        
         Some(Arc::new(AuditLogger::new(audit_config)?))
     } else {
         None
@@ -538,74 +563,95 @@ async fn run_http_mode(
     dashboard_enabled: bool,
     dashboard_port: u16,
 ) -> Result<()> {
+
     let mut handles = Vec::new();
+    
+    // ============================================
+    // START ALL SERVICES CONCURRENTLY
+    // ============================================
 
-    // Start MCP HTTP Server
+    // 1. Start MCP Server (if enabled and transport is HTTP)
     if run_config.mcp.enabled {
-        let mcp_config = McpConfig {
-            enabled: true,
-            transport: Transport::Http,
-            host: "127.0.0.1".to_string(),
-            port: mcp_port,
-        };
+        let transport = run_config.mcp.transport.as_deref().unwrap_or("http");
 
-        let database_url = database_url.to_string();
-        let rules_for_mcp = rules.clone();
-        let schema = schema.clone();
-        let core_roles = core_roles.clone();
-        let approval_manager = approval_manager.clone();
-        let public_key = mcp_public_key.clone();
+        if transport == "http" {
+            let mcp_config = McpConfig {
+                enabled: true,
+                transport: Transport::Http,
+                host: "127.0.0.1".to_string(),
+                port: mcp_port,
+            };
 
-        let handle = tokio::spawn(async move {
-            info!(
-                port = mcp_config.port,
-                auth_enabled = public_key.is_some(),
-                "Starting MCP HTTP server"
+            let database_url = database_url.to_string();
+            let rules_for_mcp = rules.clone();
+            let schema = schema.clone();
+            let core_roles = core_roles.clone();
+            let approval_manager = approval_manager.clone();
+            let public_key = mcp_public_key.clone();
+            let audit_logger_for_mcp = audit_logger.clone();
+
+            let handle = tokio::spawn(async move {
+                tracing::info!(
+                    port = mcp_config.port,
+                    auth_enabled = public_key.is_some(),
+                    audit_enabled = audit_logger_for_mcp.is_some(),
+                    "Starting MCP HTTP server"
+                );
+
+                // Connect to database
+                match PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&database_url)
+                    .await
+                {
+                    Ok(pool) => {
+                        // Create MCP server
+                        let mut server = McpServer::new(mcp_config)
+                            .with_pool(pool)
+                            .with_approval_manager(approval_manager);
+
+                        // Add audit logger if enabled
+                        if let Some(logger) = audit_logger_for_mcp {
+                            server = server.with_audit_logger(logger);
+                        }
+
+                        // Add rules if loaded
+                        if let Some(r) = rules_for_mcp {
+                            server = server.with_rules(r);
+                        }
+
+                        // Add public key for authentication if available
+                        if let Some(pk) = public_key {
+                            server = server.with_public_key(pk);
+                        }
+
+                        if let Some(s) = schema {
+                            server = server.with_schema(s);
+                        }
+
+                        // If there's a default role, use it for tool generation
+                        if let Some((_name, role_config)) = core_roles.iter().next() {
+                            server = server.with_role(role_config.clone());
+                            server.generate_tools();
+                        }
+
+                        // Use run_http directly
+                        if let Err(e) = server.run_http().await {
+                            tracing::error!(error = %e, "MCP server error");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to connect to database for MCP server");
+                    }
+                }
+            });
+            handles.push(handle);
+        } else {
+            tracing::info!(
+                transport = transport,
+                "MCP server configured for stdio transport - not starting in serve mode"
             );
-
-            // Connect to database
-            match PgPoolOptions::new()
-                .max_connections(5)
-                .connect(&database_url)
-                .await
-            {
-                Ok(pool) => {
-                    // Create MCP server
-                    let mut server = McpServer::new(mcp_config)
-                        .with_pool(pool)
-                        .with_approval_manager(approval_manager);
-
-                    // Add rules if loaded
-                    if let Some(r) = rules_for_mcp {
-                        server = server.with_rules(r);
-                    }
-
-                    // Add public key for authentication if available
-                    if let Some(pk) = public_key {
-                        server = server.with_public_key(pk);
-                    }
-
-                    if let Some(s) = schema {
-                        server = server.with_schema(s);
-                    }
-
-                    // If there's a default role, use it for tool generation
-                    if let Some((_name, role_config)) = core_roles.iter().next() {
-                        server = server.with_role(role_config.clone());
-                        server.generate_tools();
-                    }
-
-                    // Use run_http directly
-                    if let Err(e) = server.run_http().await {
-                        tracing::error!(error = %e, "MCP server error");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to connect to database for MCP server");
-                }
-            }
-        });
-        handles.push(handle);
+        }
     }
 
     // Start Dashboard (if enabled)

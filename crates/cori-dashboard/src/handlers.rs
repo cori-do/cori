@@ -108,27 +108,73 @@ pub struct TokenPageParams {
     pub role: Option<String>,
 }
 
+/// Default page size for audit logs.
+const DEFAULT_PAGE_SIZE: usize = 25;
+
 /// Handler for the audit logs page.
 pub async fn audit_logs(
     State(state): State<AppState>,
     Query(params): Query<crate::api_types::AuditQueryParams>,
 ) -> Html<String> {
-    let events = if let Some(logger) = state.audit_logger() {
-        let filter = AuditFilter {
-            tenant_id: params.tenant_id.clone(),
-            role: params.role.clone(),
-            event_type: None, // Would need to parse from string
-            start_time: params.start_time,
-            end_time: params.end_time,
-            limit: params.limit.or(Some(100)),
-            offset: params.offset,
-        };
-        logger.query(filter).await.unwrap_or_default()
-    } else {
-        vec![]
+    let page_size = params.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    
+    // Calculate offset from page number if provided
+    let offset = params.offset.or_else(|| {
+        params.page.map(|p| (p.saturating_sub(1)) * page_size)
+    });
+    
+    // Parse sort direction
+    let sort_desc = params.sort_dir.as_deref() != Some("asc");
+    
+    // Build filter for counting (no limit/offset)
+    let count_filter = AuditFilter {
+        tenant_id: params.tenant_id.clone(),
+        role: params.role.clone(),
+        action: None,
+        event_type: None,
+        start_time: params.start_time,
+        end_time: params.end_time,
+        limit: None,
+        offset: None,
+        sort_by: None,
+        sort_desc: None,
     };
     
-    Html(pages_extra::audit_logs_page(&events, &params))
+    // Build filter for query
+    let query_filter = AuditFilter {
+        tenant_id: params.tenant_id.clone(),
+        role: params.role.clone(),
+        action: None,
+        event_type: None,
+        start_time: params.start_time,
+        end_time: params.end_time,
+        limit: Some(page_size),
+        offset,
+        sort_by: params.sort_by.clone(),
+        sort_desc: Some(sort_desc),
+    };
+    
+    let (events, total_count) = if let Some(logger) = state.audit_logger() {
+        let events = logger.query(query_filter).await.unwrap_or_default();
+        let total = logger.count(count_filter).await.unwrap_or(0);
+        (events, total)
+    } else {
+        (vec![], 0)
+    };
+    
+    let current_page = params.page.unwrap_or(1).max(1);
+    let total_pages = (total_count + page_size - 1) / page_size.max(1);
+    
+    let pagination = pages_extra::PaginationInfo {
+        current_page,
+        total_pages,
+        total_count,
+        page_size,
+        has_prev: current_page > 1,
+        has_next: current_page < total_pages,
+    };
+    
+    Html(pages_extra::audit_logs_page(&events, &params, &pagination))
 }
 
 /// Handler for the approvals page.
@@ -448,26 +494,50 @@ pub mod api {
         State(state): State<AppState>,
         Query(params): Query<AuditQueryParams>,
     ) -> Json<AuditListResponse> {
-        let events = if let Some(logger) = state.audit_logger() {
-            let filter = cori_audit::logger::AuditFilter {
-                tenant_id: params.tenant_id,
-                role: params.role,
+        let page_size = params.limit.unwrap_or(100);
+        let sort_desc = params.sort_dir.as_deref() != Some("asc");
+        
+        let (events, total) = if let Some(logger) = state.audit_logger() {
+            // Count filter (no limit/offset)
+            let count_filter = cori_audit::logger::AuditFilter {
+                tenant_id: params.tenant_id.clone(),
+                role: params.role.clone(),
+                action: None,
                 event_type: None,
                 start_time: params.start_time,
                 end_time: params.end_time,
-                limit: params.limit.or(Some(100)),
-                offset: params.offset,
+                limit: None,
+                offset: None,
+                sort_by: None,
+                sort_desc: None,
             };
-            logger.query(filter).await.unwrap_or_default()
+            
+            // Query filter
+            let query_filter = cori_audit::logger::AuditFilter {
+                tenant_id: params.tenant_id,
+                role: params.role,
+                action: None,
+                event_type: None,
+                start_time: params.start_time,
+                end_time: params.end_time,
+                limit: Some(page_size),
+                offset: params.offset,
+                sort_by: params.sort_by,
+                sort_desc: Some(sort_desc),
+            };
+            
+            let events = logger.query(query_filter).await.unwrap_or_default();
+            let total = logger.count(count_filter).await.unwrap_or(0);
+            (events, total)
         } else {
-            vec![]
+            (vec![], 0)
         };
         
-        let total = events.len();
+        let has_more = params.offset.unwrap_or(0) + events.len() < total;
         Json(AuditListResponse {
             events: events.into_iter().map(audit_event_to_response).collect(),
             total,
-            has_more: false,
+            has_more,
         })
     }
 
@@ -769,15 +839,15 @@ pub mod api {
             event_id: event.event_id.to_string(),
             occurred_at: event.occurred_at,
             event_type: format!("{:?}", event.event_type),
-            tenant_id: event.tenant_id,
-            role: event.role,
-            original_query: event.original_query,
-            rewritten_query: event.rewritten_query,
+            tenant_id: Some(event.tenant_id),
+            role: Some(event.role),
+            original_query: event.sql.clone(), // Now using `sql` field
+            rewritten_query: event.sql, // No separate rewritten query anymore
             tables: event.tables,
             row_count: event.row_count,
             duration_ms: event.duration_ms,
             error: event.error,
-            tool_name: event.tool_name,
+            tool_name: Some(event.action), // Tool name is now `action`
             approval_id: event.approval_id,
         }
     }

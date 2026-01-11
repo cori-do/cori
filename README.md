@@ -148,6 +148,19 @@ cori tools list --token agent.token --key keys/public.key
 
 ---
 
+## 🛡️ Audit Logs
+
+Cori records **every tool call, SQL query, and approval decision** in both human-readable and structured formats.
+
+- **Console output** (when `audit.stdout` is enabled) prints lines like `[2026-01-10T22:54:10Z] QUERY_EXECUTED role=support_agent tenant=acme_corp action=listCustomers sql="SELECT ..."` and flags approvals (`ApprovalRequested`, `Approved`, `Denied`).
+- **JSON log file** is written to `logs/audit.log` inside your project directory. Each line is a compact JSON object with fields such as `event_type`, `role`, `tenant_id`, `action`, `sql`, `approval_id`, and `duration_ms`, making it easy to ship to log processors or parse locally.
+
+The dashboard automatically loads `logs/audit.log` on startup, shows total counts, sortable columns, and paginated lists for fast forensic review.
+
+Configure `audit.directory`, `audit.stdout`, and `audit.retention_days` in `cori.yaml` to change where logs live, whether dual output is enabled, and how long entries are kept.
+
+---
+
 ## 🔧 How It Works
 
 ### Define Your Tenancy
