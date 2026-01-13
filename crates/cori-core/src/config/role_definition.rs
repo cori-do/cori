@@ -40,18 +40,6 @@ pub struct RoleDefinition {
     /// Table permissions.
     #[serde(default)]
     pub tables: HashMap<String, TablePermissions>,
-
-    /// Tables that are explicitly blocked.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocked_tables: Vec<String>,
-
-    /// Maximum rows per query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_rows_per_query: Option<u64>,
-
-    /// Maximum affected rows for mutations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_affected_rows: Option<u64>,
 }
 
 impl Default for RoleDefinition {
@@ -61,9 +49,6 @@ impl Default for RoleDefinition {
             description: None,
             approvals: None,
             tables: HashMap::new(),
-            blocked_tables: Vec::new(),
-            max_rows_per_query: Some(100),
-            max_affected_rows: Some(10),
         }
     }
 }
@@ -82,7 +67,7 @@ impl RoleDefinition {
 
     /// Check if a table is accessible to this role.
     pub fn can_access_table(&self, table: &str) -> bool {
-        !self.blocked_tables.contains(&table.to_string()) && self.tables.contains_key(table)
+        self.tables.contains_key(table)
     }
 
     /// Check if a column is readable.
@@ -169,8 +154,15 @@ impl RoleDefinition {
     }
 
     /// Get readable columns for a table.
-    pub fn get_readable_columns(&self, table: &str) -> Option<&ColumnList> {
+    pub fn get_readable_columns(&self, table: &str) -> Option<&ReadableConfig> {
         self.tables.get(table).map(|t| &t.readable)
+    }
+
+    /// Get max_per_page for a table's list operations.
+    pub fn get_max_per_page(&self, table: &str) -> Option<u64> {
+        self.tables
+            .get(table)
+            .and_then(|t| t.readable.max_per_page())
     }
 
     /// Check if any column in a table requires approval (for create or update).
@@ -236,9 +228,9 @@ impl RoleDefinition {
 /// Permission configuration for a single table.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TablePermissions {
-    /// Columns that can be read (SELECT).
+    /// Columns that can be read (SELECT) with optional pagination limit.
     #[serde(default)]
-    pub readable: ColumnList,
+    pub readable: ReadableConfig,
 
     /// Columns that can be set on INSERT with constraints.
     #[serde(default)]
@@ -319,6 +311,93 @@ impl ColumnList {
         match self {
             ColumnList::All(_) => None,
             ColumnList::List(cols) => Some(cols),
+        }
+    }
+}
+
+/// Readable configuration with columns and optional max_per_page.
+/// Supports three formats:
+/// - `"*"` for all columns
+/// - `["col1", "col2"]` for specific columns
+/// - `{columns: [...], max_per_page: N}` for columns with pagination limit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReadableConfig {
+    /// All columns (shorthand: "*").
+    All(AllColumns),
+    /// List of specific column names (shorthand: ["col1", "col2"]).
+    List(Vec<String>),
+    /// Full config with columns and optional max_per_page.
+    Config(ReadableConfigFull),
+}
+
+/// Full readable configuration with columns and optional max_per_page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadableConfigFull {
+    /// Columns that can be read.
+    pub columns: ColumnList,
+    /// Maximum number of rows per page for list operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_page: Option<u64>,
+}
+
+impl Default for ReadableConfig {
+    fn default() -> Self {
+        ReadableConfig::List(Vec::new())
+    }
+}
+
+impl ReadableConfig {
+    /// Check if a column is included.
+    pub fn contains(&self, column: &str) -> bool {
+        match self {
+            ReadableConfig::All(_) => true,
+            ReadableConfig::List(cols) => cols.iter().any(|c| c == column),
+            ReadableConfig::Config(cfg) => cfg.columns.contains(column),
+        }
+    }
+
+    /// Check if this represents "all columns".
+    pub fn is_all(&self) -> bool {
+        match self {
+            ReadableConfig::All(_) => true,
+            ReadableConfig::List(_) => false,
+            ReadableConfig::Config(cfg) => cfg.columns.is_all(),
+        }
+    }
+
+    /// Check if the list is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ReadableConfig::All(_) => false,
+            ReadableConfig::List(cols) => cols.is_empty(),
+            ReadableConfig::Config(cfg) => cfg.columns.is_empty(),
+        }
+    }
+
+    /// Get the list of columns (None if "all").
+    pub fn as_list(&self) -> Option<&[String]> {
+        match self {
+            ReadableConfig::All(_) => None,
+            ReadableConfig::List(cols) => Some(cols),
+            ReadableConfig::Config(cfg) => cfg.columns.as_list(),
+        }
+    }
+
+    /// Get the max_per_page limit if configured.
+    pub fn max_per_page(&self) -> Option<u64> {
+        match self {
+            ReadableConfig::All(_) | ReadableConfig::List(_) => None,
+            ReadableConfig::Config(cfg) => cfg.max_per_page,
+        }
+    }
+
+    /// Get the underlying ColumnList.
+    pub fn columns(&self) -> ColumnList {
+        match self {
+            ReadableConfig::All(all) => ColumnList::All(all.clone()),
+            ReadableConfig::List(cols) => ColumnList::List(cols.clone()),
+            ReadableConfig::Config(cfg) => cfg.columns.clone(),
         }
     }
 }
@@ -476,25 +555,10 @@ impl UpdatableColumns {
 /// Constraints on a column for UPDATE operations.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdatableColumnConstraints {
-    /// Subset of allowed values that this role can set.
+    /// Conditions on current row (old.*) and incoming values (new.*).
+    /// Use object for AND logic, array for OR logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restrict_to: Option<Vec<serde_json::Value>>,
-
-    /// State machine: valid transitions from current value to new value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transitions: Option<HashMap<String, Vec<String>>>,
-
-    /// Preconditions on other columns' current values.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub only_when: Option<HashMap<String, ColumnCondition>>,
-
-    /// For numeric columns: value can only increase.
-    #[serde(default)]
-    pub increment_only: bool,
-
-    /// For text columns: can only append to existing value.
-    #[serde(default)]
-    pub append_only: bool,
+    pub only_when: Option<OnlyWhen>,
 
     /// Whether updating this column requires human approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,26 +569,44 @@ pub struct UpdatableColumnConstraints {
     pub guidance: Option<String>,
 }
 
-impl UpdatableColumnConstraints {
-    /// Check if a transition from old_value to new_value is valid.
-    pub fn is_valid_transition(&self, old_value: &str, new_value: &str) -> bool {
-        if let Some(transitions) = &self.transitions {
-            transitions
-                .get(old_value)
-                .map(|allowed| allowed.iter().any(|v| v == new_value))
-                .unwrap_or(false)
-        } else {
-            true // No transition rules means all transitions are valid
+/// Conditions for when an update is allowed.
+/// Keys use 'old.<column>' for current row values or 'new.<column>' for incoming values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OnlyWhen {
+    /// Single condition set (AND logic).
+    Single(HashMap<String, ColumnCondition>),
+    /// Multiple condition sets (OR logic) - update allowed if ANY matches.
+    Multiple(Vec<HashMap<String, ColumnCondition>>),
+}
+
+impl OnlyWhen {
+    /// Get all condition sets (single wrapped in vec, or multiple as-is).
+    pub fn condition_sets(&self) -> Vec<&HashMap<String, ColumnCondition>> {
+        match self {
+            OnlyWhen::Single(conditions) => vec![conditions],
+            OnlyWhen::Multiple(sets) => sets.iter().collect(),
         }
     }
 
-    /// Check if the value is in restrict_to.
-    pub fn is_value_allowed(&self, value: &serde_json::Value) -> bool {
-        if let Some(restrict_to) = &self.restrict_to {
-            restrict_to.contains(value)
-        } else {
-            true // No restriction means all values allowed
+    /// Check if this is a simple restriction on new value (new.<col>: [values]).
+    pub fn get_new_value_restriction(&self, column: &str) -> Option<&Vec<serde_json::Value>> {
+        let key = format!("new.{}", column);
+        if let OnlyWhen::Single(conditions) = self {
+            if conditions.len() == 1 {
+                if let Some(ColumnCondition::In(values)) = conditions.get(&key) {
+                    return Some(values);
+                }
+            }
         }
+        None
+    }
+}
+
+impl UpdatableColumnConstraints {
+    /// Check if the constraints have any only_when conditions.
+    pub fn has_conditions(&self) -> bool {
+        self.only_when.is_some()
     }
 }
 
@@ -532,14 +614,14 @@ impl UpdatableColumnConstraints {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ColumnCondition {
-    /// Column must equal this single value.
-    Equals(serde_json::Value),
-
     /// Column must be one of these values (IN).
     In(Vec<serde_json::Value>),
 
-    /// Comparison condition.
+    /// Comparison condition (object with comparison operators).
     Comparison(ComparisonCondition),
+
+    /// Column must equal this single value (scalar fallback).
+    Equals(serde_json::Value),
 }
 
 /// Detailed comparison condition.
@@ -553,21 +635,21 @@ pub struct ComparisonCondition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_equals: Option<serde_json::Value>,
 
-    /// Column must be greater than this value.
+    /// Column must be greater than this value or column reference (e.g., "old.quantity").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub greater_than: Option<f64>,
+    pub greater_than: Option<NumberOrColumnRef>,
 
-    /// Column must be greater than or equal to this value.
+    /// Column must be greater than or equal to this value or column reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub greater_than_or_equal: Option<f64>,
+    pub greater_than_or_equal: Option<NumberOrColumnRef>,
 
-    /// Column must be lower than this value.
+    /// Column must be lower than this value or column reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lower_than: Option<f64>,
+    pub lower_than: Option<NumberOrColumnRef>,
 
-    /// Column must be lower than or equal to this value.
+    /// Column must be lower than or equal to this value or column reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lower_than_or_equal: Option<f64>,
+    pub lower_than_or_equal: Option<NumberOrColumnRef>,
 
     /// Column must not be null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -584,6 +666,43 @@ pub struct ComparisonCondition {
     /// Column must not be one of these values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_in: Option<Vec<serde_json::Value>>,
+
+    /// Column must start with this value or column reference (e.g., "old.notes" for append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_with: Option<String>,
+}
+
+/// A numeric value or a reference to another column (e.g., "old.quantity").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NumberOrColumnRef {
+    /// A literal numeric value.
+    Number(f64),
+    /// A reference to another column using "old.<column>" or "new.<column>" syntax.
+    ColumnRef(String),
+}
+
+impl NumberOrColumnRef {
+    /// Check if this is a column reference.
+    pub fn is_column_ref(&self) -> bool {
+        matches!(self, NumberOrColumnRef::ColumnRef(_))
+    }
+
+    /// Get the column reference if this is one.
+    pub fn as_column_ref(&self) -> Option<&str> {
+        match self {
+            NumberOrColumnRef::ColumnRef(s) => Some(s),
+            NumberOrColumnRef::Number(_) => None,
+        }
+    }
+
+    /// Get the numeric value if this is one.
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            NumberOrColumnRef::Number(n) => Some(*n),
+            NumberOrColumnRef::ColumnRef(_) => None,
+        }
+    }
 }
 
 /// Deletable permission configuration.
@@ -721,19 +840,14 @@ tables:
         restrict_to: [low, medium, high]
     updatable:
       status:
-        restrict_to: [open, in_progress, resolved]
-        transitions:
-          open: [in_progress]
-          in_progress: [resolved, open]
+        only_when:
+          - old.status: open
+            new.status: [in_progress]
+          - old.status: in_progress
+            new.status: [resolved, open]
       priority:
         requires_approval: true
     deletable: false
-
-blocked_tables:
-  - users
-  - billing
-
-max_rows_per_query: 100
 "#;
 
         let role = RoleDefinition::from_yaml(yaml).unwrap();
@@ -750,8 +864,7 @@ max_rows_per_query: 100
         assert!(subject_constraints.required);
 
         let status_constraints = role.get_updatable_constraints("tickets", "status").unwrap();
-        assert!(status_constraints.is_valid_transition("open", "in_progress"));
-        assert!(!status_constraints.is_valid_transition("open", "resolved"));
+        assert!(status_constraints.has_conditions());
     }
 
     #[test]
@@ -793,7 +906,7 @@ tables:
     }
 
     #[test]
-    fn test_column_condition() {
+    fn test_only_when_single_condition() {
         let yaml = r#"
 name: warehouse_agent
 tables:
@@ -801,16 +914,109 @@ tables:
     readable: "*"
     updatable:
       status:
-        transitions:
-          paid: [shipped]
-          shipped: [delivered]
         only_when:
-          shipping_address:
+          old.status: [paid, processing]
+          old.shipping_address:
             not_null: true
+          new.status: shipped
 "#;
 
         let role = RoleDefinition::from_yaml(yaml).unwrap();
         let constraints = role.get_updatable_constraints("orders", "status").unwrap();
-        assert!(constraints.only_when.is_some());
+        assert!(constraints.has_conditions());
+        
+        if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
+            assert!(conditions.contains_key("old.status"));
+            assert!(conditions.contains_key("old.shipping_address"));
+            assert!(conditions.contains_key("new.status"));
+        } else {
+            panic!("Expected single condition set");
+        }
+    }
+
+    #[test]
+    fn test_only_when_multiple_conditions() {
+        let yaml = r#"
+name: support_agent
+tables:
+  tickets:
+    readable: "*"
+    updatable:
+      status:
+        only_when:
+          - old.status: open
+            new.status: [in_progress, cancelled]
+          - old.status: in_progress
+            new.status: [resolved, cancelled]
+"#;
+
+        let role = RoleDefinition::from_yaml(yaml).unwrap();
+        let constraints = role.get_updatable_constraints("tickets", "status").unwrap();
+        
+        if let Some(OnlyWhen::Multiple(sets)) = &constraints.only_when {
+            assert_eq!(sets.len(), 2);
+            assert!(sets[0].contains_key("old.status"));
+            assert!(sets[0].contains_key("new.status"));
+        } else {
+            panic!("Expected multiple condition sets");
+        }
+    }
+
+    #[test]
+    fn test_increment_only_pattern() {
+        let yaml = r#"
+name: warehouse_agent
+tables:
+  inventory:
+    readable: "*"
+    updatable:
+      quantity:
+        only_when:
+          new.quantity:
+            greater_than: old.quantity
+"#;
+
+        let role = RoleDefinition::from_yaml(yaml).unwrap();
+        let constraints = role.get_updatable_constraints("inventory", "quantity").unwrap();
+        assert!(constraints.has_conditions());
+        
+        if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
+            if let Some(ColumnCondition::Comparison(cmp)) = conditions.get("new.quantity") {
+                assert!(cmp.greater_than.is_some());
+                if let Some(NumberOrColumnRef::ColumnRef(col)) = &cmp.greater_than {
+                    assert_eq!(col, "old.quantity");
+                } else {
+                    panic!("Expected column reference");
+                }
+            } else {
+                panic!("Expected comparison condition");
+            }
+        }
+    }
+
+    #[test]
+    fn test_append_only_pattern() {
+        let yaml = r#"
+name: support_agent
+tables:
+  tickets:
+    readable: "*"
+    updatable:
+      notes:
+        only_when:
+          new.notes:
+            starts_with: old.notes
+"#;
+
+        let role = RoleDefinition::from_yaml(yaml).unwrap();
+        let constraints = role.get_updatable_constraints("tickets", "notes").unwrap();
+        
+        if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
+            if let Some(ColumnCondition::Comparison(cmp)) = conditions.get("new.notes") {
+                assert_eq!(cmp.starts_with.as_deref(), Some("old.notes"));
+            } else {
+                panic!("Expected comparison condition");
+            }
+        }
     }
 }

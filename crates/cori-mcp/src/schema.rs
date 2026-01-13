@@ -234,19 +234,31 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
     let mut table = TableSchema::new(&name);
     table.schema = schema_name;
 
-    // Parse columns
+    // Parse columns following SchemaDefinition.schema.json format
     if let Some(columns) = json["columns"].as_array() {
         for col_json in columns {
             let col_name = col_json["name"]
                 .as_str()
                 .ok_or_else(|| SchemaParseError::MissingField("column.name".to_string()))?;
-            let data_type = col_json["data_type"]
+            
+            // Use native_type for data_type (preferred), fallback to type
+            let data_type = col_json["native_type"]
                 .as_str()
-                .ok_or_else(|| SchemaParseError::MissingField("column.data_type".to_string()))?;
+                .or_else(|| col_json["type"].as_str())
+                .ok_or_else(|| SchemaParseError::MissingField("column.native_type or column.type".to_string()))?;
 
             let mut column = ColumnSchema::new(col_name, data_type);
             column.nullable = col_json["nullable"].as_bool().unwrap_or(true);
-            column.default = col_json["default"].as_str().map(String::from);
+            
+            // Default value can be string, number, boolean, or null
+            column.default = if col_json["default"].is_null() {
+                None
+            } else if let Some(s) = col_json["default"].as_str() {
+                Some(s.to_string())
+            } else {
+                // For numbers/booleans, convert to string
+                Some(col_json["default"].to_string())
+            };
 
             table.add_column(column);
         }
@@ -266,7 +278,7 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
         }
     }
 
-    // Parse foreign keys
+    // Parse foreign keys following SchemaDefinition.schema.json format
     if let Some(fks) = json["foreign_keys"].as_array() {
         for fk_json in fks {
             let fk_name = fk_json["name"].as_str().unwrap_or("").to_string();
@@ -275,26 +287,28 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
                 columns: Vec::new(),
             };
 
-            if let Some(mappings) = fk_json["mappings"].as_array() {
-                for mapping in mappings {
-                    let column = mapping["column"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    let foreign_schema = mapping["references"]["schema"].as_str().map(String::from);
-                    let foreign_table = mapping["references"]["table"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    let foreign_column = mapping["references"]["column"]
-                        .as_str()
+            // SchemaDefinition format: columns[] and references.columns[]
+            if let Some(columns) = fk_json["columns"].as_array() {
+                let references = &fk_json["references"];
+                let foreign_schema = references["schema"].as_str().map(String::from);
+                let foreign_table = references["table"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let ref_columns = references["columns"].as_array();
+                
+                for (i, col_val) in columns.iter().enumerate() {
+                    let column = col_val.as_str().unwrap_or_default().to_string();
+                    let foreign_column = ref_columns
+                        .and_then(|rc| rc.get(i))
+                        .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
 
                     fk.columns.push(ForeignKeyColumn {
                         column,
-                        foreign_schema,
-                        foreign_table,
+                        foreign_schema: foreign_schema.clone(),
+                        foreign_table: foreign_table.clone(),
                         foreign_column,
                     });
                 }
@@ -326,15 +340,22 @@ mod tests {
 
     #[test]
     fn test_parse_schema_from_json() {
+        // Test basic SchemaDefinition.schema.json format
         let json = json!({
+            "version": "1.0.0",
+            "captured_at": "2025-01-08T10:30:00Z",
+            "database": {
+                "engine": "postgres",
+                "version": "16.1"
+            },
             "tables": [
                 {
                     "name": "users",
                     "schema": "public",
                     "columns": [
-                        {"name": "id", "data_type": "integer", "nullable": false},
-                        {"name": "name", "data_type": "text", "nullable": false},
-                        {"name": "email", "data_type": "text", "nullable": true}
+                        {"name": "id", "type": "integer", "native_type": "integer", "nullable": false},
+                        {"name": "name", "type": "text", "native_type": "text", "nullable": false},
+                        {"name": "email", "type": "string", "native_type": "character varying", "nullable": true}
                     ],
                     "primary_key": ["id"],
                     "foreign_keys": []
@@ -349,6 +370,8 @@ mod tests {
         assert_eq!(users.columns.len(), 3);
         assert_eq!(users.primary_key, vec!["id"]);
         assert!(users.get_column("id").unwrap().is_primary_key);
+        // Verify native_type is used as data_type
+        assert_eq!(users.get_column("email").unwrap().data_type, "character varying");
     }
 
     #[test]
@@ -367,5 +390,123 @@ mod tests {
 
         let json_col = ColumnSchema::new("data", "jsonb");
         assert_eq!(json_col.json_schema_type(), "object");
+    }
+
+    #[test]
+    fn test_parse_schema_definition_format() {
+        // Test the new SchemaDefinition.schema.json format
+        let json = json!({
+            "version": "1.0.0",
+            "captured_at": "2025-01-08T10:30:00Z",
+            "database": {
+                "engine": "postgres",
+                "version": "16.1"
+            },
+            "extensions": ["uuid-ossp"],
+            "enums": [
+                {
+                    "name": "order_status",
+                    "schema": "public",
+                    "values": ["pending", "shipped", "delivered"]
+                }
+            ],
+            "tables": [
+                {
+                    "name": "customers",
+                    "schema": "public",
+                    "columns": [
+                        {
+                            "name": "id",
+                            "type": "uuid",
+                            "native_type": "uuid",
+                            "nullable": false,
+                            "default": "gen_random_uuid()"
+                        },
+                        {
+                            "name": "name",
+                            "type": "string",
+                            "native_type": "character varying",
+                            "nullable": false,
+                            "max_length": 255
+                        },
+                        {
+                            "name": "email",
+                            "type": "string",
+                            "native_type": "character varying",
+                            "nullable": true
+                        }
+                    ],
+                    "primary_key": ["id"],
+                    "foreign_keys": []
+                },
+                {
+                    "name": "orders",
+                    "schema": "public",
+                    "columns": [
+                        {
+                            "name": "id",
+                            "type": "uuid",
+                            "native_type": "uuid",
+                            "nullable": false
+                        },
+                        {
+                            "name": "customer_id",
+                            "type": "uuid",
+                            "native_type": "uuid",
+                            "nullable": false
+                        },
+                        {
+                            "name": "status",
+                            "type": "enum",
+                            "native_type": "USER-DEFINED",
+                            "nullable": false,
+                            "enum_name": "order_status"
+                        }
+                    ],
+                    "primary_key": ["id"],
+                    "foreign_keys": [
+                        {
+                            "name": "orders_customer_fk",
+                            "columns": ["customer_id"],
+                            "references": {
+                                "table": "customers",
+                                "schema": "public",
+                                "columns": ["id"]
+                            },
+                            "on_delete": "cascade"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let schema = parse_schema_from_json(&json).unwrap();
+        
+        // Verify customers table
+        let customers = schema.get_table("customers").unwrap();
+        assert_eq!(customers.name, "customers");
+        assert_eq!(customers.columns.len(), 3);
+        assert_eq!(customers.primary_key, vec!["id"]);
+        
+        // Verify column uses native_type
+        let id_col = customers.get_column("id").unwrap();
+        assert_eq!(id_col.data_type, "uuid");
+        assert!(id_col.is_primary_key);
+        
+        let name_col = customers.get_column("name").unwrap();
+        assert_eq!(name_col.data_type, "character varying");
+        assert!(!name_col.nullable);
+        
+        // Verify orders table with foreign key
+        let orders = schema.get_table("orders").unwrap();
+        assert_eq!(orders.name, "orders");
+        assert_eq!(orders.foreign_keys.len(), 1);
+        
+        let fk = &orders.foreign_keys[0];
+        assert_eq!(fk.name, "orders_customer_fk");
+        assert_eq!(fk.columns.len(), 1);
+        assert_eq!(fk.columns[0].column, "customer_id");
+        assert_eq!(fk.columns[0].foreign_table, "customers");
+        assert_eq!(fk.columns[0].foreign_column, "id");
     }
 }

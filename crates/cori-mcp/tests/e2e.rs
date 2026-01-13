@@ -5,12 +5,13 @@
 //! Test modules are organized by feature area:
 //! - `crud_operations` - GET/LIST operations, pagination, filtering, dry-run
 //! - `tenant_isolation` - Multi-tenant scenarios, cross-tenant blocking, global tables
-//! - `readable_columns` - ColumnList tests (All vs specific columns), blocked_tables
+//! - `readable_columns` - ColumnList tests (All vs specific columns), tables not in role
 //! - `creatable_columns` - CreatableColumnConstraints: required, default, restrict_to, etc.
 //! - `updatable_columns` - UpdatableColumnConstraints: restrict_to, transitions, etc.
 //! - `deletable` - DeletablePermission: boolean, requires_approval, soft_delete
 //! - `rules` - RulesDefinition: tenant config, global tables, soft_delete
 //! - `approvals` - Human-in-the-loop approval workflow
+//! - `validation` - ToolValidator: role/rules validation before execution
 //!
 //! Run with:
 //!   cargo test -p cori-mcp --test e2e -- --nocapture --test-threads=1
@@ -47,6 +48,9 @@ mod tenant_isolation;
 #[path = "e2e/updatable_columns.rs"]
 mod updatable_columns;
 
+#[path = "e2e/validation.rs"]
+mod validation;
+
 use common::TestContext;
 
 // =============================================================================
@@ -81,6 +85,7 @@ async fn e2e_all_tests() {
     deletable::run_all_tests(&ctx).await;
     rules::run_all_tests(&ctx).await;
     approvals::run_all_tests(&ctx).await;
+    validation::run_all_tests(&ctx).await;
 
     println!("\n🎉 All E2E test modules passed!\n");
 }

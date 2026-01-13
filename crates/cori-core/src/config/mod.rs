@@ -39,8 +39,8 @@ pub use proxy::{ConnectionPoolConfig, SslMode, UpstreamConfig};
 pub use role_definition::{
     AllColumns, ApprovalConfig, ApprovalRequirement, ColumnCondition, ColumnList,
     ComparisonCondition, CreatableColumnConstraints, CreatableColumns, DeletableConstraints,
-    DeletablePermission, RoleDefinition, TablePermissions, UpdatableColumnConstraints,
-    UpdatableColumns,
+    DeletablePermission, ReadableConfig, ReadableConfigFull, RoleDefinition, TablePermissions,
+    UpdatableColumnConstraints, UpdatableColumns,
 };
 pub use rules_definition::{
     ColumnRules, InheritedTenant, RulesDefinition, SoftDeleteConfig, SoftDeleteValue, TableRules,

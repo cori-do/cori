@@ -3,7 +3,6 @@
 pub mod check;
 pub mod init;
 pub mod keys;
-pub mod mcp;
-pub mod serve;
+pub mod run;
 pub mod token;
-
+pub mod tools;

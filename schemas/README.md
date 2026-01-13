@@ -199,9 +199,7 @@ tables:
         requires_approval: true
     deletable: false
 
-blocked_tables: [users, billing, api_keys]
-max_rows_per_query: 100
-max_affected_rows: 10
+default_page_size: 100
 ```
 
 ---

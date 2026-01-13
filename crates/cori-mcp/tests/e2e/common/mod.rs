@@ -6,8 +6,8 @@
 //! - Helper functions for test assertions
 
 use cori_core::config::role_definition::{
-    ApprovalConfig, ApprovalRequirement, ColumnList, CreatableColumnConstraints, CreatableColumns,
-    DeletablePermission, RoleDefinition, TablePermissions,
+    ApprovalConfig, ApprovalRequirement, ColumnCondition, CreatableColumnConstraints, CreatableColumns,
+    DeletablePermission, OnlyWhen, ReadableConfig, RoleDefinition, TablePermissions,
     UpdatableColumnConstraints, UpdatableColumns,
 };
 use cori_core::config::rules_definition::{
@@ -383,7 +383,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "customers".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "customer_id".to_string(),
                 "organization_id".to_string(),
                 "first_name".to_string(),
@@ -405,7 +405,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "orders".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "order_id".to_string(),
                 "organization_id".to_string(),
                 "customer_id".to_string(),
@@ -430,7 +430,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "order_items".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "order_item_id".to_string(),
                 "organization_id".to_string(),
                 "order_id".to_string(),
@@ -451,7 +451,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "products".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "product_id".to_string(),
                 "organization_id".to_string(),
                 "name".to_string(),
@@ -473,7 +473,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "tickets".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "ticket_id".to_string(),
                 "organization_id".to_string(),
                 "customer_id".to_string(),
@@ -489,13 +489,16 @@ pub fn create_support_agent_role() -> RoleDefinition {
             updatable: UpdatableColumns::Map(HashMap::from([(
                 "status".to_string(),
                 UpdatableColumnConstraints {
-                    restrict_to: Some(vec![
-                        json!("open"),
-                        json!("in_progress"),
-                        json!("pending_customer"),
-                        json!("resolved"),
-                        json!("closed"),
-                    ]),
+                    only_when: Some(OnlyWhen::Single(HashMap::from([(
+                        "new.status".to_string(),
+                        ColumnCondition::In(vec![
+                            json!("open"),
+                            json!("in_progress"),
+                            json!("pending_customer"),
+                            json!("resolved"),
+                            json!("closed"),
+                        ]),
+                    )]))),
                     ..Default::default()
                 },
             )])),
@@ -507,7 +510,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "notes".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "note_id".to_string(),
                 "organization_id".to_string(),
                 "customer_id".to_string(),
@@ -555,7 +558,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "contacts".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "contact_id".to_string(),
                 "organization_id".to_string(),
                 "customer_id".to_string(),
@@ -577,7 +580,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "customer_tags".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "customer_id".to_string(),
                 "tag_id".to_string(),
                 "organization_id".to_string(),
@@ -593,7 +596,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
     tables.insert(
         "invoices".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "invoice_id".to_string(),
                 "organization_id".to_string(),
                 "order_id".to_string(),
@@ -620,14 +623,6 @@ pub fn create_support_agent_role() -> RoleDefinition {
             message: Some("Support action requires manager approval".to_string()),
         }),
         tables,
-        blocked_tables: vec![
-            "users".to_string(),
-            "api_keys".to_string(),
-            "billing".to_string(),
-            "audit_logs".to_string(),
-        ],
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     }
 }
 
@@ -637,7 +632,7 @@ pub fn create_role_with_all_readable(table: &str) -> RoleDefinition {
     tables.insert(
         table.to_string(),
         TablePermissions {
-            readable: ColumnList::All(cori_core::config::role_definition::AllColumns),
+            readable: ReadableConfig::All(cori_core::config::role_definition::AllColumns),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -649,9 +644,6 @@ pub fn create_role_with_all_readable(table: &str) -> RoleDefinition {
         description: Some("Role with all columns readable".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     }
 }
 
@@ -665,7 +657,7 @@ pub fn create_role_with_creatable(
     tables.insert(
         table.to_string(),
         TablePermissions {
-            readable: ColumnList::List(readable),
+            readable: ReadableConfig::List(readable),
             creatable: CreatableColumns::Map(creatable),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -677,9 +669,6 @@ pub fn create_role_with_creatable(
         description: Some("Role with creatable columns".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     }
 }
 
@@ -693,7 +682,7 @@ pub fn create_role_with_updatable(
     tables.insert(
         table.to_string(),
         TablePermissions {
-            readable: ColumnList::List(readable),
+            readable: ReadableConfig::List(readable),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::Map(updatable),
             deletable: DeletablePermission::default(),
@@ -705,9 +694,6 @@ pub fn create_role_with_updatable(
         description: Some("Role with updatable columns".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     }
 }
 
@@ -719,7 +705,7 @@ pub fn create_role_with_approval_columns() -> RoleDefinition {
     tables.insert(
         "tickets".to_string(),
         TablePermissions {
-            readable: ColumnList::All(cori_core::config::role_definition::AllColumns),
+            readable: ReadableConfig::All(cori_core::config::role_definition::AllColumns),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::Map(HashMap::from([(
                 "priority".to_string(),
@@ -736,7 +722,7 @@ pub fn create_role_with_approval_columns() -> RoleDefinition {
     tables.insert(
         "customers".to_string(),
         TablePermissions {
-            readable: ColumnList::All(cori_core::config::role_definition::AllColumns),
+            readable: ReadableConfig::All(cori_core::config::role_definition::AllColumns),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::Map(HashMap::new()),
             deletable: DeletablePermission::default(),
@@ -748,15 +734,5 @@ pub fn create_role_with_approval_columns() -> RoleDefinition {
         description: Some("Role with some approval columns".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     }
-}
-
-/// Create a role with max_affected_rows limit
-pub fn create_role_with_max_affected(max_affected: u64) -> RoleDefinition {
-    let mut role = create_support_agent_role();
-    role.max_affected_rows = Some(max_affected);
-    role
 }

@@ -24,29 +24,6 @@
         "$ref": "#/$defs/TablePermissions"
       }
     },
-    "blocked_tables": {
-      "type": "array",
-      "description": "List of tables that this role cannot access at all.",
-      "items": {
-        "type": "string"
-      },
-      "uniqueItems": true,
-      "examples": [["users", "billing", "api_keys"]]
-    },
-    "max_rows_per_query": {
-      "type": "integer",
-      "description": "Maximum number of rows that can be returned by a single query.",
-      "minimum": 1,
-      "default": 100,
-      "examples": [100, 500, 1000]
-    },
-    "max_affected_rows": {
-      "type": "integer",
-      "description": "Maximum number of rows that can be affected by a single mutation (INSERT, UPDATE, DELETE).",
-      "minimum": 0,
-      "default": 10,
-      "examples": [10, 50, 100]
-    },
     "approvals": {
       "$ref": "#/$defs/ApprovalConfig",
       "description": "Default approval configuration for all requires_approval flags in this role. Can be overridden at individual field/action level."
@@ -58,8 +35,8 @@
       "description": "Permission configuration for a single table. Define which columns can be read, created, updated, and whether deletion is allowed.",
       "properties": {
         "readable": {
-          "$ref": "#/$defs/ColumnList",
-          "description": "Columns that can be read (SELECT). Use \"*\" for all columns, or provide a list of column names. Omit or use [] for no read access."
+          "$ref": "#/$defs/ReadableConfig",
+          "description": "Columns that can be read (SELECT) and optional pagination limit. Use \"*\" for all columns, a list of column names, or {columns: [...], max_per_page: N} for columns with pagination limit."
         },
         "creatable": {
           "$ref": "#/$defs/CreatableColumns",
@@ -93,6 +70,47 @@
         }
       ],
       "examples": ["*", ["id", "name", "email", "created_at"]]
+    },
+    "ReadableConfig": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "*",
+          "description": "All columns."
+        },
+        {
+          "type": "array",
+          "description": "List of specific column names.",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        {
+          "type": "object",
+          "description": "Readable configuration with columns and optional max_per_page limit.",
+          "properties": {
+            "columns": {
+              "$ref": "#/$defs/ColumnList",
+              "description": "Columns that can be read. Use \"*\" for all columns or a list of column names."
+            },
+            "max_per_page": {
+              "type": "integer",
+              "description": "Maximum number of rows returned by list actions for this table. Agents can request fewer rows but not more.",
+              "minimum": 1,
+              "examples": [50, 100, 500]
+            }
+          },
+          "required": ["columns"],
+          "additionalProperties": false
+        }
+      ],
+      "examples": [
+        "*",
+        ["id", "name", "email", "created_at"],
+        { "columns": ["id", "name", "email"], "max_per_page": 100 },
+        { "columns": "*", "max_per_page": 500 }
+      ]
     },
     "DeletablePermission": {
       "oneOf": [
@@ -208,13 +226,25 @@
         {},
         {
           "status": {
-            "transitions": {
-              "open": ["in_progress", "resolved"],
-              "in_progress": ["resolved", "closed"]
-            },
+            "only_when": [
+              { "old.status": "open", "new.status": ["in_progress", "cancelled"] },
+              { "old.status": "in_progress", "new.status": ["resolved", "cancelled"] }
+            ],
             "guidance": "Only mark as 'resolved' after confirming the issue is fully addressed"
           },
           "priority": { "requires_approval": true, "guidance": "Priority changes affect SLA timers - use sparingly" }
+        },
+        {
+          "quantity": {
+            "only_when": { "new.quantity": { "greater_than": "old.quantity" } },
+            "guidance": "Quantity can only be increased"
+          }
+        },
+        {
+          "notes": {
+            "only_when": { "new.notes": { "starts_with": "old.notes" } },
+            "guidance": "Append new notes, don't edit existing content"
+          }
         }
       ]
     },
@@ -222,53 +252,9 @@
       "type": "object",
       "description": "Constraints on a column for UPDATE operations. An empty object {} means the column is updatable with no constraints.",
       "properties": {
-        "restrict_to": {
-          "type": "array",
-          "description": "Subset of globally allowed values that this role can set. Must be a subset of allowed_values defined in ConstraintsDefinition.",
-          "items": {},
-          "uniqueItems": true,
-          "examples": [["open", "in_progress", "resolved"], ["pending", "shipped"]]
-        },
-        "transitions": {
-          "type": "object",
-          "description": "State machine defining valid transitions. Keys are current values, values are arrays of allowed new values. If a current value is not listed, updates from that state are denied.",
-          "additionalProperties": {
-            "type": "array",
-            "items": {},
-            "uniqueItems": true
-          },
-          "examples": [
-            {
-              "open": ["in_progress", "cancelled"],
-              "in_progress": ["resolved", "cancelled"],
-              "resolved": ["closed"]
-            }
-          ]
-        },
         "only_when": {
-          "type": "object",
-          "description": "Preconditions on other columns' current values. Update is only allowed if all conditions are met.",
-          "additionalProperties": {
-            "$ref": "#/$defs/ColumnCondition"
-          },
-          "examples": [
-            { "status": ["open", "in_progress"] },
-            { "quantity": { "greater_than": 0 } },
-            { "price": { "lower_than": 1000 } },
-            { "shipping_address": { "not_null": true } }
-          ]
-        },
-        "increment_only": {
-          "type": "boolean",
-          "description": "For numeric columns: value can only increase, never decrease. Useful for counters, inventory adjustments.",
-          "default": false,
-          "examples": [true]
-        },
-        "append_only": {
-          "type": "boolean",
-          "description": "For text columns: can only append to existing value, not replace. Useful for audit notes, logs.",
-          "default": false,
-          "examples": [true]
+          "$ref": "#/$defs/OnlyWhen",
+          "description": "Conditions on current row (old.*) and incoming values (new.*). Use object for AND logic, array for OR logic."
         },
         "requires_approval": {
           "$ref": "#/$defs/ApprovalRequirement",
@@ -286,6 +272,37 @@
       },
       "additionalProperties": false
     },
+    "OnlyWhen": {
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "Single condition set (AND logic). Keys are 'old.<column>' for current row values or 'new.<column>' for incoming values.",
+          "additionalProperties": {
+            "$ref": "#/$defs/ColumnCondition"
+          }
+        },
+        {
+          "type": "array",
+          "description": "Multiple condition sets (OR logic). Update is allowed if ANY condition set matches. Each item uses AND logic internally.",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/ColumnCondition"
+            }
+          },
+          "minItems": 1
+        }
+      ],
+      "examples": [
+        { "old.status": ["open", "in_progress"], "new.status": ["resolved", "closed"] },
+        { "new.quantity": { "greater_than": "old.quantity" } },
+        { "new.notes": { "starts_with": "old.notes" } },
+        [
+          { "old.status": "open", "new.status": ["in_progress", "cancelled"] },
+          { "old.status": "in_progress", "new.status": ["resolved", "cancelled"] }
+        ]
+      ]
+    },
     "ColumnCondition": {
       "oneOf": [
         {
@@ -301,7 +318,7 @@
         },
         {
           "type": "object",
-          "description": "Comparison condition.",
+          "description": "Comparison condition. Values can be literals or references to other columns using 'old.<column>' syntax.",
           "properties": {
             "equals": {
               "description": "Column must equal this value (explicit form of default behavior)."
@@ -310,20 +327,20 @@
               "description": "Column must not equal this value."
             },
             "greater_than": {
-              "type": "number",
-              "description": "Column must be greater than this value (numeric columns)."
+              "$ref": "#/$defs/NumberOrColumnRef",
+              "description": "Column must be greater than this value or another column (e.g., 'old.quantity')."
             },
             "greater_than_or_equal": {
-              "type": "number",
-              "description": "Column must be greater than or equal to this value (numeric columns)."
+              "$ref": "#/$defs/NumberOrColumnRef",
+              "description": "Column must be greater than or equal to this value or another column."
             },
             "lower_than": {
-              "type": "number",
-              "description": "Column must be lower than this value (numeric columns)."
+              "$ref": "#/$defs/NumberOrColumnRef",
+              "description": "Column must be lower than this value or another column."
             },
             "lower_than_or_equal": {
-              "type": "number",
-              "description": "Column must be lower than or equal to this value (numeric columns)."
+              "$ref": "#/$defs/NumberOrColumnRef",
+              "description": "Column must be lower than or equal to this value or another column."
             },
             "not_null": {
               "type": "boolean",
@@ -342,6 +359,11 @@
               "type": "array",
               "description": "Column must not be one of these values.",
               "items": {}
+            },
+            "starts_with": {
+              "type": "string",
+              "description": "Column must start with this value or another column (e.g., 'old.notes' for append-only).",
+              "examples": ["old.notes", "PREFIX_"]
             }
           },
           "additionalProperties": false
@@ -351,9 +373,25 @@
         "active",
         ["open", "in_progress"],
         { "greater_than": 0 },
+        { "greater_than": "old.quantity" },
         { "lower_than_or_equal": 100 },
         { "not_null": true },
-        { "not_in": ["archived", "deleted"] }
+        { "not_in": ["archived", "deleted"] },
+        { "starts_with": "old.notes" }
+      ]
+    },
+    "NumberOrColumnRef": {
+      "oneOf": [
+        {
+          "type": "number",
+          "description": "A literal numeric value."
+        },
+        {
+          "type": "string",
+          "description": "Reference to another column using 'old.<column>' or 'new.<column>' syntax.",
+          "pattern": "^(old|new)\\.[a-zA-Z_][a-zA-Z0-9_]*$",
+          "examples": ["old.quantity", "old.price", "new.total"]
+        }
       ]
     },
     "ApprovalRequirement": {
@@ -413,13 +451,19 @@
       },
       "tables": {
         "customers": {
-          "readable": ["id", "name", "email", "plan", "created_at"],
+          "readable": {
+            "columns": ["id", "name", "email", "plan", "created_at"],
+            "max_per_page": 100
+          },
           "creatable": {},
           "updatable": {},
           "deletable": false
         },
         "tickets": {
-          "readable": ["id", "customer_id", "subject", "status", "priority", "created_at"],
+          "readable": {
+            "columns": ["id", "customer_id", "subject", "status", "priority", "created_at"],
+            "max_per_page": 100
+          },
           "creatable": {
             "subject": { "required": true },
             "description": { "required": true },
@@ -435,29 +479,26 @@
           },
           "updatable": {
             "status": {
-              "transitions": {
-                "open": ["in_progress", "resolved"],
-                "in_progress": ["open", "resolved", "escalated"],
-                "resolved": ["open"]
-              }
+              "only_when": [
+                { "old.status": "open", "new.status": ["in_progress", "resolved"] },
+                { "old.status": "in_progress", "new.status": ["open", "resolved", "escalated"] },
+                { "old.status": "resolved", "new.status": "open" }
+              ]
             },
             "priority": {
-              "restrict_to": ["low", "medium", "high"],
+              "only_when": { "new.priority": ["low", "medium", "high"] },
               "requires_approval": true
             },
             "description": {
-              "append_only": true,
               "only_when": {
-                "status": ["open", "in_progress"]
+                "old.status": ["open", "in_progress"],
+                "new.description": { "starts_with": "old.description" }
               }
             }
           },
           "deletable": false
         }
-      },
-      "blocked_tables": ["users", "billing", "api_keys"],
-      "max_rows_per_query": 100,
-      "max_affected_rows": 10
+      }
     },
     {
       "name": "warehouse_agent",
@@ -467,17 +508,17 @@
       },
       "tables": {
         "orders": {
-          "readable": "*",
+          "readable": {
+            "columns": "*",
+            "max_per_page": 500
+          },
           "creatable": {},
           "updatable": {
             "status": {
-              "transitions": {
-                "paid": ["shipped"],
-                "shipped": ["delivered"]
-              },
-              "only_when": {
-                "shipping_address": { "not_null": true }
-              }
+              "only_when": [
+                { "old.status": "paid", "new.status": "shipped", "old.shipping_address": { "not_null": true } },
+                { "old.status": "shipped", "new.status": "delivered" }
+              ]
             },
             "tracking_number": {},
             "shipped_at": {}
@@ -485,19 +526,20 @@
           "deletable": false
         },
         "inventory": {
-          "readable": ["id", "product_id", "quantity", "warehouse_id"],
+          "readable": {
+            "columns": ["id", "product_id", "quantity", "warehouse_id"],
+            "max_per_page": 500
+          },
           "creatable": {},
           "updatable": {
             "quantity": {
-              "increment_only": true
+              "only_when": { "new.quantity": { "greater_than": "old.quantity" } },
+              "guidance": "Quantity can only be increased, never decreased"
             }
           },
           "deletable": false
         }
-      },
-      "blocked_tables": ["users", "billing", "customers"],
-      "max_rows_per_query": 500,
-      "max_affected_rows": 50
+      }
     },
     {
       "name": "admin_agent",
@@ -507,13 +549,19 @@
       },
       "tables": {
         "customers": {
-          "readable": "*",
+          "readable": {
+            "columns": "*",
+            "max_per_page": 1000
+          },
           "creatable": "*",
           "updatable": "*",
           "deletable": true
         },
         "orders": {
-          "readable": "*",
+          "readable": {
+            "columns": "*",
+            "max_per_page": 1000
+          },
           "creatable": {
             "customer_id": { "required": true },
             "items": { "required": true },
@@ -522,21 +570,11 @@
           },
           "updatable": {
             "status": {
-              "restrict_to": ["pending", "shipped", "delivered", "cancelled"]
-            },
-            "notes": {}
-          },
-          "deletable": {
-            "requires_approval": {
-              "group": "data_stewards",
-              "message": "Order deletion requires data steward approval for audit compliance"
+              "only_when": { "new.status": ["pending", "shipped", "delivered", "cancelled"] }
             }
           }
         }
-      },
-      "blocked_tables": ["users", "api_keys"],
-      "max_rows_per_query": 1000,
-      "max_affected_rows": 100
+      }
     }
-  ]
-}
+      ]
+    }

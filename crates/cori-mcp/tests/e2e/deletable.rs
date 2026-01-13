@@ -6,8 +6,8 @@
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ApprovalRequirement, ColumnList, CreatableColumns, DeletableConstraints, DeletablePermission,
-    RoleDefinition, TablePermissions, UpdatableColumns, ApprovalConfig,
+    ApprovalRequirement, CreatableColumns, DeletableConstraints, DeletablePermission,
+    ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns, ApprovalConfig,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -20,7 +20,41 @@ use std::collections::HashMap;
 pub async fn test_delete_allowed(ctx: &TestContext) {
     println!("  🧪 test_delete_allowed");
 
-    let executor = ctx.executor();
+    // Create a role with both create and delete permissions for tickets
+    let mut tables = HashMap::new();
+    tables.insert(
+        "tickets".to_string(),
+        TablePermissions {
+            readable: ReadableConfig::List(vec![
+                "ticket_id".to_string(),
+                "organization_id".to_string(),
+                "customer_id".to_string(),
+                "ticket_number".to_string(),
+                "subject".to_string(),
+                "status".to_string(),
+                "priority".to_string(),
+            ]),
+            creatable: CreatableColumns::Map(HashMap::from([
+                ("customer_id".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+                ("subject".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+                ("status".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+                ("priority".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+                ("ticket_number".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+            ])),
+            updatable: UpdatableColumns::default(),
+            deletable: DeletablePermission::Allowed(true),
+        },
+    );
+
+    let role = RoleDefinition {
+        name: "delete_test_role".to_string(),
+        description: Some("Role with create and delete permissions for testing".to_string()),
+        approvals: None,
+        tables,
+    };
+
+    let rules = create_default_rules();
+    let executor = ctx.executor_with(role, rules);
 
     // Create a test ticket to delete
     let create_tool = create_tool(
@@ -103,7 +137,7 @@ pub async fn test_delete_blocked(_ctx: &TestContext) {
     tables.insert(
         "customers".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "customer_id".to_string(),
                 "first_name".to_string(),
                 "organization_id".to_string(),
@@ -119,9 +153,6 @@ pub async fn test_delete_blocked(_ctx: &TestContext) {
         description: Some("Role without delete permission".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     };
 
     // Verify deletable is false
@@ -182,7 +213,7 @@ pub async fn test_delete_requires_approval(_ctx: &TestContext) {
     tables.insert(
         "orders".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "order_id".to_string(),
                 "customer_id".to_string(),
             ]),
@@ -200,9 +231,6 @@ pub async fn test_delete_requires_approval(_ctx: &TestContext) {
         description: Some("Role requiring approval for delete".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     };
 
     let perms = role.tables.get("orders").unwrap();
@@ -222,7 +250,7 @@ pub async fn test_delete_requires_approval_with_group(_ctx: &TestContext) {
     tables.insert(
         "orders".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec!["order_id".to_string()]),
+            readable: ReadableConfig::List(vec!["order_id".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
@@ -241,9 +269,6 @@ pub async fn test_delete_requires_approval_with_group(_ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: None,
-        max_affected_rows: None,
     };
 
     let perms = role.tables.get("orders").unwrap();
@@ -272,7 +297,7 @@ pub async fn test_delete_soft_delete_flag(_ctx: &TestContext) {
     tables.insert(
         "orders".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec!["order_id".to_string()]),
+            readable: ReadableConfig::List(vec!["order_id".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
@@ -287,9 +312,6 @@ pub async fn test_delete_soft_delete_flag(_ctx: &TestContext) {
         description: Some("Role with soft delete".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: None,
-        max_affected_rows: None,
     };
 
     let perms = role.tables.get("orders").unwrap();
@@ -309,7 +331,7 @@ pub async fn test_delete_soft_delete_and_approval(_ctx: &TestContext) {
     tables.insert(
         "sensitive_records".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec!["id".to_string()]),
+            readable: ReadableConfig::List(vec!["id".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
@@ -328,9 +350,6 @@ pub async fn test_delete_soft_delete_and_approval(_ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: None,
-        max_affected_rows: None,
     };
 
     let perms = role.tables.get("sensitive_records").unwrap();
@@ -515,26 +534,6 @@ pub async fn test_default_deletable_permission(_ctx: &TestContext) {
 }
 
 // =============================================================================
-// MAX_AFFECTED_ROWS FOR DELETE
-// =============================================================================
-
-pub async fn test_delete_max_affected_rows(_ctx: &TestContext) {
-    println!("  🧪 test_delete_max_affected_rows");
-
-    let role = create_role_with_max_affected(1);
-    assert_eq!(
-        role.max_affected_rows,
-        Some(1),
-        "Role should have max_affected_rows = 1"
-    );
-
-    // This would need executor-level enforcement to test properly
-    // For now, just verify the constraint is configured
-
-    println!("     ✓ max_affected_rows constraint for DELETE configured");
-}
-
-// =============================================================================
 // TEST RUNNER
 // =============================================================================
 
@@ -566,9 +565,6 @@ pub async fn run_all_tests(ctx: &TestContext) {
 
     // Default
     test_default_deletable_permission(ctx).await;
-
-    // Max affected rows
-    test_delete_max_affected_rows(ctx).await;
 
     println!("\n✅ All Deletable Permission tests passed!\n");
 }

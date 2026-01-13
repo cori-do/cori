@@ -18,7 +18,7 @@
 //! - Not expired
 
 use crate::error::McpError;
-use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse, RequestContext};
 use axum::{
     extract::{State, Query},
     http::{header, StatusCode, HeaderMap},
@@ -35,8 +35,8 @@ use tokio::sync::{mpsc, RwLock};
 
 /// HTTP transport handler state.
 pub struct HttpTransportState {
-    /// Channel for sending requests to the MCP server.
-    request_tx: mpsc::Sender<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>,
+    /// Channel for sending requests to the MCP server (includes request context).
+    request_tx: mpsc::Sender<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>,
     /// Active SSE connections for streaming.
     sse_connections: RwLock<HashMap<String, mpsc::Sender<SseEvent>>>,
     /// Token verifier for authenticating requests.
@@ -48,7 +48,7 @@ pub struct HttpTransportState {
 impl HttpTransportState {
     /// Create a new HTTP transport state.
     pub fn new(
-        request_tx: mpsc::Sender<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>,
+        request_tx: mpsc::Sender<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>,
     ) -> Self {
         Self {
             request_tx,
@@ -202,20 +202,33 @@ async fn handle_mcp_post(
         }
     };
 
-    // Log the authenticated request
-    if let Some(ref token) = verified_token {
-        tracing::debug!(
-            role = %token.role,
-            tenant = ?token.tenant,
-            method = %request.method,
-            "Authenticated MCP request"
-        );
-    }
+    // Build request context from verified token
+    let context = match &verified_token {
+        Some(token) => {
+            tracing::debug!(
+                role = %token.role,
+                tenant = ?token.tenant,
+                method = %request.method,
+                "Authenticated MCP request"
+            );
+            RequestContext {
+                tenant_id: token.tenant.clone(),
+                role: Some(token.role.clone()),
+            }
+        }
+        None => {
+            tracing::debug!(
+                method = %request.method,
+                "Unauthenticated MCP request (auth disabled)"
+            );
+            RequestContext::default()
+        }
+    };
 
     let (response_tx, mut response_rx) = mpsc::channel(1);
 
-    // Send request to MCP server
-    if state.request_tx.send((request, response_tx)).await.is_err() {
+    // Send request to MCP server with context
+    if state.request_tx.send((request, context, response_tx)).await.is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(JsonRpcResponse::error(
@@ -310,7 +323,7 @@ impl HttpServer {
     /// Create a new HTTP server.
     pub fn new(
         port: u16,
-        request_tx: mpsc::Sender<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>,
+        request_tx: mpsc::Sender<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>,
     ) -> Self {
         Self {
             port,
@@ -321,7 +334,7 @@ impl HttpServer {
     /// Create an HTTP server with token authentication.
     pub fn with_auth(
         port: u16,
-        request_tx: mpsc::Sender<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>,
+        request_tx: mpsc::Sender<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>,
         public_key: PublicKey,
     ) -> Self {
         let verifier = TokenVerifier::new(public_key);
@@ -342,7 +355,7 @@ impl HttpServer {
     /// Production deployments MUST use `with_auth`.
     pub fn without_auth(
         port: u16,
-        request_tx: mpsc::Sender<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>,
+        request_tx: mpsc::Sender<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>,
     ) -> Self {
         tracing::warn!(
             port = port,
@@ -451,7 +464,7 @@ mod tests {
 
         // Spawn a handler that will respond to the request
         tokio::spawn(async move {
-            if let Some((request, response_tx)) = rx.recv().await {
+            if let Some((request, _context, response_tx)) = rx.recv().await {
                 let response = JsonRpcResponse::success(
                     request.id,
                     serde_json::json!({"tools": []}),

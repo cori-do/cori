@@ -74,11 +74,4 @@ tables:
     readable: [ticket_id, organization_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
     # No creatable, updatable, or deletable = read-only
 
-blocked_tables:
-  - users
-  - api_keys
-  - billing
-  - audit_logs
-
-max_rows_per_query: 5000
-max_affected_rows: 0
+default_page_size: 5000

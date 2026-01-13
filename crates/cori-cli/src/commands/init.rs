@@ -6,7 +6,6 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -18,19 +17,6 @@ const TENANT_COLUMN_CANDIDATES: &[&str] = &[
     "customer_id",
     "account_id",
     "client_id",
-];
-
-/// Sensitive tables that should be blocked by default
-const DEFAULT_BLOCKED_TABLES: &[&str] = &[
-    "users",
-    "api_keys",
-    "billing",
-    "audit_logs",
-    "sessions",
-    "tokens",
-    "secrets",
-    "credentials",
-    "password_resets",
 ];
 
 /// Run the `cori init` command.
@@ -55,6 +41,13 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
 
     println!("🚀 Initializing Cori project: {}", project);
     println!();
+
+    // Verify database connectivity before creating any files
+    println!("🔌 Checking database connectivity...");
+    check_database_connectivity(database_url)
+        .await
+        .context("Database connection failed. Please verify the database URL and ensure the database is running.")?;
+    println!("   ✓ Database is reachable");
 
     // Create directory structure
     println!("📁 Creating project structure...");
@@ -136,14 +129,8 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
         println!("   {}", warning);
     }
 
-    // Identify sensitive tables
-    let sensitive_tables = identify_sensitive_tables(&tables);
-    if !sensitive_tables.is_empty() {
-        println!(
-            "   ✓ Identified {} potentially sensitive tables",
-            sensitive_tables.len()
-        );
-    }
+    // Note: Tables not listed in roles are implicitly blocked
+    // No separate sensitive_tables analysis needed
 
     // Generate schema files (per AGENTS.md Section 11)
     println!("📄 Generating schema files...");
@@ -166,7 +153,7 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
 
     // Generate configuration file (CoriDefinition.schema.json)
     println!("⚙️  Generating configuration...");
-    let config = generate_config(project, &sensitive_tables);
+    let config = generate_config(project);
     let config_path = project_dir.join("cori.yaml");
     fs::write(&config_path, config)?;
     println!("   ✓ cori.yaml (main configuration)");
@@ -174,7 +161,7 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     // Generate sample roles (RoleDefinition.schema.json)
     println!("👥 Generating sample roles...");
     let roles_dir = project_dir.join("roles");
-    generate_sample_roles(&roles_dir, &tables, &tenant_column, &sensitive_tables)?;
+    generate_sample_roles(&roles_dir, &tables, &tenant_column)?;
     println!("   ✓ Sample roles written to roles/");
 
     // Generate sample approval group (GroupDefinition.schema.json)
@@ -216,11 +203,33 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     println!("   2. Review schema/rules.yaml - especially tables with FK-inherited tenancy");
     println!("   3. Review and customize roles in roles/*.yaml");
     println!("   4. Set DATABASE_URL environment variable");
-    println!("   5. Start the server: cori serve --config cori.yaml");
+    println!("   5. Start the server: cori run");
     println!("   6. Mint a token: cori token mint --role support_agent --output role.token");
     println!("   7. Attenuate for tenant: cori token attenuate --base role.token --tenant <id> --output agent.token");
     println!();
     println!("📚 See README.md for detailed instructions.");
+
+    Ok(())
+}
+
+/// Check that the database exists and is reachable.
+///
+/// This is called before creating any project files to ensure we don't
+/// leave behind partial project structures when the database is unavailable.
+async fn check_database_connectivity(database_url: &str) -> Result<()> {
+    use sqlx::PgPool;
+
+    let pool = PgPool::connect(database_url)
+        .await
+        .context("Failed to connect to database")?;
+
+    // Run a simple query to verify the connection is working
+    sqlx::query("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .context("Failed to execute test query")?;
+
+    pool.close().await;
 
     Ok(())
 }
@@ -304,7 +313,8 @@ fn extract_tables(schema: &JsonValue) -> Vec<TableInfo> {
                     cols.iter()
                         .filter_map(|c| {
                             let col_name = c.get("name")?.as_str()?.to_string();
-                            let data_type = c.get("data_type")?.as_str()?.to_string();
+                            // Use native_type to match introspect output (SchemaDefinition.schema.json)
+                            let data_type = c.get("native_type")?.as_str()?.to_string();
                             let nullable = c
                                 .get("nullable")
                                 .and_then(|n| n.as_bool())
@@ -1038,57 +1048,10 @@ members:
     Ok(())
 }
 
-/// Identify potentially sensitive tables that should be blocked by default.
-fn identify_sensitive_tables(tables: &[TableInfo]) -> Vec<String> {
-    let mut sensitive = Vec::new();
-    let table_names: HashSet<String> = tables.iter().map(|t| t.name.clone()).collect();
-
-    // Check against known sensitive table names
-    for name in DEFAULT_BLOCKED_TABLES {
-        if table_names.contains(*name) {
-            sensitive.push(name.to_string());
-        }
-    }
-
-    // Also look for tables with sensitive-sounding names
-    for table in tables {
-        let lower = table.name.to_lowercase();
-        if (lower.contains("password")
-            || lower.contains("secret")
-            || lower.contains("credential")
-            || lower.contains("auth")
-            || lower.contains("token")
-            || lower.contains("key")
-            || lower.contains("private"))
-            && !sensitive.contains(&table.name)
-        {
-            sensitive.push(table.name.clone());
-        }
-
-        // Check for tables with sensitive columns
-        let has_sensitive_columns = table.columns.iter().any(|c| {
-            let lower = c.name.to_lowercase();
-            lower.contains("password")
-                || lower.contains("secret")
-                || lower.contains("hash")
-                || lower.contains("salt")
-                || lower == "ssn"
-                || lower.contains("credit_card")
-                || lower.contains("card_number")
-        });
-        if has_sensitive_columns && !sensitive.contains(&table.name) {
-            // Don't auto-block, but it's worth noting
-        }
-    }
-
-    sensitive
-}
-
 /// Generate the cori.yaml configuration file content.
 /// Conforms to CoriDefinition.schema.json
 fn generate_config(
     project: &str,
-    _sensitive_tables: &[String],
 ) -> String {
 
     format!(
@@ -1214,24 +1177,20 @@ fn generate_sample_roles(
     roles_dir: &PathBuf,
     tables: &[TableInfo],
     tenant_column: &Option<String>,
-    sensitive_tables: &[String],
 ) -> Result<()> {
-    // Filter out sensitive tables for non-admin roles
-    let accessible_tables: Vec<&TableInfo> = tables
-        .iter()
-        .filter(|t| !sensitive_tables.contains(&t.name))
-        .collect();
+    // All tables are accessible - tables not listed in a role are implicitly blocked
+    let accessible_tables: Vec<&TableInfo> = tables.iter().collect();
 
     // Generate admin role (full access)
     let admin_role = generate_admin_role(tables, tenant_column);
     fs::write(roles_dir.join("admin_agent.yaml"), admin_role)?;
 
-    // Generate readonly role (read all non-sensitive tables)
-    let readonly_role = generate_readonly_role(&accessible_tables, sensitive_tables);
+    // Generate readonly role (read all tables)
+    let readonly_role = generate_readonly_role(&accessible_tables);
     fs::write(roles_dir.join("readonly_agent.yaml"), readonly_role)?;
 
     // Generate support role (common customer-facing tables)
-    let support_role = generate_support_role(&accessible_tables, sensitive_tables);
+    let support_role = generate_support_role(&accessible_tables);
     fs::write(roles_dir.join("support_agent.yaml"), support_role)?;
 
     Ok(())
@@ -1260,6 +1219,7 @@ fn generate_admin_role(tables: &[TableInfo], _tenant_column: &Option<String>) ->
 # =============================================================================
 # Full administrative access to all tables and columns.
 # Use with extreme caution - typically for internal tools only.
+# Note: All tables are listed - omit any tables you want to restrict.
 # Conforms to: RoleDefinition.schema.json
 # =============================================================================
 
@@ -1268,11 +1228,6 @@ description: "Administrative agent with full database access"
 
 tables:
 {}
-
-blocked_tables: []
-
-max_rows_per_query: 10000
-max_affected_rows: 1000
 "#,
         table_entries.join("\n\n")
     )
@@ -1280,7 +1235,7 @@ max_affected_rows: 1000
 
 /// Generate readonly role.
 /// Conforms to RoleDefinition.schema.json
-fn generate_readonly_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> String {
+fn generate_readonly_role(tables: &[&TableInfo]) -> String {
     let table_entries: Vec<String> = tables
         .iter()
         .take(20) // Limit to first 20 tables for readability
@@ -1296,25 +1251,13 @@ fn generate_readonly_role(tables: &[&TableInfo], sensitive_tables: &[String]) ->
         })
         .collect();
 
-    let blocked_yaml = if sensitive_tables.is_empty() {
-        "blocked_tables: []".to_string()
-    } else {
-        format!(
-            "blocked_tables:\n{}",
-            sensitive_tables
-                .iter()
-                .map(|t| format!("  - {}", t))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-
     format!(
         r#"# =============================================================================
 # READONLY AGENT ROLE
 # =============================================================================
 # Read-only access to non-sensitive tables.
 # Suitable for analytics and reporting agents.
+# Note: Tables not listed here are implicitly blocked.
 # Conforms to: RoleDefinition.schema.json
 # =============================================================================
 
@@ -1323,20 +1266,14 @@ description: "Read-only agent for analytics and reporting"
 
 tables:
 {}
-
-{}
-
-max_rows_per_query: 5000
-max_affected_rows: 0
 "#,
-        table_entries.join("\n\n"),
-        blocked_yaml
+        table_entries.join("\n\n")
     )
 }
 
 /// Generate support agent role.
 /// Conforms to RoleDefinition.schema.json
-fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> String {
+fn generate_support_role(tables: &[&TableInfo]) -> String {
     // Common customer-facing table patterns
     let customer_tables = ["customers", "customer", "contacts", "contact", "clients", "client"];
     let ticket_tables = ["tickets", "ticket", "issues", "issue", "support_tickets", "cases", "case"];
@@ -1392,7 +1329,8 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
     readable: [{}]
     updatable:
       status:
-        restrict_to: [open, in_progress, pending, resolved, closed]
+        only_when:
+          new.status: [open, in_progress, pending, resolved, closed]
         guidance: "Update ticket status based on resolution progress"
       priority:
         requires_approval: true
@@ -1415,25 +1353,13 @@ fn generate_support_role(tables: &[&TableInfo], sensitive_tables: &[String]) -> 
             .collect()
     };
 
-    let blocked_yaml = if sensitive_tables.is_empty() {
-        "blocked_tables: []".to_string()
-    } else {
-        format!(
-            "blocked_tables:\n{}",
-            sensitive_tables
-                .iter()
-                .map(|t| format!("  - {}", t))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-
     format!(
         r#"# =============================================================================
 # SUPPORT AGENT ROLE
 # =============================================================================
 # Customer support agent with access to customer-facing data.
 # Can view most data, limited write access to tickets/issues.
+# Note: Tables not listed here are implicitly blocked.
 # Conforms to: RoleDefinition.schema.json
 # =============================================================================
 
@@ -1447,14 +1373,8 @@ approvals:
 
 tables:
 {}
-
-{}
-
-max_rows_per_query: 100
-max_affected_rows: 10
 "#,
-        table_entries.join("\n\n"),
-        blocked_yaml
+        table_entries.join("\n\n")
     )
 }
 
@@ -1580,7 +1500,7 @@ export DATABASE_URL="postgres://user:password@host:5432/database"
 ### 3. Start the Server
 
 ```bash
-cori serve --config cori.yaml
+cori run
 ```
 
 This starts:
@@ -1646,7 +1566,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {{
     "cori": {{
       "command": "cori",
-      "args": ["mcp", "--config", "cori.yaml"],
+      "args": ["run", "--stdio"],
       "env": {{"CORI_TOKEN": "<base64 token>"}}
     }}
   }}
@@ -1669,8 +1589,8 @@ mcp:
 
 | Command | Description |
 |---------|-------------|
-| `cori serve` | Start the MCP server and dashboard |
-| `cori mcp` | Start MCP server (stdio mode) |
+| `cori run` | Start the MCP server and dashboard |
+| `cori run --stdio` | Start MCP server (stdio mode) |
 | `cori db sync` | Update schema/schema.yaml from database |
 | `cori keys generate` | Generate new Biscuit keypair |
 | `cori token mint` | Mint a new role token |

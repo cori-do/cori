@@ -8,7 +8,7 @@
 //! - Empty tenant handling
 
 use super::common::*;
-use cori_core::config::role_definition::{ColumnList, CreatableColumns, DeletablePermission, TablePermissions, UpdatableColumns};
+use cori_core::config::role_definition::{CreatableColumns, DeletablePermission, ReadableConfig, TablePermissions, UpdatableColumns};
 use cori_core::config::rules_definition::{TenantConfig};
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -262,7 +262,7 @@ pub async fn test_global_table_returns_all_records(ctx: &TestContext) {
     role.tables.insert(
         "organizations".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "organization_id".to_string(),
                 "name".to_string(),
                 "slug".to_string(),
@@ -327,7 +327,7 @@ pub async fn test_global_table_accessible_from_any_tenant(ctx: &TestContext) {
     role.tables.insert(
         "organizations".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![
+            readable: ReadableConfig::List(vec![
                 "organization_id".to_string(),
                 "name".to_string(),
             ]),

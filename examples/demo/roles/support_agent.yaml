@@ -47,18 +47,19 @@ tables:
     readable: [ticket_id, organization_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
     updatable:
       status:
-        restrict_to: [open, in_progress, pending, resolved, closed]
+        only_when:
+          - old.status: open
+            new.status: [in_progress, pending, resolved, closed]
+          - old.status: in_progress
+            new.status: [open, pending, resolved, closed]
+          - old.status: pending
+            new.status: [open, in_progress, resolved, closed]
+          - old.status: resolved
+            new.status: [open, closed]
         guidance: "Update ticket status based on resolution progress"
       priority:
         requires_approval: true
         guidance: "Priority changes require manager approval"
     deletable: false
 
-blocked_tables:
-  - users
-  - api_keys
-  - billing
-  - audit_logs
-
-max_rows_per_query: 100
-max_affected_rows: 10
+default_page_size: 100

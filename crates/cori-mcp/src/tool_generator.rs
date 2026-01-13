@@ -17,7 +17,7 @@
 use crate::protocol::{ToolAnnotations, ToolDefinition};
 use crate::schema::{DatabaseSchema, TableSchema};
 use cori_core::{
-    ColumnList, CreatableColumnConstraints, CreatableColumns, RoleDefinition,
+    ColumnList, CreatableColumnConstraints, CreatableColumns, ReadableConfig, RoleDefinition,
     UpdatableColumnConstraints, UpdatableColumns,
 };
 use serde_json::{json, Value};
@@ -28,19 +28,12 @@ pub struct ToolGenerator {
     role: RoleDefinition,
     /// The database schema.
     schema: DatabaseSchema,
-    /// Maximum rows limit from role config.
-    max_rows: Option<u64>,
 }
 
 impl ToolGenerator {
     /// Create a new tool generator.
     pub fn new(role: RoleDefinition, schema: DatabaseSchema) -> Self {
-        let max_rows = role.max_rows_per_query;
-        Self {
-            role,
-            schema,
-            max_rows,
-        }
+        Self { role, schema }
     }
 
     /// Generate all tools for this role.
@@ -49,10 +42,6 @@ impl ToolGenerator {
 
         // Generate CRUD tools for each accessible table
         for (table_name, _perms) in &self.role.tables {
-            if self.role.blocked_tables.contains(table_name) {
-                continue;
-            }
-
             if let Some(table_schema) = self.schema.get_table(table_name) {
                 tools.extend(self.generate_table_tools(table_name, table_schema));
             } else {
@@ -138,7 +127,7 @@ impl ToolGenerator {
                         "limit": {
                             "type": "integer",
                             "default": 50,
-                            "maximum": self.max_rows.unwrap_or(1000),
+                            "maximum": self.role.get_max_per_page(table_name).unwrap_or(1000),
                             "description": "Maximum number of results"
                         },
                         "offset": {
@@ -203,11 +192,12 @@ impl ToolGenerator {
         entity_name: &str,
         table_schema: &TableSchema,
     ) -> ToolDefinition {
+        let max_per_page = self.role.get_max_per_page(table_name).unwrap_or(1000);
         let mut properties = json!({
             "limit": {
                 "type": "integer",
                 "default": 50,
-                "maximum": self.max_rows.unwrap_or(1000),
+                "maximum": max_per_page,
                 "description": "Maximum number of results"
             },
             "offset": {
@@ -444,13 +434,13 @@ impl ToolGenerator {
             UpdatableColumns::Map(map) => {
                 for (col_name, constraints) in map {
                     if let Some(col_schema) = table_schema.get_column(col_name) {
-                        let prop = self.updatable_constraints_to_json_schema(constraints, col_schema);
+                        let prop = self.updatable_constraints_to_json_schema(constraints, col_schema, col_name);
                         properties.insert(col_name.clone(), prop);
                     } else {
                         // Column not in schema, use basic string type
                         properties.insert(
                             col_name.clone(),
-                            self.updatable_constraints_to_basic_json_schema(constraints),
+                            self.updatable_constraints_to_basic_json_schema(constraints, col_name),
                         );
                     }
                 }
@@ -463,14 +453,22 @@ impl ToolGenerator {
         let mut properties = serde_json::Map::new();
 
         if let Some(perms) = self.role.tables.get(table_name) {
-            // Get list of readable columns
+            // Get list of readable columns from ReadableConfig
             let readable_cols: Vec<&str> = match &perms.readable {
-                ColumnList::All(_) => {
+                ReadableConfig::All(_) => {
                     table_schema.columns.iter().map(|c| c.name.as_str()).collect()
                 }
-                ColumnList::List(cols) => {
+                ReadableConfig::List(cols) => {
                     cols.iter().map(|s: &String| s.as_str()).collect()
                 }
+                ReadableConfig::Config(cfg) => match &cfg.columns {
+                    ColumnList::All(_) => {
+                        table_schema.columns.iter().map(|c| c.name.as_str()).collect()
+                    }
+                    ColumnList::List(cols) => {
+                        cols.iter().map(|s: &String| s.as_str()).collect()
+                    }
+                },
             };
 
             for col_name in readable_cols {
@@ -580,13 +578,16 @@ impl ToolGenerator {
         &self,
         constraints: &UpdatableColumnConstraints,
         col_schema: &crate::schema::ColumnSchema,
+        col_name: &str,
     ) -> Value {
         let base_type = col_schema.json_schema_type();
         let mut schema = json!({ "type": base_type });
 
-        // Add restrict_to as enum
-        if let Some(values) = &constraints.restrict_to {
-            schema["enum"] = json!(values);
+        // Extract enum values from only_when if it's a simple new.<col>: [values] pattern
+        if let Some(only_when) = &constraints.only_when {
+            if let Some(values) = only_when.get_new_value_restriction(col_name) {
+                schema["enum"] = json!(values);
+            }
         }
 
         // Add format if applicable
@@ -608,11 +609,15 @@ impl ToolGenerator {
     fn updatable_constraints_to_basic_json_schema(
         &self,
         constraints: &UpdatableColumnConstraints,
+        col_name: &str,
     ) -> Value {
         let mut schema = json!({ "type": "string" });
 
-        if let Some(values) = &constraints.restrict_to {
-            schema["enum"] = json!(values);
+        // Extract enum values from only_when if it's a simple new.<col>: [values] pattern
+        if let Some(only_when) = &constraints.only_when {
+            if let Some(values) = only_when.get_new_value_restriction(col_name) {
+                schema["enum"] = json!(values);
+            }
         }
 
         if let Some(guidance) = &constraints.guidance {
@@ -706,15 +711,12 @@ mod tests {
             description: None,
             approvals: None,
             tables: HashMap::new(),
-            blocked_tables: Vec::new(),
-            max_rows_per_query: Some(100),
-            max_affected_rows: None,
         };
 
         role.tables.insert(
             "users".to_string(),
             TablePermissions {
-                readable: ColumnList::List(vec![
+                readable: ReadableConfig::List(vec![
                     "id".to_string(),
                     "name".to_string(),
                 ]),
@@ -742,26 +744,32 @@ mod tests {
 
     #[test]
     fn test_generate_update_tool_with_constraints() {
+        use cori_core::config::role_definition::{OnlyWhen, ColumnCondition};
+        
         let mut role = RoleDefinition {
             name: "test".to_string(),
             description: None,
             approvals: None,
             tables: HashMap::new(),
-            blocked_tables: Vec::new(),
-            max_rows_per_query: Some(100),
-            max_affected_rows: None,
         };
 
+        // Create only_when with new.status: [values] pattern
+        let mut status_conditions = HashMap::new();
+        status_conditions.insert(
+            "new.status".to_string(),
+            ColumnCondition::In(vec![
+                serde_json::json!("open"),
+                serde_json::json!("closed"),
+            ]),
+        );
+        
         let mut updatable = HashMap::new();
         updatable.insert(
             "status".to_string(),
             UpdatableColumnConstraints {
-                restrict_to: Some(vec![
-                    serde_json::json!("open"),
-                    serde_json::json!("closed"),
-                ]),
+                only_when: Some(OnlyWhen::Single(status_conditions)),
                 requires_approval: None,
-                ..Default::default()
+                guidance: None,
             },
         );
         updatable.insert(
@@ -775,7 +783,7 @@ mod tests {
         role.tables.insert(
             "tickets".to_string(),
             TablePermissions {
-                readable: ColumnList::List(vec![
+                readable: ReadableConfig::List(vec![
                     "id".to_string(),
                     "status".to_string(),
                 ]),

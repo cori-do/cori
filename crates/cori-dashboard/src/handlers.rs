@@ -641,8 +641,6 @@ pub mod api {
     pub struct RoleFormData {
         pub name: String,
         pub description: Option<String>,
-        pub max_rows_per_query: Option<u64>,
-        pub max_affected_rows: Option<u64>,
         // Table permissions would be nested, simplified here
     }
 
@@ -681,7 +679,7 @@ pub mod api {
     // -------------------------------------------------------------------------
 
     fn role_to_response(name: &str, role: &cori_core::RoleDefinition) -> RoleResponse {
-        use cori_core::config::role_definition::{ColumnList, CreatableColumns, UpdatableColumns};
+        use cori_core::config::role_definition::{ReadableConfig, CreatableColumns, UpdatableColumns};
         
         RoleResponse {
             name: name.to_string(),
@@ -694,8 +692,12 @@ pub mod api {
                 if perms.deletable.is_allowed() { ops.push("delete".to_string()); }
                 
                 let (readable, readable_all) = match &perms.readable {
-                    ColumnList::All(_) => (vec![], true),
-                    ColumnList::List(cols) => (cols.clone(), false),
+                    ReadableConfig::All(_) => (vec![], true),
+                    ReadableConfig::List(cols) => (cols.clone(), false),
+                    ReadableConfig::Config(cfg) => {
+                        let cols = cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default();
+                        (cols, cfg.columns.is_all())
+                    }
                 };
                 
                 // Helper to convert Value vec to String vec
@@ -724,8 +726,13 @@ pub mod api {
                 
                 if let UpdatableColumns::Map(cols) = &perms.updatable {
                     for (col, constraints) in cols {
+                        // Extract allowed values from only_when if it's a simple new.<col>: [values] pattern
+                        let allowed_values: Option<Vec<String>> = constraints.only_when.as_ref()
+                            .and_then(|ow| ow.get_new_value_restriction(col))
+                            .map(|v| v.iter().filter_map(|val| val.as_str().map(String::from)).collect::<Vec<_>>());
+                        
                         editable.insert(col.clone(), ColumnConstraintResponse {
-                            allowed_values: values_to_strings(&constraints.restrict_to),
+                            allowed_values,
                             pattern: None,
                             min: None,
                             max: None,
@@ -741,9 +748,8 @@ pub mod api {
                     editable,
                 })
             }).collect(),
-            blocked_tables: role.blocked_tables.clone(),
-            max_rows_per_query: role.max_rows_per_query,
-            max_affected_rows: role.max_affected_rows,
+            max_rows_per_query: None, // Per-table max_per_page is now in readable config
+            max_affected_rows: None,
             blocked_operations: vec![],
             custom_actions: vec![], // Custom actions removed from new model
         }
@@ -755,9 +761,6 @@ pub mod api {
             description: form.description.clone(),
             approvals: None,
             tables: std::collections::HashMap::new(), // Would parse from form
-            blocked_tables: vec![],
-            max_rows_per_query: form.max_rows_per_query,
-            max_affected_rows: form.max_affected_rows,
         }
     }
 

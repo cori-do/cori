@@ -15,6 +15,7 @@ pub use config::{
     CreatableColumnConstraints, UpdatableColumnConstraints,
     // Role definition types needed by cori-mcp
     ColumnList, CreatableColumns, UpdatableColumns, DeletablePermission, ApprovalRequirement,
+    ReadableConfig, ReadableConfigFull,
 };
 
 /// Top-level intent (idempotent) that can be executed or previewed.

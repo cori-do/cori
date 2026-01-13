@@ -78,6 +78,7 @@ pub mod schema;
 pub mod server;
 pub mod tool_generator;
 pub mod tools;
+pub mod validator;
 
 // Re-export sqlx types for convenience
 pub use sqlx::PgPool;
@@ -94,5 +95,6 @@ pub use schema::{ColumnSchema, DatabaseSchema, TableSchema};
 pub use server::McpServer;
 pub use tool_generator::ToolGenerator;
 pub use tools::ToolRegistry;
+pub use validator::{OperationType, ToolValidator, ValidationError, ValidationErrorKind, ValidationRequest};
 
 

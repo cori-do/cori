@@ -6,3 +6,4 @@ tmp*
 postgres/
 myproject/
 AGENTS.md
+build/

@@ -5,6 +5,13 @@ use cori_mcp::schema::{DatabaseSchema, TableSchema, ColumnSchema, ForeignKey, Fo
 use chrono::Utc;
 
 /// Convert JSON schema from introspection to SchemaInfo.
+///
+/// The input JSON follows SchemaDefinition.schema.json with:
+/// - `version`: Schema version (semver)
+/// - `captured_at`: ISO 8601 timestamp
+/// - `database.engine`: Database engine type
+/// - `tables`: Array of table definitions with `type` and `native_type` columns
+/// - `tables[].foreign_keys`: Array with `columns` and `references.columns` arrays
 pub fn json_to_schema_info(json: &serde_json::Value) -> anyhow::Result<SchemaInfo> {
     let tables_json = json.get("tables")
         .and_then(|t| t.as_array())
@@ -29,11 +36,30 @@ pub fn json_to_schema_info(json: &serde_json::Value) -> anyhow::Result<SchemaInf
             .unwrap_or(&empty_vec);
         
         let columns: Vec<ColumnInfo> = columns_json.iter().map(|c| {
+            // Use native_type for data_type (for display), fallback to type
+            let data_type = c.get("native_type")
+                .and_then(|t| t.as_str())
+                .or_else(|| c.get("type").and_then(|t| t.as_str()))
+                .unwrap_or("")
+                .to_string();
+            
+            // Default value can be string, number, boolean, or null
+            let default = c.get("default").and_then(|d| {
+                if d.is_null() {
+                    None
+                } else if let Some(s) = d.as_str() {
+                    Some(s.to_string())
+                } else {
+                    // For numbers/booleans, convert to string
+                    Some(d.to_string())
+                }
+            });
+            
             ColumnInfo {
                 name: c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                data_type: c.get("data_type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                data_type,
                 nullable: c.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true),
-                default: c.get("default").and_then(|d| d.as_str()).map(|s| s.to_string()),
+                default,
             }
         }).collect();
         
@@ -42,28 +68,30 @@ pub fn json_to_schema_info(json: &serde_json::Value) -> anyhow::Result<SchemaInf
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
         
-        // Foreign keys from introspect_schema_json have structure:
-        // { "name": "fk_name", "mappings": [{ "column": "col", "references": { "schema": "...", "table": "...", "column": "..." } }] }
+        // Foreign keys from introspect_schema_json now follow SchemaDefinition.schema.json:
+        // { "name": "fk_name", "columns": ["col1"], "references": { "table": "...", "schema": "...", "columns": ["col1"] } }
         let foreign_keys: Vec<ForeignKeyInfo> = table_json.get("foreign_keys")
             .and_then(|fks| fks.as_array())
             .map(|arr| arr.iter().filter_map(|fk| {
                 let name = fk.get("name").and_then(|n| n.as_str())?.to_string();
-                let mappings = fk.get("mappings").and_then(|m| m.as_array())?;
                 
-                let columns: Vec<String> = mappings.iter()
-                    .filter_map(|m| m.get("column").and_then(|c| c.as_str()).map(|s| s.to_string()))
-                    .collect();
+                // New format: columns is an array of strings
+                let columns: Vec<String> = fk.get("columns")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
                 
-                let references_table = mappings.first()
-                    .and_then(|m| m.get("references"))
-                    .and_then(|r| r.get("table"))
+                // New format: references is an object with table and columns array
+                let references = fk.get("references")?;
+                let references_table = references.get("table")
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string();
                 
-                let references_columns: Vec<String> = mappings.iter()
-                    .filter_map(|m| m.get("references").and_then(|r| r.get("column")).and_then(|c| c.as_str()).map(|s| s.to_string()))
-                    .collect();
+                let references_columns: Vec<String> = references.get("columns")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
                 
                 Some(ForeignKeyInfo {
                     name,

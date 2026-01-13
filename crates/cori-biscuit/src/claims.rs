@@ -13,10 +13,6 @@ pub struct RoleClaims {
     /// Accessible tables and their permissions.
     pub tables: HashMap<String, TablePermissions>,
 
-    /// Tables that are explicitly blocked.
-    #[serde(default)]
-    pub blocked_tables: Vec<String>,
-
     /// Maximum rows per query.
     #[serde(default)]
     pub max_rows_per_query: Option<u64>,
@@ -106,7 +102,6 @@ impl RoleClaims {
         Self {
             role: role.into(),
             tables: HashMap::new(),
-            blocked_tables: Vec::new(),
             max_rows_per_query: None,
             max_affected_rows: None,
             blocked_operations: Vec::new(),
@@ -130,7 +125,7 @@ impl RoleClaims {
 
     /// Check if a table is accessible.
     pub fn can_access_table(&self, table: &str) -> bool {
-        !self.blocked_tables.contains(&table.to_string()) && self.tables.contains_key(table)
+        self.tables.contains_key(table)
     }
 
     /// Check if a column is readable.
@@ -181,14 +176,6 @@ mod tests {
         assert!(claims.can_access_table("customers"));
         assert!(claims.can_read_column("customers", "id"));
         assert!(!claims.can_read_column("customers", "password"));
-    }
-
-    #[test]
-    fn test_blocked_tables() {
-        let mut claims = RoleClaims::new("agent");
-        claims.blocked_tables.push("users".to_string());
-
-        assert!(!claims.can_access_table("users"));
     }
 }
 

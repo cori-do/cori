@@ -17,6 +17,21 @@ use cori_core::config::{
 };
 
 // ============================================================================
+// Embedded JSON Schemas
+// ============================================================================
+
+/// Embedded JSON schemas for configuration validation.
+/// These are compiled into the binary so validation works without external files.
+mod embedded_schemas {
+    pub const CORI_DEFINITION: &str = include_str!("../../../../schemas/CoriDefinition.schema.json");
+    pub const SCHEMA_DEFINITION: &str = include_str!("../../../../schemas/SchemaDefinition.schema.json");
+    pub const RULES_DEFINITION: &str = include_str!("../../../../schemas/RulesDefinition.schema.json");
+    pub const TYPES_DEFINITION: &str = include_str!("../../../../schemas/TypesDefinition.schema.json");
+    pub const ROLE_DEFINITION: &str = include_str!("../../../../schemas/RoleDefinition.schema.json");
+    pub const GROUP_DEFINITION: &str = include_str!("../../../../schemas/GroupDefinition.schema.json");
+}
+
+// ============================================================================
 // Check Result Types
 // ============================================================================
 
@@ -264,22 +279,19 @@ pub async fn run_quiet(config_path: &Path) -> Result<CheckResults> {
     // 3. Table name consistency (roles/rules vs schema)
     results.extend(check_table_names(&config, &base_dir)?);
 
-    // 4. Blocked tables conflicts
-    results.extend(check_blocked_tables_conflicts(&config, &base_dir)?);
-
-    // 5. Column name validation
+    // 4. Column name validation
     results.extend(check_column_names(&config, &base_dir)?);
 
-    // 6. Approval group validation
+    // 5. Approval group validation
     results.extend(check_approval_groups(&config, &base_dir)?);
 
-    // 7. Soft delete consistency
+    // 6. Soft delete consistency
     results.extend(check_soft_delete(&config, &base_dir)?);
 
-    // 8. Rules vs types validation
+    // 7. Rules vs types validation
     results.extend(check_type_references(&config, &base_dir)?);
 
-    // 9. Non-null column constraints
+    // 8. Non-null column constraints
     results.extend(check_nonnull_columns(&config, &base_dir)?);
 
     Ok(results)
@@ -337,7 +349,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
     let mut results = CheckResults::new();
 
-    // 1. JSON Schema validation
+    // 1. JSON Schema validation (using embedded schemas)
     println!("  📋 Validating JSON schemas...");
     results.extend(validate_json_schemas(&base_dir, config_path)?);
 
@@ -349,27 +361,23 @@ pub async fn run(config_path: &Path) -> Result<()> {
     println!("  📊 Checking table name consistency...");
     results.extend(check_table_names(&config, &base_dir)?);
 
-    // 4. Blocked tables conflicts
-    println!("  🚫 Checking blocked_tables conflicts...");
-    results.extend(check_blocked_tables_conflicts(&config, &base_dir)?);
-
-    // 5. Column name validation
+    // 4. Column name validation
     println!("  📝 Checking column name consistency...");
     results.extend(check_column_names(&config, &base_dir)?);
 
-    // 6. Approval group validation
+    // 5. Approval group validation
     println!("  👥 Checking approval group references...");
     results.extend(check_approval_groups(&config, &base_dir)?);
 
-    // 7. Soft delete consistency
+    // 6. Soft delete consistency
     println!("  🗑️  Checking soft delete configuration...");
     results.extend(check_soft_delete(&config, &base_dir)?);
 
-    // 8. Rules vs types validation
+    // 7. Rules vs types validation
     println!("  🔤 Checking type references in rules...");
     results.extend(check_type_references(&config, &base_dir)?);
 
-    // 9. Non-null column constraints
+    // 8. Non-null column constraints
     println!("  ⚡ Checking non-null column constraints...");
     results.extend(check_nonnull_columns(&config, &base_dir)?);
 
@@ -394,11 +402,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
 fn validate_json_schemas(base_dir: &Path, config_path: &Path) -> Result<Vec<CheckFinding>> {
     let mut findings = Vec::new();
 
-    // Locate schemas directory (look in workspace root or relative to config)
-    let schemas_dir = find_schemas_dir(base_dir)?;
-
-    // Load JSON schemas
-    let schemas = load_json_schemas(&schemas_dir)?;
+    // Load embedded JSON schemas
+    let schemas = load_embedded_schemas()?;
 
     // Validate cori.yaml
     if let Some(schema) = schemas.get("CoriDefinition") {
@@ -478,49 +483,23 @@ fn validate_json_schemas(base_dir: &Path, config_path: &Path) -> Result<Vec<Chec
     Ok(findings)
 }
 
-fn find_schemas_dir(base_dir: &Path) -> Result<PathBuf> {
-    // Try common locations
-    let candidates = [
-        base_dir.join("schemas"),
-        base_dir.join("..").join("schemas"),
-        base_dir.join("..").join("..").join("schemas"),
-        PathBuf::from("schemas"),
-    ];
-
-    for candidate in candidates {
-        if candidate.exists() && candidate.is_dir() {
-            // Verify it has the expected schema files
-            if candidate.join("CoriDefinition.schema.json").exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    anyhow::bail!(
-        "Could not find schemas directory. Expected to find CoriDefinition.schema.json in schemas/"
-    );
-}
-
-fn load_json_schemas(schemas_dir: &Path) -> Result<HashMap<String, JsonValue>> {
+/// Load JSON schemas from embedded strings.
+fn load_embedded_schemas() -> Result<HashMap<String, JsonValue>> {
     let mut schemas = HashMap::new();
 
-    let schema_files = [
-        ("CoriDefinition", "CoriDefinition.schema.json"),
-        ("SchemaDefinition", "SchemaDefinition.schema.json"),
-        ("RulesDefinition", "RulesDefinition.schema.json"),
-        ("TypesDefinition", "TypesDefinition.schema.json"),
-        ("RoleDefinition", "RoleDefinition.schema.json"),
-        ("GroupDefinition", "GroupDefinition.schema.json"),
+    let embedded = [
+        ("CoriDefinition", embedded_schemas::CORI_DEFINITION),
+        ("SchemaDefinition", embedded_schemas::SCHEMA_DEFINITION),
+        ("RulesDefinition", embedded_schemas::RULES_DEFINITION),
+        ("TypesDefinition", embedded_schemas::TYPES_DEFINITION),
+        ("RoleDefinition", embedded_schemas::ROLE_DEFINITION),
+        ("GroupDefinition", embedded_schemas::GROUP_DEFINITION),
     ];
 
-    for (name, filename) in schema_files {
-        let path = schemas_dir.join(filename);
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
-            let schema: JsonValue = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {}", filename))?;
-            schemas.insert(name.to_string(), schema);
-        }
+    for (name, content) in embedded {
+        let schema: JsonValue = serde_json::from_str(content)
+            .with_context(|| format!("Failed to parse embedded schema: {}", name))?;
+        schemas.insert(name.to_string(), schema);
     }
 
     Ok(schemas)
@@ -626,23 +605,6 @@ fn check_table_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckF
                 );
             }
         }
-
-        // Check blocked_tables
-        for table_name in &role.blocked_tables {
-            if !schema_tables.contains(table_name) {
-                findings.push(
-                    CheckFinding::warning(
-                        "table-names",
-                        format!(
-                            "Blocked table '{}' in role '{}' does not exist in schema",
-                            table_name, role_name
-                        ),
-                    )
-                    .with_file(format!("roles/{}.yaml", role_name))
-                    .with_location("blocked_tables"),
-                );
-            }
-        }
     }
 
     // Check tables in rules.yaml
@@ -670,35 +632,7 @@ fn check_table_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckF
 // ============================================================================
 // Check 3: Blocked Tables Conflicts
 // ============================================================================
-
-fn check_blocked_tables_conflicts(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckFinding>> {
-    let mut findings = Vec::new();
-
-    for (role_name, role) in &config.roles {
-        let blocked_set: HashSet<_> = role.blocked_tables.iter().collect();
-
-        for table_name in role.tables.keys() {
-            if blocked_set.contains(table_name) {
-                findings.push(
-                    CheckFinding::error(
-                        "blocked-tables",
-                        format!(
-                            "Table '{}' in role '{}' is both in 'tables' and 'blocked_tables'",
-                            table_name, role_name
-                        ),
-                    )
-                    .with_file(format!("roles/{}.yaml", role_name))
-                    .with_location(format!("tables.{}", table_name)),
-                );
-            }
-        }
-    }
-
-    Ok(findings)
-}
-
-// ============================================================================
-// Check 4: Column Name Validation
+// Check 3: Column Name Validation
 // ============================================================================
 
 fn check_column_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckFinding>> {
@@ -726,7 +660,7 @@ fn check_column_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Check
         for (table_name, perms) in &role.tables {
             if let Some(schema_columns) = table_columns.get(table_name.as_str()) {
                 // Check readable columns
-                check_column_list(
+                check_readable_config(
                     &perms.readable,
                     schema_columns,
                     table_name,
@@ -835,29 +769,39 @@ fn check_column_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Check
     Ok(findings)
 }
 
-fn check_column_list(
-    column_list: &cori_core::config::ColumnList,
+fn check_readable_config(
+    readable_config: &cori_core::config::ReadableConfig,
     schema_columns: &HashSet<&str>,
     table_name: &str,
     role_name: &str,
     field_name: &str,
     findings: &mut Vec<CheckFinding>,
 ) {
-    if let Some(cols) = column_list.as_list() {
-        for col in cols {
-            if !schema_columns.contains(col.as_str()) {
-                findings.push(
-                    CheckFinding::error(
-                        "column-names",
-                        format!(
-                            "Column '{}' in {}.{} for role '{}' does not exist in schema",
-                            col, table_name, field_name, role_name
-                        ),
-                    )
-                    .with_file(format!("roles/{}.yaml", role_name))
-                    .with_location(format!("tables.{}.{}", table_name, field_name)),
-                );
+    // Extract columns list from ReadableConfig
+    let cols = match readable_config {
+        cori_core::config::ReadableConfig::All(_) => return, // All columns, no check needed
+        cori_core::config::ReadableConfig::List(cols) => cols,
+        cori_core::config::ReadableConfig::Config(cfg) => {
+            match &cfg.columns {
+                cori_core::config::ColumnList::All(_) => return,
+                cori_core::config::ColumnList::List(cols) => cols,
             }
+        }
+    };
+    
+    for col in cols {
+        if !schema_columns.contains(col.as_str()) {
+            findings.push(
+                CheckFinding::error(
+                    "column-names",
+                    format!(
+                        "Column '{}' in {}.{} for role '{}' does not exist in schema",
+                        col, table_name, field_name, role_name
+                    ),
+                )
+                .with_file(format!("roles/{}.yaml", role_name))
+                .with_location(format!("tables.{}.{}", table_name, field_name)),
+            );
         }
     }
 }

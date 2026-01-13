@@ -97,7 +97,6 @@ Example tools generated for `support_agent` role:
 demo/
 ├── docker-compose.yml    # Database container
 ├── cori.yaml             # Main configuration
-├── tenancy.yaml          # Tenant column mapping
 ├── test.sh               # Comprehensive test script
 ├── database/
 │   ├── schema.sql        # Multi-tenant schema
@@ -107,9 +106,13 @@ demo/
 │   ├── sales_agent.yaml
 │   ├── analytics_agent.yaml
 │   └── admin_agent.yaml
+├── groups/               # Approval groups
 ├── keys/                 # Generated Biscuit keypair
 ├── tokens/               # Generated tokens
-└── schema/               # Schema snapshots
+└── schema/
+    ├── schema.yaml       # Auto-generated database schema
+    ├── rules.yaml        # Tenancy and validation rules
+    └── types.yaml        # Reusable semantic types
 ```
 
 ## Test Commands
@@ -141,12 +144,10 @@ cori keys generate --output keys/
 ### Mint Tokens
 ```bash
 # Role token (no tenant restriction)
-cori token mint --key keys/private.key --role support_agent \
-    --table "customers:customer_id,first_name,email" \
-    --output tokens/support_role.token
+cori token mint --role support_agent --output tokens/support_role.token
 
 # Attenuate to tenant
-cori token attenuate --key keys/private.key \
+cori token attenuate \
     --base tokens/support_role.token \
     --tenant 1 --expires 24h \
     --output tokens/acme_support.token
@@ -154,14 +155,14 @@ cori token attenuate --key keys/private.key \
 
 ### Start Server
 ```bash
-cori serve --config cori.yaml
-# Starts MCP server on :8989 and Dashboard on :8080
+cori run --config cori.yaml
+# Starts MCP server on :3000 and Dashboard on :8080
 ```
 
 ### MCP Server (stdio mode)
 ```bash
 # Start MCP server for AI agent integration (Claude Desktop, etc.)
-cori mcp serve --config cori.yaml --token tokens/acme_support.token
+CORI_TOKEN="$(cat tokens/acme_support.token | base64)" cori run --stdio --config cori.yaml
 ```
 
 ### Claude Desktop Configuration
@@ -172,7 +173,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "cori": {
       "command": "cori",
-      "args": ["mcp", "serve", "--config", "/path/to/cori.yaml"],
+      "args": ["run", "--stdio", "--config", "/path/to/cori.yaml"],
       "env": { "CORI_TOKEN": "<base64 token>" }
     }
   }
@@ -184,7 +185,7 @@ Add to `claude_desktop_config.json`:
 | Service | Port | Description |
 |---------|------|-------------|
 | Postgres (direct) | 5432 | Raw database access |
-| MCP Server (HTTP) | 8989 | MCP protocol endpoint |
+| MCP Server (HTTP) | 3000 | MCP protocol endpoint |
 | Dashboard | 8080 | Admin UI |
 
 ## Troubleshooting
@@ -209,9 +210,9 @@ PGPASSWORD=postgres psql -h localhost -U postgres -d cori_demo -c "SELECT 1"
 
 ### Token issues
 ```bash
-# Verify token
-cori token verify --key keys/public.key tokens/acme_support.token
-
-# Inspect claims
+# Inspect token claims
 cori token inspect tokens/acme_support.token
+
+# Verify token (with public key)
+cori token inspect tokens/acme_support.token --key keys/public.key
 ```

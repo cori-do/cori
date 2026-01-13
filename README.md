@@ -76,30 +76,32 @@ cori init --from-db postgres://user:pass@localhost/mydb --project myproject
 
 This introspects your database and generates:
 - `cori.yaml` — Main configuration
-- `tenancy.yaml` — Auto-detected tenant columns and FK relationships  
 - `keys/` — Biscuit keypair for token signing
 - `roles/` — Sample role definitions based on your schema
-- `schema/snapshot.json` — Schema snapshot for drift detection
+- `groups/` — Sample approval groups
+- `schema/schema.yaml` — Auto-generated database schema
+- `schema/rules.yaml` — Tenancy, soft-delete, validation rules
 
 ### 2. Start Cori
 
 ```sh
 cd myproject
-cori serve --config cori.yaml
-# MCP HTTP server on :8989, Dashboard on :8080
+cori run
+# Dashboard on :8080, MCP HTTP server on :3000
 ```
 
 ### 3. Mint a Token
 
 ```sh
 # Create a role token
-cori token mint --role support_agent --output role.token
+cori token mint --role support_agent --key keys/private.key --output role.token
 
 # Attenuate for a specific tenant
 cori token attenuate \
     --base role.token \
     --tenant acme_corp \
     --expires 24h \
+    --key keys/private.key \
     --output agent.token
 ```
 
@@ -112,7 +114,7 @@ Add Cori to your AI agent's MCP configuration:
   "mcpServers": {
     "cori": {
       "command": "cori",
-      "args": ["mcp", "serve", "--config", "cori.yaml", "--token", "agent.token"]
+      "args": ["run", "--stdio", "--config", "cori.yaml", "--token", "agent.token"]
     }
   }
 }
@@ -141,7 +143,7 @@ Each tool is:
 Test what tools are available for a token:
 
 ```sh
-cori mcp test --token agent.token --public-key keys/public.key
+cori tools list --token agent.token --key keys/public.key
 ```
 
 ---
@@ -189,8 +191,7 @@ tables:
       priority:
         requires_approval: true  # Human must approve
 
-blocked_tables: [users, billing, api_keys]
-max_rows_per_query: 100
+default_page_size: 100
 ```
 
 ### Automatic Tool Generation
@@ -226,7 +227,7 @@ Tools include:
 - **Typed inputs** — JSON Schema with column types, enums, constraints
 - **Filter parameters** — Auto-generated from readable columns
 - **Approval flags** — Sensitive fields marked for human-in-the-loop
-- **Pagination** — Built-in `limit`/`offset` respecting `max_rows_per_query`
+- **Pagination** — Built-in `limit`/`offset` respecting `default_page_size`
 
 Example generated tool schema:
 
@@ -256,12 +257,13 @@ Example generated tool schema:
 
 **Via HTTP (custom agents):**
 ```sh
-# Start HTTP server
-cori serve --config cori.yaml
-# MCP endpoint at http://localhost:8989
+# Start HTTP server (default mode)
+cori run
+# Dashboard at http://localhost:8080
+# MCP endpoint at http://localhost:3000
 
 # Call tools via HTTP
-curl -X POST http://localhost:8989/tools/listCustomers \
+curl -X POST http://localhost:3000/tools/listCustomers \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"filters": {"status": "active"}}'
@@ -280,7 +282,7 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 │                         cori binary                             │
 ├─────────────────────────────────────┬───────────────────────────┤
 │         MCP Server                  │      Admin Dashboard      │
-│  (stdio or http on :8989)           │      (http on :8080)      │
+│  (stdio or http on :3000)           │      (http on :8080)      │
 ├─────────────────────────────────────┴───────────────────────────┤
 │  Tool Generator → Permission Check → Tenant Inject → Audit      │
 ├─────────────────────────────────────────────────────────────────┤

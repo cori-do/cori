@@ -2,8 +2,7 @@
 //!
 //! `cori token mint` - Mint a new role token.
 //! `cori token attenuate` - Attenuate a role token with tenant and expiration.
-//! `cori token inspect` - Inspect a token's contents.
-//! `cori token verify` - Verify a token is valid.
+//! `cori token inspect` - Inspect a token's contents, optionally verify with public key.
 
 use anyhow::Context;
 use cori_biscuit::{inspect_token_unverified, KeyPair, RoleClaims, TokenBuilder, TokenVerifier};
@@ -181,8 +180,11 @@ pub fn attenuate(
     Ok(())
 }
 
-/// Inspect a token without verification.
-pub fn inspect(token: String) -> anyhow::Result<()> {
+/// Inspect a token, optionally verify with public key.
+/// 
+/// Without --key: Shows unverified token contents (block count, facts, checks)
+/// With --key: Verifies signature and shows verified role/tenant information
+pub fn inspect(token: String, key: Option<String>) -> anyhow::Result<()> {
     // Try to load from file if it looks like a path
     let token_str = if std::path::Path::new(&token).exists() {
         fs::read_to_string(&token)?.trim().to_string()
@@ -190,49 +192,41 @@ pub fn inspect(token: String) -> anyhow::Result<()> {
         token
     };
 
-    let info = inspect_token_unverified(&token_str)?;
+    // If key is provided, verify the token
+    if let Some(key_str) = key {
+        let public_key = resolve_public_key(Some(key_str))?;
+        let verifier = TokenVerifier::new(public_key);
 
-    println!("Token Information:");
-    println!("  Block count: {}", info.block_count);
-    println!();
-    println!("{}", info.print);
-
-    Ok(())
-}
-
-/// Verify a token is valid.
-pub fn verify(public_key: Option<String>, token: String) -> anyhow::Result<()> {
-    // Load public key from file or env var
-    let public_key = resolve_public_key(public_key)?;
-    let verifier = TokenVerifier::new(public_key);
-
-    // Load token from file if it looks like a path
-    let token_str = if std::path::Path::new(&token).exists() {
-        fs::read_to_string(&token)?.trim().to_string()
-    } else {
-        token
-    };
-
-    // Verify
-    match verifier.verify(&token_str) {
-        Ok(verified) => {
-            println!("✔ Token is valid");
-            println!();
-            println!("Token Details:");
-            println!("  Role: {}", verified.role);
-            if let Some(tenant) = &verified.tenant {
-                println!("  Tenant: {} (attenuated)", tenant);
-                println!("  Type: Agent token");
-            } else {
-                println!("  Tenant: (none - base role token)");
-                println!("  Type: Role token");
+        match verifier.verify(&token_str) {
+            Ok(verified) => {
+                println!("✔ Token is valid");
+                println!();
+                println!("Token Details:");
+                println!("  Role: {}", verified.role);
+                if let Some(tenant) = &verified.tenant {
+                    println!("  Tenant: {} (attenuated)", tenant);
+                    println!("  Type: Agent token");
+                } else {
+                    println!("  Tenant: (none - base role token)");
+                    println!("  Type: Role token");
+                }
+                println!("  Block count: {}", verified.block_count());
             }
-            println!("  Block count: {}", verified.block_count());
+            Err(e) => {
+                println!("✖ Token verification failed: {}", e);
+                std::process::exit(1);
+            }
         }
-        Err(e) => {
-            println!("✖ Token verification failed: {}", e);
-            std::process::exit(1);
-        }
+    } else {
+        // Without key, show unverified token contents
+        let info = inspect_token_unverified(&token_str)?;
+
+        println!("Token Information (unverified):");
+        println!("  Block count: {}", info.block_count);
+        println!();
+        println!("{}", info.print);
+        println!();
+        println!("💡 Use --key <public.key> to verify the token signature");
     }
 
     Ok(())
@@ -328,11 +322,12 @@ mod tests {
         fs::write(&public_path, keypair.public_key_hex()).unwrap();
 
         let token = fs::read_to_string(&token_path).unwrap();
-        verify(Some(public_path.to_string_lossy().to_string()), token).unwrap();
+        // Use inspect with key to verify
+        inspect(token, Some(public_path.to_string_lossy().to_string())).unwrap();
     }
 
     #[test]
-    fn test_verify_with_hex_key() {
+    fn test_inspect_with_hex_key() {
         let dir = tempdir().unwrap();
         let token_path = dir.path().join("token.biscuit");
 
@@ -354,7 +349,31 @@ mod tests {
 
         // Verify the token using hex public key directly
         let token = fs::read_to_string(&token_path).unwrap();
-        verify(Some(public_key_hex), token).unwrap();
+        // Use inspect with key to verify
+        inspect(token, Some(public_key_hex)).unwrap();
+    }
+
+    #[test]
+    fn test_inspect_without_key() {
+        let dir = tempdir().unwrap();
+        let token_path = dir.path().join("token.biscuit");
+
+        // Generate keypair
+        let keypair = KeyPair::generate().unwrap();
+
+        // Mint token
+        mint(
+            Some(keypair.private_key_hex()),
+            "test_role".to_string(),
+            None,
+            None,
+            vec!["users".to_string()],
+            Some(token_path.clone()),
+        )
+        .unwrap();
+
+        // Inspect without verification (just show contents)
+        let token = fs::read_to_string(&token_path).unwrap();
+        inspect(token, None).unwrap();
     }
 }
-

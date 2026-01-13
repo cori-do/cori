@@ -2,7 +2,7 @@
 
 use cori_biscuit::claims::{ColumnConstraints, RoleClaims, TablePermissions as ClaimTablePermissions};
 use cori_core::config::role_definition::{
-    ColumnList, CreatableColumns, RoleDefinition, UpdatableColumns,
+    CreatableColumns, ReadableConfig, RoleDefinition, UpdatableColumns,
 };
 use std::collections::HashMap;
 
@@ -23,8 +23,15 @@ pub fn role_definition_to_claims(role: &RoleDefinition) -> RoleClaims {
         .map(|(table_name, table_perms)| {
             // Readable columns
             let readable = match &table_perms.readable {
-                ColumnList::All(_) => vec!["*".to_string()],
-                ColumnList::List(cols) => cols.clone(),
+                ReadableConfig::All(_) => vec!["*".to_string()],
+                ReadableConfig::List(cols) => cols.clone(),
+                ReadableConfig::Config(cfg) => {
+                    if cfg.columns.is_all() {
+                        vec!["*".to_string()]
+                    } else {
+                        cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default()
+                    }
+                }
             };
 
             // Editable = creatable + updatable columns with constraints
@@ -47,8 +54,13 @@ pub fn role_definition_to_claims(role: &RoleDefinition) -> RoleClaims {
             // Add/merge updatable columns
             if let UpdatableColumns::Map(cols) = &table_perms.updatable {
                 for (col_name, constraints) in cols {
+                    // Extract allowed values from only_when if it's a simple new.<col>: [values] pattern
+                    let allowed_values: Option<Vec<String>> = constraints.only_when.as_ref()
+                        .and_then(|ow| ow.get_new_value_restriction(col_name))
+                        .map(|v| v.iter().filter_map(|val| val.as_str().map(String::from)).collect::<Vec<_>>());
+                    
                     let claim_constraints = ColumnConstraints {
-                        allowed_values: values_to_strings(&constraints.restrict_to),
+                        allowed_values,
                         pattern: None, // Not in current updatable constraints
                         min: None,
                         max: None,
@@ -72,9 +84,8 @@ pub fn role_definition_to_claims(role: &RoleDefinition) -> RoleClaims {
     RoleClaims {
         role: role.name.clone(),
         tables,
-        blocked_tables: role.blocked_tables.clone(),
-        max_rows_per_query: role.max_rows_per_query,
-        max_affected_rows: role.max_affected_rows,
+        max_rows_per_query: None, // Per-table max_per_page is now in readable config
+        max_affected_rows: None,
         blocked_operations: Vec::new(), // Not used in new model
         description: role.description.clone(),
         minted_at: Some(chrono::Utc::now()),

@@ -4,19 +4,19 @@
 //! - UpdatableColumns::All ("*") - all columns updatable
 //! - UpdatableColumns::Map({...}) - specific columns with constraints
 //! - UpdatableColumnConstraints:
-//!   - restrict_to: whitelist of allowed values
-//!   - transitions: state machine for valid from->to changes
-//!   - only_when: preconditions on current column values
-//!   - increment_only: numeric values can only increase
-//!   - append_only: text values can only be appended
+//!   - only_when: preconditions on current column values using old.col/new.col syntax
 //!   - requires_approval: human approval needed
 //!   - guidance: instructions for AI agents
+//!
+//! The only_when field supports:
+//! - Single condition (AND logic): HashMap of column conditions
+//! - Multiple conditions (OR logic): Vec of HashMaps
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ApprovalRequirement, ColumnCondition, ColumnList, ComparisonCondition, CreatableColumns,
-    DeletablePermission, RoleDefinition, TablePermissions, UpdatableColumnConstraints,
-    UpdatableColumns,
+    ApprovalRequirement, ColumnCondition, ComparisonCondition, CreatableColumns,
+    DeletablePermission, NumberOrColumnRef, OnlyWhen, ReadableConfig, RoleDefinition,
+    TablePermissions, UpdatableColumnConstraints, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -92,11 +92,11 @@ pub async fn test_update_ticket_status(ctx: &TestContext) {
 }
 
 // =============================================================================
-// RESTRICT_TO CONSTRAINT
+// ONLY_WHEN WITH NEW VALUE RESTRICTION (replaces restrict_to)
 // =============================================================================
 
-pub async fn test_update_with_restrict_to_valid(ctx: &TestContext) {
-    println!("  🧪 test_update_with_restrict_to_valid");
+pub async fn test_update_with_value_restriction_valid(ctx: &TestContext) {
+    println!("  🧪 test_update_with_value_restriction_valid");
 
     let executor = ctx.executor();
 
@@ -110,10 +110,13 @@ pub async fn test_update_with_restrict_to_valid(ctx: &TestContext) {
     };
 
     let status_constraints = updatable_map.get("status").expect("status should be updatable");
+
+    // Get the new value restriction from only_when
     let allowed = status_constraints
-        .restrict_to
+        .only_when
         .as_ref()
-        .expect("should have restrict_to");
+        .and_then(|ow| ow.get_new_value_restriction("status"))
+        .expect("should have value restriction via only_when");
 
     // Verify allowed values
     assert!(allowed.contains(&json!("open")));
@@ -139,13 +142,13 @@ pub async fn test_update_with_restrict_to_valid(ctx: &TestContext) {
         )
         .await;
 
-    assert_success(&result, "UPDATE with valid restrict_to value should succeed");
+    assert_success(&result, "UPDATE with valid value should succeed");
 
-    println!("     ✓ Update with valid restrict_to value succeeds");
+    println!("     ✓ Update with valid value restriction succeeds");
 }
 
-pub async fn test_update_with_restrict_to_invalid(ctx: &TestContext) {
-    println!("  🧪 test_update_with_restrict_to_invalid");
+pub async fn test_update_with_value_restriction_invalid(ctx: &TestContext) {
+    println!("  🧪 test_update_with_value_restriction_invalid");
 
     let executor = ctx.executor();
     let update_tool = update_tool(
@@ -168,97 +171,56 @@ pub async fn test_update_with_restrict_to_invalid(ctx: &TestContext) {
 
     assert_failure(&result, "UPDATE with invalid status should fail");
 
-    println!("     ✓ Update with invalid restrict_to value rejected");
+    println!("     ✓ Update with invalid value restriction rejected");
 }
 
 // =============================================================================
-// TRANSITIONS CONSTRAINT (STATE MACHINE)
+// ONLY_WHEN STATE TRANSITIONS (replaces transitions)
 // =============================================================================
 
-pub async fn test_transitions_valid(_ctx: &TestContext) {
-    println!("  🧪 test_transitions_valid");
+pub async fn test_state_transitions_with_only_when(_ctx: &TestContext) {
+    println!("  🧪 test_state_transitions_with_only_when");
 
-    // Create a role with transition constraints
+    // Create a role with state transition using only_when
+    // This defines: open -> in_progress, in_progress -> resolved|open, resolved -> closed
     let updatable = HashMap::from([(
         "status".to_string(),
         UpdatableColumnConstraints {
-            transitions: Some(HashMap::from([
-                ("open".to_string(), vec!["in_progress".to_string()]),
-                (
-                    "in_progress".to_string(),
-                    vec!["resolved".to_string(), "open".to_string()],
-                ),
-                ("resolved".to_string(), vec!["closed".to_string()]),
+            only_when: Some(OnlyWhen::Multiple(vec![
+                // open -> in_progress
+                HashMap::from([
+                    (
+                        "old.status".to_string(),
+                        ColumnCondition::Equals(json!("open")),
+                    ),
+                    (
+                        "new.status".to_string(),
+                        ColumnCondition::In(vec![json!("in_progress")]),
+                    ),
+                ]),
+                // in_progress -> resolved or open
+                HashMap::from([
+                    (
+                        "old.status".to_string(),
+                        ColumnCondition::Equals(json!("in_progress")),
+                    ),
+                    (
+                        "new.status".to_string(),
+                        ColumnCondition::In(vec![json!("resolved"), json!("open")]),
+                    ),
+                ]),
+                // resolved -> closed
+                HashMap::from([
+                    (
+                        "old.status".to_string(),
+                        ColumnCondition::Equals(json!("resolved")),
+                    ),
+                    (
+                        "new.status".to_string(),
+                        ColumnCondition::In(vec![json!("closed")]),
+                    ),
+                ]),
             ])),
-            ..Default::default()
-        },
-    )]);
-
-    let constraints = updatable.get("status").unwrap();
-
-    // Test valid transitions
-    assert!(
-        constraints.is_valid_transition("open", "in_progress"),
-        "open -> in_progress should be valid"
-    );
-    assert!(
-        constraints.is_valid_transition("in_progress", "resolved"),
-        "in_progress -> resolved should be valid"
-    );
-    assert!(
-        constraints.is_valid_transition("in_progress", "open"),
-        "in_progress -> open should be valid"
-    );
-
-    // Test invalid transitions
-    assert!(
-        !constraints.is_valid_transition("open", "resolved"),
-        "open -> resolved should be invalid"
-    );
-    assert!(
-        !constraints.is_valid_transition("resolved", "open"),
-        "resolved -> open should be invalid"
-    );
-    assert!(
-        !constraints.is_valid_transition("open", "closed"),
-        "open -> closed should be invalid"
-    );
-
-    println!("     ✓ State machine transitions correctly validated");
-}
-
-pub async fn test_transitions_without_constraint(_ctx: &TestContext) {
-    println!("  🧪 test_transitions_without_constraint");
-
-    // Without transitions constraint, all changes should be valid
-    let constraints = UpdatableColumnConstraints::default();
-
-    assert!(
-        constraints.is_valid_transition("any", "other"),
-        "Without transitions, all changes should be valid"
-    );
-    assert!(
-        constraints.is_valid_transition("open", "closed"),
-        "Without transitions, all changes should be valid"
-    );
-
-    println!("     ✓ Without transitions constraint, all changes are valid");
-}
-
-// =============================================================================
-// ONLY_WHEN CONSTRAINT (PRECONDITIONS)
-// =============================================================================
-
-pub async fn test_only_when_equals(_ctx: &TestContext) {
-    println!("  🧪 test_only_when_equals");
-
-    let updatable = HashMap::from([(
-        "status".to_string(),
-        UpdatableColumnConstraints {
-            only_when: Some(HashMap::from([(
-                "is_active".to_string(),
-                ColumnCondition::Equals(json!(true)),
-            )])),
             ..Default::default()
         },
     )]);
@@ -269,19 +231,90 @@ pub async fn test_only_when_equals(_ctx: &TestContext) {
         "should have only_when condition"
     );
 
-    println!("     ✓ only_when with equals condition configured");
+    // Verify it's Multiple (OR logic)
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Multiple(conditions) => {
+            assert_eq!(conditions.len(), 3, "should have 3 transition rules");
+        }
+        _ => panic!("Expected Multiple variant for state transitions"),
+    }
+
+    println!("     ✓ State machine transitions defined via only_when with OR logic");
+}
+
+pub async fn test_state_transitions_single_condition(_ctx: &TestContext) {
+    println!("  🧪 test_state_transitions_single_condition");
+
+    // Simple case: only allow updating when current status is 'draft'
+    let updatable = HashMap::from([(
+        "status".to_string(),
+        UpdatableColumnConstraints {
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "old.status".to_string(),
+                ColumnCondition::Equals(json!("draft")),
+            )]))),
+            ..Default::default()
+        },
+    )]);
+
+    let constraints = updatable.get("status").unwrap();
+    assert!(
+        constraints.only_when.is_some(),
+        "should have only_when condition"
+    );
+
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Single(conditions) => {
+            assert!(
+                conditions.contains_key("old.status"),
+                "should reference old.status"
+            );
+        }
+        _ => panic!("Expected Single variant"),
+    }
+
+    println!("     ✓ Single transition condition with old. prefix works");
+}
+
+// =============================================================================
+// ONLY_WHEN PRECONDITIONS
+// =============================================================================
+
+pub async fn test_only_when_equals(_ctx: &TestContext) {
+    println!("  🧪 test_only_when_equals");
+
+    // Can only update status when is_active is true
+    let updatable = HashMap::from([(
+        "status".to_string(),
+        UpdatableColumnConstraints {
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "old.is_active".to_string(),
+                ColumnCondition::Equals(json!(true)),
+            )]))),
+            ..Default::default()
+        },
+    )]);
+
+    let constraints = updatable.get("status").unwrap();
+    assert!(
+        constraints.only_when.is_some(),
+        "should have only_when condition"
+    );
+
+    println!("     ✓ only_when with equals condition on old column");
 }
 
 pub async fn test_only_when_in_values(_ctx: &TestContext) {
     println!("  🧪 test_only_when_in_values");
 
+    // Can only update priority when current status is open or in_progress
     let updatable = HashMap::from([(
         "priority".to_string(),
         UpdatableColumnConstraints {
-            only_when: Some(HashMap::from([(
-                "status".to_string(),
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "old.status".to_string(),
                 ColumnCondition::In(vec![json!("open"), json!("in_progress")]),
-            )])),
+            )]))),
             ..Default::default()
         },
     )]);
@@ -292,52 +325,59 @@ pub async fn test_only_when_in_values(_ctx: &TestContext) {
         "should have only_when condition"
     );
 
-    println!("     ✓ only_when with IN condition configured");
+    println!("     ✓ only_when with IN condition on old column");
 }
 
-pub async fn test_only_when_comparison(_ctx: &TestContext) {
-    println!("  🧪 test_only_when_comparison");
+pub async fn test_only_when_comparison_with_old_column(_ctx: &TestContext) {
+    println!("  🧪 test_only_when_comparison_with_old_column");
 
+    // Can only apply discount when quantity > 10
     let updatable = HashMap::from([(
         "discount".to_string(),
         UpdatableColumnConstraints {
-            only_when: Some(HashMap::from([(
-                "quantity".to_string(),
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "old.quantity".to_string(),
                 ColumnCondition::Comparison(ComparisonCondition {
-                    greater_than: Some(10.0),
+                    greater_than: Some(NumberOrColumnRef::Number(10.0)),
                     ..Default::default()
                 }),
-            )])),
+            )]))),
             ..Default::default()
         },
     )]);
 
     let constraints = updatable.get("discount").unwrap();
     let only_when = constraints.only_when.as_ref().unwrap();
-    let quantity_condition = only_when.get("quantity").unwrap();
 
-    if let ColumnCondition::Comparison(cmp) = quantity_condition {
-        assert_eq!(cmp.greater_than, Some(10.0));
-    } else {
-        panic!("Expected comparison condition");
+    match only_when {
+        OnlyWhen::Single(conditions) => {
+            let quantity_condition = conditions.get("old.quantity").unwrap();
+            if let ColumnCondition::Comparison(cmp) = quantity_condition {
+                assert_eq!(cmp.greater_than, Some(NumberOrColumnRef::Number(10.0)));
+            } else {
+                panic!("Expected comparison condition");
+            }
+        }
+        _ => panic!("Expected Single variant"),
     }
 
-    println!("     ✓ only_when with comparison condition configured");
+    println!("     ✓ only_when with comparison condition on old column");
 }
 
 pub async fn test_only_when_not_null(_ctx: &TestContext) {
     println!("  🧪 test_only_when_not_null");
 
+    // Can only set ship_date when shipping_address is not null
     let updatable = HashMap::from([(
         "ship_date".to_string(),
         UpdatableColumnConstraints {
-            only_when: Some(HashMap::from([(
-                "shipping_address".to_string(),
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "old.shipping_address".to_string(),
                 ColumnCondition::Comparison(ComparisonCondition {
                     not_null: Some(true),
                     ..Default::default()
                 }),
-            )])),
+            )]))),
             ..Default::default()
         },
     )]);
@@ -348,52 +388,102 @@ pub async fn test_only_when_not_null(_ctx: &TestContext) {
         "should have only_when not_null condition"
     );
 
-    println!("     ✓ only_when with not_null condition configured");
+    println!("     ✓ only_when with not_null condition on old column");
 }
 
 // =============================================================================
-// INCREMENT_ONLY CONSTRAINT
+// INCREMENT_ONLY PATTERN (using only_when with new >= old)
 // =============================================================================
 
-pub async fn test_increment_only_constraint(_ctx: &TestContext) {
-    println!("  🧪 test_increment_only_constraint");
+pub async fn test_increment_only_pattern(_ctx: &TestContext) {
+    println!("  🧪 test_increment_only_pattern");
 
+    // stock_quantity can only increase: new.stock_quantity >= old.stock_quantity
     let updatable = HashMap::from([(
         "stock_quantity".to_string(),
         UpdatableColumnConstraints {
-            increment_only: true,
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "new.stock_quantity".to_string(),
+                ColumnCondition::Comparison(ComparisonCondition {
+                    greater_than_or_equal: Some(NumberOrColumnRef::ColumnRef(
+                        "old.stock_quantity".to_string(),
+                    )),
+                    ..Default::default()
+                }),
+            )]))),
+            guidance: Some("Add received stock quantities - use separate adjustment tool for corrections".to_string()),
             ..Default::default()
         },
     )]);
 
     let constraints = updatable.get("stock_quantity").unwrap();
     assert!(
-        constraints.increment_only,
-        "stock_quantity should be increment_only"
+        constraints.only_when.is_some(),
+        "should have increment_only pattern"
     );
 
-    println!("     ✓ increment_only constraint configured");
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Single(conditions) => {
+            let condition = conditions.get("new.stock_quantity").unwrap();
+            if let ColumnCondition::Comparison(cmp) = condition {
+                match &cmp.greater_than_or_equal {
+                    Some(NumberOrColumnRef::ColumnRef(col)) => {
+                        assert_eq!(col, "old.stock_quantity");
+                    }
+                    _ => panic!("Expected column reference"),
+                }
+            } else {
+                panic!("Expected comparison condition");
+            }
+        }
+        _ => panic!("Expected Single variant"),
+    }
+
+    println!("     ✓ increment_only pattern using new >= old column reference");
 }
 
 // =============================================================================
-// APPEND_ONLY CONSTRAINT
+// APPEND_ONLY PATTERN (using only_when with starts_with)
 // =============================================================================
 
-pub async fn test_append_only_constraint(_ctx: &TestContext) {
-    println!("  🧪 test_append_only_constraint");
+pub async fn test_append_only_pattern(_ctx: &TestContext) {
+    println!("  🧪 test_append_only_pattern");
 
+    // notes can only be appended: new.notes must start with old.notes
     let updatable = HashMap::from([(
         "notes".to_string(),
         UpdatableColumnConstraints {
-            append_only: true,
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "new.notes".to_string(),
+                ColumnCondition::Comparison(ComparisonCondition {
+                    starts_with: Some("old.notes".to_string()),
+                    ..Default::default()
+                }),
+            )]))),
+            guidance: Some("Append resolution notes with timestamp and action taken".to_string()),
             ..Default::default()
         },
     )]);
 
     let constraints = updatable.get("notes").unwrap();
-    assert!(constraints.append_only, "notes should be append_only");
+    assert!(
+        constraints.only_when.is_some(),
+        "should have append_only pattern"
+    );
 
-    println!("     ✓ append_only constraint configured");
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Single(conditions) => {
+            let condition = conditions.get("new.notes").unwrap();
+            if let ColumnCondition::Comparison(cmp) = condition {
+                assert_eq!(cmp.starts_with, Some("old.notes".to_string()));
+            } else {
+                panic!("Expected comparison condition");
+            }
+        }
+        _ => panic!("Expected Single variant"),
+    }
+
+    println!("     ✓ append_only pattern using starts_with old column reference");
 }
 
 // =============================================================================
@@ -522,7 +612,7 @@ pub async fn test_updatable_all_columns(_ctx: &TestContext) {
     tables.insert(
         "tickets".to_string(),
         TablePermissions {
-            readable: ColumnList::All(cori_core::config::role_definition::AllColumns),
+            readable: ReadableConfig::All(cori_core::config::role_definition::AllColumns),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::All(cori_core::config::role_definition::AllColumns),
             deletable: DeletablePermission::default(),
@@ -534,9 +624,6 @@ pub async fn test_updatable_all_columns(_ctx: &TestContext) {
         description: Some("Role with all columns updatable".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     };
 
     let perms = role.tables.get("tickets").unwrap();
@@ -579,8 +666,8 @@ pub async fn test_get_updatable_constraints_helper(_ctx: &TestContext) {
     let constraints = role.get_updatable_constraints("tickets", "status");
     assert!(constraints.is_some(), "Should get constraints for status");
     assert!(
-        constraints.unwrap().restrict_to.is_some(),
-        "status should have restrict_to"
+        constraints.unwrap().only_when.is_some(),
+        "status should have only_when"
     );
 
     let no_constraints = role.get_updatable_constraints("tickets", "nonexistent");
@@ -633,38 +720,129 @@ pub async fn test_can_update_helper(_ctx: &TestContext) {
 }
 
 // =============================================================================
-// VALUE VALIDATION HELPERS
+// NEW VALUE RESTRICTION HELPER
 // =============================================================================
 
-pub async fn test_is_value_allowed_helper(_ctx: &TestContext) {
-    println!("  🧪 test_is_value_allowed_helper");
+pub async fn test_get_new_value_restriction_helper(_ctx: &TestContext) {
+    println!("  🧪 test_get_new_value_restriction_helper");
 
+    // With new.column In constraint
     let constraints = UpdatableColumnConstraints {
-        restrict_to: Some(vec![json!("open"), json!("closed"), json!("pending")]),
+        only_when: Some(OnlyWhen::Single(HashMap::from([(
+            "new.status".to_string(),
+            ColumnCondition::In(vec![json!("open"), json!("closed"), json!("pending")]),
+        )]))),
         ..Default::default()
     };
 
-    assert!(
-        constraints.is_value_allowed(&json!("open")),
-        "open should be allowed"
-    );
-    assert!(
-        constraints.is_value_allowed(&json!("closed")),
-        "closed should be allowed"
-    );
-    assert!(
-        !constraints.is_value_allowed(&json!("invalid")),
-        "invalid should not be allowed"
-    );
+    let allowed = constraints
+        .only_when
+        .as_ref()
+        .and_then(|ow| ow.get_new_value_restriction("status"));
+    assert!(allowed.is_some(), "Should extract allowed values");
+    let values = allowed.unwrap();
+    assert!(values.contains(&json!("open")));
+    assert!(values.contains(&json!("closed")));
+    assert!(!values.contains(&json!("invalid")));
 
-    // Without restrict_to, all values allowed
+    // Without new.column constraint
     let no_restrict = UpdatableColumnConstraints::default();
-    assert!(
-        no_restrict.is_value_allowed(&json!("anything")),
-        "Without restrict_to, all values allowed"
-    );
+    let no_values = no_restrict
+        .only_when
+        .as_ref()
+        .and_then(|ow| ow.get_new_value_restriction("status"));
+    assert!(no_values.is_none(), "Should return None when no only_when");
 
-    println!("     ✓ is_value_allowed helper works correctly");
+    println!("     ✓ get_new_value_restriction helper works correctly");
+}
+
+// =============================================================================
+// COMPLEX COMBINED CONDITIONS
+// =============================================================================
+
+pub async fn test_combined_old_and_new_conditions(_ctx: &TestContext) {
+    println!("  🧪 test_combined_old_and_new_conditions");
+
+    // Can only change status from 'open' to specific values
+    let updatable = HashMap::from([(
+        "status".to_string(),
+        UpdatableColumnConstraints {
+            only_when: Some(OnlyWhen::Single(HashMap::from([
+                // old.status must be 'open'
+                (
+                    "old.status".to_string(),
+                    ColumnCondition::Equals(json!("open")),
+                ),
+                // new.status must be one of these
+                (
+                    "new.status".to_string(),
+                    ColumnCondition::In(vec![json!("in_progress"), json!("cancelled")]),
+                ),
+            ]))),
+            ..Default::default()
+        },
+    )]);
+
+    let constraints = updatable.get("status").unwrap();
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Single(conditions) => {
+            assert!(conditions.contains_key("old.status"), "should have old.status");
+            assert!(
+                conditions.contains_key("new.status"),
+                "should have new.status"
+            );
+        }
+        _ => panic!("Expected Single variant"),
+    }
+
+    println!("     ✓ Combined old and new conditions in single only_when");
+}
+
+pub async fn test_or_logic_with_multiple_conditions(_ctx: &TestContext) {
+    println!("  🧪 test_or_logic_with_multiple_conditions");
+
+    // Multiple transition rules using OR logic
+    let constraints = UpdatableColumnConstraints {
+        only_when: Some(OnlyWhen::Multiple(vec![
+            // Rule 1: open -> in_progress
+            HashMap::from([
+                (
+                    "old.status".to_string(),
+                    ColumnCondition::Equals(json!("open")),
+                ),
+                (
+                    "new.status".to_string(),
+                    ColumnCondition::Equals(json!("in_progress")),
+                ),
+            ]),
+            // Rule 2: in_progress -> resolved
+            HashMap::from([
+                (
+                    "old.status".to_string(),
+                    ColumnCondition::Equals(json!("in_progress")),
+                ),
+                (
+                    "new.status".to_string(),
+                    ColumnCondition::Equals(json!("resolved")),
+                ),
+            ]),
+            // Rule 3: admin can close from any state
+            HashMap::from([(
+                "new.status".to_string(),
+                ColumnCondition::Equals(json!("closed")),
+            )]),
+        ])),
+        ..Default::default()
+    };
+
+    match constraints.only_when.as_ref().unwrap() {
+        OnlyWhen::Multiple(rules) => {
+            assert_eq!(rules.len(), 3, "should have 3 transition rules");
+        }
+        _ => panic!("Expected Multiple variant"),
+    }
+
+    println!("     ✓ OR logic with multiple condition groups");
 }
 
 // =============================================================================
@@ -705,23 +883,6 @@ pub async fn test_update_dry_run(ctx: &TestContext) {
 }
 
 // =============================================================================
-// MAX_AFFECTED_ROWS
-// =============================================================================
-
-pub async fn test_max_affected_rows_enforced(_ctx: &TestContext) {
-    println!("  🧪 test_max_affected_rows_enforced");
-
-    let role = create_role_with_max_affected(1);
-    assert_eq!(
-        role.max_affected_rows,
-        Some(1),
-        "Role should have max_affected_rows = 1"
-    );
-
-    println!("     ✓ max_affected_rows constraint checked");
-}
-
-// =============================================================================
 // TEST RUNNER
 // =============================================================================
 
@@ -732,25 +893,25 @@ pub async fn run_all_tests(ctx: &TestContext) {
     // Basic update
     test_update_ticket_status(ctx).await;
 
-    // Restrict_to
-    test_update_with_restrict_to_valid(ctx).await;
-    test_update_with_restrict_to_invalid(ctx).await;
+    // Value restriction (replaces restrict_to)
+    test_update_with_value_restriction_valid(ctx).await;
+    test_update_with_value_restriction_invalid(ctx).await;
 
-    // Transitions
-    test_transitions_valid(ctx).await;
-    test_transitions_without_constraint(ctx).await;
+    // State transitions (replaces transitions)
+    test_state_transitions_with_only_when(ctx).await;
+    test_state_transitions_single_condition(ctx).await;
 
-    // Only_when
+    // Only_when preconditions
     test_only_when_equals(ctx).await;
     test_only_when_in_values(ctx).await;
-    test_only_when_comparison(ctx).await;
+    test_only_when_comparison_with_old_column(ctx).await;
     test_only_when_not_null(ctx).await;
 
-    // Increment_only
-    test_increment_only_constraint(ctx).await;
+    // Increment_only pattern
+    test_increment_only_pattern(ctx).await;
 
-    // Append_only
-    test_append_only_constraint(ctx).await;
+    // Append_only pattern
+    test_append_only_pattern(ctx).await;
 
     // Requires_approval
     test_update_requires_approval(ctx).await;
@@ -769,13 +930,14 @@ pub async fn run_all_tests(ctx: &TestContext) {
     test_get_updatable_constraints_helper(ctx).await;
     test_can_update_column_helper(ctx).await;
     test_can_update_helper(ctx).await;
-    test_is_value_allowed_helper(ctx).await;
+    test_get_new_value_restriction_helper(ctx).await;
+
+    // Complex conditions
+    test_combined_old_and_new_conditions(ctx).await;
+    test_or_logic_with_multiple_conditions(ctx).await;
 
     // Dry-run
     test_update_dry_run(ctx).await;
-
-    // Max affected rows
-    test_max_affected_rows_enforced(ctx).await;
 
     println!("\n✅ All Updatable Columns tests passed!\n");
 }

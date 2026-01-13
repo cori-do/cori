@@ -10,6 +10,7 @@
 use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
 use crate::schema::DatabaseSchema;
+use crate::validator::{OperationType, ToolValidator, ValidationRequest};
 use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
 use cori_core::RoleDefinition;
 use serde::{Deserialize, Serialize};
@@ -206,12 +207,51 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
-        // 1. Validate arguments against constraints
+        // 0. Parse tool name to determine operation and table
+        let operation = self.parse_tool_operation(&tool.name);
+
+        // 1. Create validator and validate the request against role and rules
+        let (op_type, table) = match &operation {
+            ToolOperation::Get { table } => (OperationType::Get, table.as_str()),
+            ToolOperation::List { table } => (OperationType::List, table.as_str()),
+            ToolOperation::Create { table } => (OperationType::Create, table.as_str()),
+            ToolOperation::Update { table } => (OperationType::Update, table.as_str()),
+            ToolOperation::Delete { table } => (OperationType::Delete, table.as_str()),
+            ToolOperation::Custom { name } => {
+                // Custom actions are not validated through the standard flow
+                return self
+                    .execute_custom(name, &arguments, options, context)
+                    .await;
+            }
+        };
+
+        // Build the validation request
+        let validation_request = ValidationRequest {
+            operation: op_type,
+            table,
+            arguments: &arguments,
+            tenant_id: &context.tenant_id,
+            role_name: &context.role,
+            current_row: None, // Will be populated in update if we fetch the row
+        };
+
+        // Create validator with role and optionally rules
+        let mut validator = ToolValidator::new(&self.role);
+        if let Some(rules) = &self.rules {
+            validator = validator.with_rules(rules);
+        }
+
+        // Validate the request
+        if let Err(e) = validator.validate(&validation_request) {
+            return ExecutionResult::error(e.to_string());
+        }
+
+        // 2. Validate arguments against tool schema constraints
         if let Err(e) = self.validate_arguments(tool, &arguments) {
             return ExecutionResult::error(e);
         }
 
-        // 2. Check if approval is required
+        // 3. Check if approval is required
         if self.requires_approval(tool, &arguments) && !options.dry_run {
             // Create approval request
             let approval_fields = tool
@@ -230,9 +270,6 @@ impl ToolExecutor {
 
             return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
         }
-
-        // 3. Parse tool name to determine operation
-        let operation = self.parse_tool_operation(&tool.name);
 
         // 4. Execute based on operation type
         match operation {
@@ -524,8 +561,8 @@ impl ToolExecutor {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        // Apply max rows limit from role
-        let max_rows = self.role.max_rows_per_query.unwrap_or(1000);
+        // Apply max rows limit from role (per-table max_per_page)
+        let max_rows = self.role.get_max_per_page(table).unwrap_or(1000);
         let effective_limit = limit.min(max_rows);
         let tenant_column = self.tenant_column_for_table(table);
 
@@ -845,15 +882,18 @@ impl ToolExecutor {
                 continue; // Skip non-updatable columns
             }
 
-            // Check restrict_to constraint from role definition
+            // Check only_when constraint from role definition for restrict_to pattern
             if let Some(cols) = updatable_columns {
                 if let Some(constraints) = cols.get_constraints(key) {
-                    if let Some(restrict_to) = &constraints.restrict_to {
-                        if !restrict_to.contains(value) {
-                            return ExecutionResult::error(format!(
-                                "Value '{}' for column '{}' not in allowed values: {:?}",
-                                value, key, restrict_to
-                            ));
+                    // Check if there's a simple new.<col>: [values] restriction
+                    if let Some(only_when) = &constraints.only_when {
+                        if let Some(allowed_values) = only_when.get_new_value_restriction(key) {
+                            if !allowed_values.contains(value) {
+                                return ExecutionResult::error(format!(
+                                    "Value '{}' for column '{}' not in allowed values: {:?}",
+                                    value, key, allowed_values
+                                ));
+                            }
                         }
                     }
                 }
@@ -1282,9 +1322,6 @@ mod tests {
             description: None,
             approvals: None,
             tables: std::collections::HashMap::new(),
-            blocked_tables: Vec::new(),
-            max_rows_per_query: None,
-            max_affected_rows: None,
         };
         let approval_manager = Arc::new(ApprovalManager::default());
         let executor = ToolExecutor::new(role, approval_manager);

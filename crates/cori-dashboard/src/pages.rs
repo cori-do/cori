@@ -398,8 +398,6 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
 pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInfo>, is_new: bool) -> String {
     let name = role.map(|r| r.name.as_str()).unwrap_or("");
     let description = role.and_then(|r| r.description.as_deref()).unwrap_or("");
-    let max_rows = role.and_then(|r| r.max_rows_per_query).unwrap_or(100);
-    let max_affected = role.and_then(|r| r.max_affected_rows).unwrap_or(10);
     
     let title = if is_new { "Create New Role" } else { &format!("Edit Role: {}", name) };
     let submit_url = if is_new { "/api/roles".to_string() } else { format!("/api/roles/{}", name) };
@@ -534,11 +532,6 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
                     {name_input}
                     {description_input}
                 </div>
-                
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                    {max_rows_input}
-                    {max_affected_input}
-                </div>
             </div>
             
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
@@ -560,8 +553,6 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
         submit_url = submit_url,
         name_input = input("name", "Role Name", "text", name, "e.g., support_agent"),
         description_input = input("description", "Description", "text", description, "What this role is for"),
-        max_rows_input = input("max_rows_per_query", "Max Rows per Query", "number", &max_rows.to_string(), "100"),
-        max_affected_input = input("max_affected_rows", "Max Affected Rows", "number", &max_affected.to_string(), "10"),
         tables_section = tables_section,
         submit_text = if is_new { "Create Role" } else { "Save Changes" },
     );
@@ -574,7 +565,7 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
 // =============================================================================
 
 pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::Value]>) -> String {
-    use cori_core::config::role_definition::{ColumnList, CreatableColumns, UpdatableColumns};
+    use cori_core::config::role_definition::{ReadableConfig, CreatableColumns, UpdatableColumns};
     
     let tables_content: String = role.tables.iter().map(|(name, perms)| {
         let mut ops = Vec::new();
@@ -585,8 +576,15 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
         let ops_str = ops.join(", ");
         
         let readable = match &perms.readable {
-            ColumnList::All(_) => "*".to_string(),
-            ColumnList::List(cols) => cols.join(", "),
+            ReadableConfig::All(_) => "*".to_string(),
+            ReadableConfig::List(cols) => cols.join(", "),
+            ReadableConfig::Config(cfg) => {
+                if cfg.columns.is_all() {
+                    "*".to_string()
+                } else {
+                    cfg.columns.as_list().map(|s| s.join(", ")).unwrap_or_default()
+                }
+            }
         };
         
         // Combine creatable and updatable for display
@@ -611,7 +609,10 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 if constraints.requires_approval.is_some() {
                     badges.push_str(&badge("Approval", "yellow"));
                 }
-                if constraints.restrict_to.is_some() {
+                // Check if there's an only_when with restricted values
+                if constraints.only_when.as_ref()
+                    .and_then(|ow| ow.get_new_value_restriction(col))
+                    .is_some() {
                     badges.push_str(&badge("Enum", "blue"));
                 }
                 editable_parts.push(format!(r#"<span class="mr-2">{} (update){}</span>"#, col, badges));
@@ -720,32 +721,10 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
         description = role.description.as_deref().unwrap_or("No description"),
         tabs = tabs("role-tabs", &[
             ("permissions", "Permissions", &format!(
-                r##"<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div class="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
-                        <h3 class="text-lg font-semibold mb-4">Constraints</h3>
-                        <div class="space-y-3 text-sm">
-                            <div class="flex justify-between">
-                                <span class="text-gray-500">Max rows per query</span>
-                                <span class="font-medium">{max_rows}</span>
-                            </div>
-                            <div class="flex justify-between">
-                                <span class="text-gray-500">Max affected rows</span>
-                                <span class="font-medium">{max_affected}</span>
-                            </div>
-                            <div class="flex justify-between">
-                                <span class="text-gray-500">Blocked tables</span>
-                                <span class="font-medium">{blocked_tables}</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
-                        <h3 class="text-lg font-semibold mb-4">Tables</h3>
-                        <div class="space-y-3">{tables_content}</div>
-                    </div>
+                r##"<div class="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
+                    <h3 class="text-lg font-semibold mb-4">Tables</h3>
+                    <div class="space-y-3">{tables_content}</div>
                 </div>"##,
-                max_rows = role.max_rows_per_query.unwrap_or(100),
-                max_affected = role.max_affected_rows.unwrap_or(10),
-                blocked_tables = if role.blocked_tables.is_empty() { "None".to_string() } else { role.blocked_tables.join(", ") },
                 tables_content = tables_content,
             )),
             ("mcp", "MCP Tools Preview", &mcp_preview),

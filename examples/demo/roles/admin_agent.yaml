@@ -130,7 +130,4 @@ tables:
     updatable: "*"
     deletable: true
 
-blocked_tables: []
-
-max_rows_per_query: 10000
-max_affected_rows: 1000
+default_page_size: 10000

@@ -12,8 +12,8 @@
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ApprovalRequirement, ColumnList, CreatableColumnConstraints, CreatableColumns,
-    DeletablePermission, RoleDefinition, TablePermissions, UpdatableColumns,
+    ApprovalRequirement, CreatableColumnConstraints, CreatableColumns,
+    DeletablePermission, ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -412,7 +412,7 @@ pub async fn test_creatable_all_columns(_ctx: &TestContext) {
     tables.insert(
         "notes".to_string(),
         TablePermissions {
-            readable: ColumnList::All(cori_core::config::role_definition::AllColumns),
+            readable: ReadableConfig::All(cori_core::config::role_definition::AllColumns),
             creatable: CreatableColumns::All(cori_core::config::role_definition::AllColumns),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -424,9 +424,6 @@ pub async fn test_creatable_all_columns(_ctx: &TestContext) {
         description: Some("Role with all columns creatable".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     };
 
     // Verify creatable is_all

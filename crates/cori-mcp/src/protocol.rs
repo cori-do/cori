@@ -156,3 +156,16 @@ pub struct ApprovalPendingResult {
     pub message: String,
 }
 
+/// Request context passed from HTTP transport to MCP server.
+///
+/// Contains authentication information extracted from the verified Biscuit token.
+/// In HTTP mode, this is populated per-request from the Authorization header.
+/// In stdio mode, this is set once at startup from the environment token.
+#[derive(Debug, Clone, Default)]
+pub struct RequestContext {
+    /// Tenant ID from the attenuated token (required for tenant-scoped operations).
+    pub tenant_id: Option<String>,
+    /// Role name from the token's authority block.
+    pub role: Option<String>,
+}
+

@@ -1,15 +1,15 @@
 //! Readable columns tests for Cori MCP.
 //!
 //! Tests the `readable` field in TablePermissions:
-//! - ColumnList::All ("*") - all columns accessible
-//! - ColumnList::List([...]) - specific columns only
+//! - ReadableConfig::All ("*") - all columns accessible
+//! - ReadableConfig::List([...]) - specific columns only
 //! - Column filtering in responses
 //! - Sensitive columns exclusion
 //! - Blocked tables
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    AllColumns, ColumnList, CreatableColumns, DeletablePermission, RoleDefinition,
+    AllColumns, CreatableColumns, DeletablePermission, ReadableConfig, RoleDefinition,
     TablePermissions, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
@@ -43,8 +43,9 @@ pub async fn test_only_readable_columns_returned(ctx: &TestContext) {
     let role = create_support_agent_role();
     let customer_perms = role.tables.get("customers").expect("customers should be in role");
     let readable_cols = match &customer_perms.readable {
-        ColumnList::List(cols) => cols.clone(),
-        ColumnList::All(_) => panic!("Expected explicit column list"),
+        ReadableConfig::List(cols) => cols.clone(),
+        ReadableConfig::All(_) => panic!("Expected explicit column list"),
+        ReadableConfig::Config(cfg) => cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default(),
     };
 
     // Verify only readable columns are present
@@ -117,8 +118,9 @@ pub async fn test_list_returns_only_readable_columns(ctx: &TestContext) {
     let role = create_support_agent_role();
     let customer_perms = role.tables.get("customers").unwrap();
     let readable_cols = match &customer_perms.readable {
-        ColumnList::List(cols) => cols.clone(),
-        ColumnList::All(_) => panic!("Expected explicit column list"),
+        ReadableConfig::List(cols) => cols.clone(),
+        ReadableConfig::All(_) => panic!("Expected explicit column list"),
+        ReadableConfig::Config(cfg) => cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default(),
     };
 
     // Verify each item only has readable columns
@@ -225,7 +227,7 @@ pub async fn test_sensitive_columns_properly_excluded(_ctx: &TestContext) {
     // Customers: 'notes' should be excluded (internal notes might be sensitive)
     let customer_perms = role.tables.get("customers").unwrap();
     let readable = match &customer_perms.readable {
-        ColumnList::List(cols) => cols,
+        ReadableConfig::List(cols) => cols,
         _ => panic!("Expected explicit column list"),
     };
     assert!(
@@ -236,7 +238,7 @@ pub async fn test_sensitive_columns_properly_excluded(_ctx: &TestContext) {
     // Products: 'cost' should be excluded (internal cost data)
     let product_perms = role.tables.get("products").unwrap();
     let readable = match &product_perms.readable {
-        ColumnList::List(cols) => cols,
+        ReadableConfig::List(cols) => cols,
         _ => panic!("Expected explicit column list"),
     };
     assert!(
@@ -248,33 +250,15 @@ pub async fn test_sensitive_columns_properly_excluded(_ctx: &TestContext) {
 }
 
 // =============================================================================
-// BLOCKED TABLES
+// TABLES NOT IN ROLE
 // =============================================================================
 
-pub async fn test_blocked_tables_not_in_permissions(_ctx: &TestContext) {
-    println!("  🧪 test_blocked_tables_not_in_permissions");
+pub async fn test_tables_not_in_role_not_accessible(_ctx: &TestContext) {
+    println!("  🧪 test_tables_not_in_role_not_accessible");
 
     let role = create_support_agent_role();
 
-    // Verify blocked tables
-    assert!(
-        role.blocked_tables.contains(&"users".to_string()),
-        "users should be blocked"
-    );
-    assert!(
-        role.blocked_tables.contains(&"api_keys".to_string()),
-        "api_keys should be blocked"
-    );
-    assert!(
-        role.blocked_tables.contains(&"billing".to_string()),
-        "billing should be blocked"
-    );
-    assert!(
-        role.blocked_tables.contains(&"audit_logs".to_string()),
-        "audit_logs should be blocked"
-    );
-
-    // Verify blocked tables are not in tables permissions
+    // Verify tables not in role are not in tables permissions
     assert!(
         !role.tables.contains_key("users"),
         "users should not be in tables permissions"
@@ -288,23 +272,17 @@ pub async fn test_blocked_tables_not_in_permissions(_ctx: &TestContext) {
         "billing should not be in tables permissions"
     );
 
-    println!("     ✓ Blocked tables correctly not included in role permissions");
+    println!("     ✓ Tables not in role correctly not included in role permissions");
 }
 
-pub async fn test_blocked_table_cannot_be_queried(_ctx: &TestContext) {
-    println!("  🧪 test_blocked_table_cannot_be_queried");
+pub async fn test_table_not_in_role_cannot_be_queried(_ctx: &TestContext) {
+    println!("  🧪 test_table_not_in_role_cannot_be_queried");
 
-    // Note: This test verifies the role definition correctly blocks tables,
+    // Note: This test verifies the role definition correctly excludes tables,
     // but actual enforcement depends on ToolExecutor implementation.
     // For now, we just verify the role definition is correctly configured.
 
     let role = create_support_agent_role();
-    
-    // Verify 'users' is in blocked_tables
-    assert!(
-        role.blocked_tables.contains(&"users".to_string()),
-        "users should be in blocked_tables"
-    );
     
     // Verify 'users' is not in the role's tables
     assert!(
@@ -315,10 +293,10 @@ pub async fn test_blocked_table_cannot_be_queried(_ctx: &TestContext) {
     // The can_access_table helper should return false
     assert!(
         !role.can_access_table("users"),
-        "can_access_table should return false for blocked table"
+        "can_access_table should return false for table not in role"
     );
 
-    println!("     ✓ Blocked table correctly configured in role definition");
+    println!("     ✓ Table not in role correctly configured in role definition");
 }
 
 pub async fn test_can_access_table_helper(_ctx: &TestContext) {
@@ -331,7 +309,7 @@ pub async fn test_can_access_table_helper(_ctx: &TestContext) {
     assert!(role.can_access_table("orders"), "orders should be accessible");
     assert!(role.can_access_table("tickets"), "tickets should be accessible");
 
-    // Tables that should not be accessible (blocked)
+    // Tables that should not be accessible (not in role)
     assert!(!role.can_access_table("users"), "users should not be accessible");
     assert!(!role.can_access_table("api_keys"), "api_keys should not be accessible");
     assert!(!role.can_access_table("billing"), "billing should not be accessible");
@@ -357,7 +335,7 @@ pub async fn test_empty_readable_blocks_access(_ctx: &TestContext) {
     tables.insert(
         "customers".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec![]), // Empty!
+            readable: ReadableConfig::List(vec![]), // Empty!
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -369,16 +347,13 @@ pub async fn test_empty_readable_blocks_access(_ctx: &TestContext) {
         description: Some("Role with no readable columns".to_string()),
         approvals: None,
         tables,
-        blocked_tables: Vec::new(),
-        max_rows_per_query: Some(100),
-        max_affected_rows: Some(10),
     };
 
     // Verify the role is correctly configured with empty readable columns
     let perms = role.tables.get("customers").unwrap();
     assert!(perms.readable.is_empty(), "readable should be empty");
     
-    // Verify ColumnList helpers work correctly
+    // Verify ReadableConfig helpers work correctly
     assert!(!perms.readable.contains("customer_id"), "customer_id should not be readable");
     assert!(!perms.readable.is_all(), "readable should not be 'all'");
 
@@ -395,8 +370,8 @@ pub async fn test_empty_readable_blocks_access(_ctx: &TestContext) {
 pub async fn test_column_list_contains(_ctx: &TestContext) {
     println!("  🧪 test_column_list_contains");
 
-    // Test ColumnList::List
-    let list = ColumnList::List(vec![
+    // Test ReadableConfig::List
+    let list = ReadableConfig::List(vec![
         "id".to_string(),
         "name".to_string(),
         "email".to_string(),
@@ -405,39 +380,39 @@ pub async fn test_column_list_contains(_ctx: &TestContext) {
     assert!(list.contains("name"), "Should contain 'name'");
     assert!(!list.contains("password"), "Should not contain 'password'");
 
-    // Test ColumnList::All
-    let all = ColumnList::All(AllColumns);
+    // Test ReadableConfig::All
+    let all = ReadableConfig::All(AllColumns);
     assert!(all.contains("any_column"), "All should contain any column");
     assert!(all.contains("password"), "All should contain even sensitive columns");
 
-    println!("     ✓ ColumnList contains helper works correctly");
+    println!("     ✓ ReadableConfig contains helper works correctly");
 }
 
 pub async fn test_column_list_is_empty(_ctx: &TestContext) {
     println!("  🧪 test_column_list_is_empty");
 
-    let empty = ColumnList::List(vec![]);
+    let empty = ReadableConfig::List(vec![]);
     assert!(empty.is_empty(), "Empty list should be empty");
 
-    let non_empty = ColumnList::List(vec!["id".to_string()]);
+    let non_empty = ReadableConfig::List(vec!["id".to_string()]);
     assert!(!non_empty.is_empty(), "Non-empty list should not be empty");
 
-    let all = ColumnList::All(AllColumns);
+    let all = ReadableConfig::All(AllColumns);
     assert!(!all.is_empty(), "All columns should not be empty");
 
-    println!("     ✓ ColumnList is_empty helper works correctly");
+    println!("     ✓ ReadableConfig is_empty helper works correctly");
 }
 
 pub async fn test_column_list_is_all(_ctx: &TestContext) {
     println!("  🧪 test_column_list_is_all");
 
-    let list = ColumnList::List(vec!["id".to_string()]);
+    let list = ReadableConfig::List(vec!["id".to_string()]);
     assert!(!list.is_all(), "List should not be all");
 
-    let all = ColumnList::All(AllColumns);
+    let all = ReadableConfig::All(AllColumns);
     assert!(all.is_all(), "All should be all");
 
-    println!("     ✓ ColumnList is_all helper works correctly");
+    println!("     ✓ ReadableConfig is_all helper works correctly");
 }
 
 // =============================================================================
@@ -516,9 +491,9 @@ pub async fn run_all_tests(ctx: &TestContext) {
     // Sensitive columns
     test_sensitive_columns_properly_excluded(ctx).await;
 
-    // Blocked tables
-    test_blocked_tables_not_in_permissions(ctx).await;
-    test_blocked_table_cannot_be_queried(ctx).await;
+    // Tables not in role
+    test_tables_not_in_role_not_accessible(ctx).await;
+    test_table_not_in_role_cannot_be_queried(ctx).await;
     test_can_access_table_helper(ctx).await;
 
     // Empty readable

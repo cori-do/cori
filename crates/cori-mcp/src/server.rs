@@ -199,14 +199,14 @@ impl McpServer {
         );
 
 
-        // Create channel for request handling
+        // Create channel for request handling (includes request context)
         let (request_tx, mut request_rx) =
-            mpsc::channel::<(JsonRpcRequest, mpsc::Sender<JsonRpcResponse>)>(100);
+            mpsc::channel::<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>(100);
 
         // Clone self for the request handler task
         let tools = self.tools.clone();
         let role = self.role.clone();
-        let tenant_id = self.tenant_id.clone();
+        let default_tenant_id = self.tenant_id.clone();
         let approval_manager = self.approval_manager.clone();
         let config = self.config.clone();
         let pool = self.pool.clone();
@@ -215,12 +215,29 @@ impl McpServer {
 
         // Spawn request handler task
         tokio::spawn(async move {
-            while let Some((request, response_tx)) = request_rx.recv().await {
+            while let Some((request, context, response_tx)) = request_rx.recv().await {
+                tracing::debug!(
+                    method = %request.method,
+                    context_tenant = ?context.tenant_id,
+                    context_role = ?context.role,
+                    "Handling HTTP request with context"
+                );
+                
+                // Use tenant from request context (per-request from token), 
+                // falling back to server default (for stdio mode or development)
+                let effective_tenant_id = context.tenant_id
+                    .or_else(|| default_tenant_id.clone());
+                
+                tracing::debug!(
+                    effective_tenant = ?effective_tenant_id,
+                    "Resolved tenant for request"
+                );
+                
                 // Create a temporary server instance to handle the request
                 let mut temp_server = McpServer::new(config.clone());
                 temp_server.tools = tools.clone();
                 temp_server.role = role.clone();
-                temp_server.tenant_id = tenant_id.clone();
+                temp_server.tenant_id = effective_tenant_id;
                 temp_server.approval_manager = approval_manager.clone();
                 temp_server.pool = pool.clone();
                 temp_server.rules = rules.clone();
@@ -358,8 +375,16 @@ impl McpServer {
 
         // Execute the tool
         if let Some(executor) = &self.executor {
+            let tenant_id = self.tenant_id.clone().unwrap_or_else(|| "unknown".to_string());
+            
+            tracing::debug!(
+                tool = %params.name,
+                tenant_id = %tenant_id,
+                "Executing tool with tenant context"
+            );
+            
             let context = ExecutionContext {
-                tenant_id: self.tenant_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                tenant_id,
                 role: self
                     .role
                     .as_ref()

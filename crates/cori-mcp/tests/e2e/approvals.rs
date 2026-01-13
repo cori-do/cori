@@ -9,9 +9,9 @@
 use super::common::*;
 use chrono::Duration;
 use cori_core::config::role_definition::{
-    ApprovalConfig, ApprovalRequirement, ColumnList, CreatableColumnConstraints, CreatableColumns,
-    DeletableConstraints, DeletablePermission, RoleDefinition, TablePermissions,
-    UpdatableColumnConstraints, UpdatableColumns,
+    ApprovalConfig, ApprovalRequirement, ColumnCondition, CreatableColumnConstraints,
+    CreatableColumns, DeletableConstraints, DeletablePermission, OnlyWhen, ReadableConfig,
+    RoleDefinition, TablePermissions, UpdatableColumnConstraints, UpdatableColumns,
 };
 use cori_mcp::approval::{ApprovalManager, ApprovalStatus};
 use serde_json::json;
@@ -175,7 +175,15 @@ pub async fn test_updatable_requires_approval(_ctx: &TestContext) {
     updatable.insert(
         "priority".to_string(),
         UpdatableColumnConstraints {
-            restrict_to: Some(vec![json!("low"), json!("medium"), json!("high"), json!("critical")]),
+            only_when: Some(OnlyWhen::Single(HashMap::from([(
+                "new.priority".to_string(),
+                ColumnCondition::In(vec![
+                    json!("low"),
+                    json!("medium"),
+                    json!("high"),
+                    json!("critical"),
+                ]),
+            )]))),
             requires_approval: Some(ApprovalRequirement::Detailed(ApprovalConfig {
                 group: "escalation_team".to_string(),
                 notify_on_pending: true,
@@ -212,7 +220,7 @@ pub async fn test_deletable_requires_approval(_ctx: &TestContext) {
     tables.insert(
         "critical_records".to_string(),
         TablePermissions {
-            readable: ColumnList::List(vec!["id".to_string()]),
+            readable: ReadableConfig::List(vec!["id".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
@@ -231,9 +239,6 @@ pub async fn test_deletable_requires_approval(_ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-        blocked_tables: vec![],
-        max_rows_per_query: None,
-        max_affected_rows: None,
     };
 
     let perms = role.tables.get("critical_records").unwrap();

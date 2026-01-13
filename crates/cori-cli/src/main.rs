@@ -5,11 +5,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// MCP commands module
+// CLI commands module
 mod commands;
 
 #[derive(Parser, Debug)]
-#[command(name = "cori", version, about = "Cori CLI")]
+#[command(name = "cori", version, about = "Cori CLI - The Secure Kernel for AI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -17,7 +17,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Initialize a Cori MCP server project from an existing database.
+    /// Initialize a Cori project from an existing database.
     ///
     /// This command introspects your database schema and creates a complete
     /// project structure with:
@@ -46,29 +46,57 @@ enum Command {
         cmd: DbCommand,
     },
 
-    // ===== Phase 1: Core Commands =====
-
     /// Generate Biscuit keypair for token signing.
     Keys {
         #[command(subcommand)]
         cmd: KeysCommand,
     },
 
-    /// Biscuit token management (mint, attenuate, inspect, verify).
+    /// Biscuit token management (mint, attenuate, inspect).
     Token {
         #[command(subcommand)]
         cmd: TokenCommand,
     },
 
-    /// Start the Cori MCP server and dashboard.
-    Serve {
-        /// Path to configuration file (YAML or TOML).
+    /// Start Cori (Dashboard + MCP server).
+    ///
+    /// By default, starts the Dashboard on :8080 and MCP HTTP server on :3000.
+    /// Use --stdio for Claude Desktop and local agents (requires token).
+    Run {
+        /// Path to configuration file.
         #[arg(long, short, default_value = "cori.yaml")]
         config: PathBuf,
+
+        /// Use HTTP transport (default). Multi-tenant: each request carries its own token.
+        #[arg(long, conflicts_with = "stdio")]
+        http: bool,
+
+        /// Use stdio transport. Single-tenant: requires --token or CORI_TOKEN env.
+        #[arg(long, conflicts_with = "http")]
+        stdio: bool,
+
+        /// Token file (required with --stdio unless CORI_TOKEN env is set).
+        #[arg(long, short)]
+        token: Option<PathBuf>,
+
+        /// MCP HTTP port (only with --http). Default: 3000 or from config.
+        #[arg(long)]
+        mcp_port: Option<u16>,
+
+        /// Dashboard port. Default: 8080 or from config.
+        #[arg(long)]
+        dashboard_port: Option<u16>,
+
+        /// Disable dashboard (MCP only).
+        #[arg(long)]
+        no_dashboard: bool,
     },
 
-    /// MCP server for AI agent integration.
-    Mcp(commands::mcp::McpCommand),
+    /// Tool introspection (offline, no server needed).
+    Tools {
+        #[command(subcommand)]
+        cmd: ToolsCommand,
+    },
 
     /// Validate configuration files for consistency and correctness.
     ///
@@ -82,8 +110,6 @@ enum Command {
         config: PathBuf,
     },
 }
-
-// ===== Phase 1: Core Command Definitions =====
 
 #[derive(Subcommand, Debug)]
 enum KeysCommand {
@@ -147,20 +173,57 @@ enum TokenCommand {
         output: Option<PathBuf>,
     },
 
-    /// Inspect a token without verification.
+    /// Inspect a token's contents (optionally verify signature).
+    ///
+    /// Without --key: shows token contents with "signature not verified" warning.
+    /// With --key: verifies signature and shows validity status.
     Inspect {
         /// Token string or path to token file.
         token: String,
-    },
 
-    /// Verify a token is valid.
-    Verify {
-        /// Path to public key file. Falls back to BISCUIT_PUBLIC_KEY env var if not provided.
+        /// Path to public key file for signature verification.
         #[arg(long, env = "BISCUIT_PUBLIC_KEY")]
         key: Option<String>,
+    },
+}
 
-        /// Token string or path to token file.
-        token: String,
+#[derive(Subcommand, Debug)]
+enum ToolsCommand {
+    /// List tools for a role or token (offline, no server needed).
+    List {
+        /// Role name to generate tools for.
+        #[arg(long, conflicts_with = "token")]
+        role: Option<String>,
+
+        /// Token file to extract role from.
+        #[arg(long, short, conflicts_with = "role")]
+        token: Option<PathBuf>,
+
+        /// Public key file for token verification (required with --token).
+        #[arg(long)]
+        key: Option<PathBuf>,
+
+        /// Roles directory.
+        #[arg(long, default_value = "roles")]
+        roles_dir: PathBuf,
+
+        /// Show detailed tool schemas.
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Show detailed schema for a specific tool.
+    Describe {
+        /// Tool name.
+        tool: String,
+
+        /// Role name.
+        #[arg(long)]
+        role: String,
+
+        /// Roles directory.
+        #[arg(long, default_value = "roles")]
+        roles_dir: PathBuf,
     },
 }
 
@@ -170,17 +233,11 @@ enum DbCommand {
     ///
     /// Introspects the configured database and generates a YAML schema definition
     /// that can be used for role-based access control configuration.
-    Sync,
-}
-
-/// Run configuration check as a pre-hook before commands that depend on config.
-/// Only runs if cori.yaml exists in the current directory.
-async fn run_pre_hook_check() -> anyhow::Result<()> {
-    let default_config = PathBuf::from("cori.yaml");
-    if default_config.exists() {
-        commands::check::run_pre_hook(&default_config).await?;
-    }
-    Ok(())
+    Sync {
+        /// Path to configuration file.
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+    },
 }
 
 /// Run configuration check as a pre-hook with a custom config path.
@@ -208,8 +265,12 @@ async fn main() -> anyhow::Result<()> {
         } => commands::init::run(&from_db, &project, force).await?,
 
         Command::Db { cmd } => {
-            run_pre_hook_check().await?;
-            run_db(cmd).await?
+            // Note: We intentionally skip pre-hook check for db sync command
+            // because the purpose of db sync is to regenerate schema.yaml,
+            // which might be missing or in an old format.
+            match cmd {
+                DbCommand::Sync { config } => run_db_sync(&config).await?,
+            }
         }
 
         // ===== Phase 1: Core Command Handlers =====
@@ -240,25 +301,51 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 commands::token::attenuate(key, base, tenant, expires, output)?;
             }
-            TokenCommand::Inspect { token } => {
-                commands::token::inspect(token)?;
-            }
-            TokenCommand::Verify { key, token } => {
-                commands::token::verify(key, token)?;
+            TokenCommand::Inspect { token, key } => {
+                commands::token::inspect(token, key)?;
             }
         },
 
-        Command::Serve { config } => {
+        Command::Run {
+            config,
+            http,
+            stdio,
+            token,
+            mcp_port,
+            dashboard_port,
+            no_dashboard,
+        } => {
             run_pre_hook_check_with_config(&config).await?;
-            commands::serve::serve(config).await?;
+            commands::run::run(
+                config,
+                http,
+                stdio,
+                token,
+                mcp_port,
+                dashboard_port,
+                no_dashboard,
+            )
+            .await?;
         }
 
-        Command::Mcp(cmd) => {
-            // For MCP, check the config path from the command args if available
-            let config_path = cmd.get_config_path();
-            run_pre_hook_check_with_config(&config_path).await?;
-            commands::mcp::execute(cmd).await?;
-        }
+        Command::Tools { cmd } => match cmd {
+            ToolsCommand::List {
+                role,
+                token,
+                key,
+                roles_dir,
+                verbose,
+            } => {
+                commands::tools::list(role, token, key, roles_dir, verbose)?;
+            }
+            ToolsCommand::Describe {
+                tool,
+                role,
+                roles_dir,
+            } => {
+                commands::tools::describe(tool, role, roles_dir)?;
+            }
+        },
 
         Command::Check { config } => {
             commands::check::run(&config).await?;
@@ -272,82 +359,96 @@ async fn main() -> anyhow::Result<()> {
 // db commands
 // -----------------------------
 
-async fn run_db(cmd: DbCommand) -> anyhow::Result<()> {
-    let cfg = load_cori_config_from_cwd()?;
-    ensure_postgres_adapter(&cfg)?;
+/// Upstream database configuration from cori.yaml.
+#[derive(Debug, Deserialize)]
+struct UpstreamConfig {
+    /// Hostname (optional if database_url_env is set)
+    host: Option<String>,
+    #[serde(default = "default_upstream_port")]
+    port: u16,
+    /// Database name (optional if database_url_env is set)
+    database: Option<String>,
+    /// Username (optional if database_url_env is set)
+    username: Option<String>,
+    password: Option<String>,
+    /// Environment variable containing DATABASE_URL (recommended)
+    database_url_env: Option<String>,
+    /// Direct database URL (for development only)
+    database_url: Option<String>,
+}
 
-    let db_url = resolve_database_url(&cfg)?;
+fn default_upstream_port() -> u16 {
+    5432
+}
 
-    match cmd {
-        DbCommand::Sync => {
-            fs::create_dir_all("schema")?;
-            let schema_path = PathBuf::from("schema").join("schema.yaml");
-            
-            // Introspect database schema
-            let snapshot = cori_adapter_pg::introspect::introspect_schema_json(&db_url).await?;
-            
-            // Convert to YAML format
-            let yaml = serde_yaml::to_string(&snapshot)?;
-            fs::write(&schema_path, yaml)?;
-            println!("✔ Wrote schema definition: {}", schema_path.display());
+/// Configuration file structure for db commands.
+#[derive(Debug, Deserialize)]
+struct DbConfig {
+    upstream: UpstreamConfig,
+}
+
+/// Build database URL from upstream config.
+fn build_database_url(upstream: &UpstreamConfig) -> anyhow::Result<String> {
+    // First check for database_url_env
+    if let Some(env_var) = &upstream.database_url_env {
+        if let Ok(url) = env::var(env_var) {
+            return Ok(url);
         }
     }
 
-    Ok(())
+    // Check for direct database_url
+    if let Some(url) = &upstream.database_url {
+        return Ok(url.clone());
+    }
+
+    // Also check DATABASE_URL directly
+    if let Ok(url) = env::var("DATABASE_URL") {
+        return Ok(url);
+    }
+
+    // Build from individual components
+    let host = upstream.host.as_deref().unwrap_or("localhost");
+    let port = upstream.port;
+    let database = upstream.database.as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var"))?;
+    let username = upstream.username.as_deref().unwrap_or("postgres");
+    let password = upstream.password.as_deref().unwrap_or("");
+
+    Ok(format!(
+        "postgres://{}:{}@{}:{}/{}",
+        username, password, host, port, database
+    ))
 }
 
-// -----------------------------
-// config + shared IO helpers
-// -----------------------------
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct CoriConfig {
-    #[allow(dead_code)]
-    project: Option<String>,
-    adapter: Option<String>,
-    database_url_env: Option<String>,
-    environment: Option<String>,
-    #[allow(dead_code)]
-    max_affected_rows: Option<u64>,
-    #[allow(dead_code)]
-    preview_row_limit: Option<u32>,
-}
-
-fn load_cori_config_from_cwd() -> anyhow::Result<CoriConfig> {
-    let path = PathBuf::from("cori.yaml");
-    if !path.exists() {
+async fn run_db_sync(config_path: &Path) -> anyhow::Result<()> {
+    if !config_path.exists() {
         return Err(anyhow::anyhow!(
-            "cori.yaml not found in current directory. Run this inside a Cori project."
+            "Configuration file not found: {}. Run this inside a Cori project.",
+            config_path.display()
         ));
     }
-    let contents = fs::read_to_string(path)?;
-    let cfg: CoriConfig = serde_yaml::from_str(&contents)?;
-    Ok(cfg)
-}
 
-fn ensure_postgres_adapter(cfg: &CoriConfig) -> anyhow::Result<()> {
-    let adapter = cfg.adapter.as_deref().unwrap_or("postgres");
-    if adapter != "postgres" {
-        return Err(anyhow::anyhow!(
-            "Only adapter=postgres is supported right now (found '{}').",
-            adapter
-        ));
-    }
+    let contents = fs::read_to_string(config_path)?;
+    let cfg: DbConfig = serde_yaml::from_str(&contents)?;
+    let db_url = build_database_url(&cfg.upstream)?;
+
+    // Determine schema directory relative to config file
+    let config_dir = config_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let schema_dir = config_dir.join("schema");
+    
+    fs::create_dir_all(&schema_dir)?;
+    let schema_path = schema_dir.join("schema.yaml");
+    
+    // Introspect database schema
+    let snapshot = cori_adapter_pg::introspect::introspect_schema_json(&db_url).await?;
+    
+    // Convert to YAML format
+    let yaml = serde_yaml::to_string(&snapshot)?;
+    fs::write(&schema_path, yaml)?;
+    println!("✔ Wrote schema definition: {}", schema_path.display());
+
     Ok(())
-}
-
-fn resolve_database_url(cfg: &CoriConfig) -> anyhow::Result<String> {
-    let env_name = cfg
-        .database_url_env
-        .as_deref()
-        .unwrap_or("DATABASE_URL")
-        .to_string();
-
-    env::var(&env_name).map_err(|_| {
-        anyhow::anyhow!(
-            "Environment variable '{}' is not set. Export it with your DB URL.",
-            env_name
-        )
-    })
 }

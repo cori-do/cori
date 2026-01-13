@@ -466,7 +466,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cori"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "cori-adapter-pg"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "cori-audit"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "cori-biscuit"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "cori-core"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "cori-dashboard"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "cori-mcp"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-stream",

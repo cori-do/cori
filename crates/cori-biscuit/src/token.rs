@@ -57,13 +57,6 @@ impl TokenBuilder {
             }
         }
 
-        // Add blocked tables
-        for table in &claims.blocked_tables {
-            builder = builder
-                .fact(fact!("blocked_table({table})", table = table.clone()))
-                .map_err(|e| BiscuitError::TokenCreationFailed(e.to_string()))?;
-        }
-
         // Add max_rows if set
         if let Some(max_rows) = claims.max_rows_per_query {
             builder = builder
