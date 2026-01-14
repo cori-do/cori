@@ -49,6 +49,7 @@ bigdecimal = "0.4"
 # Internal crates
 cori-core = { path = "../cori-core" }
 cori-biscuit = { path = "../cori-biscuit" }
+cori-audit = { path = "../cori-audit" }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

@@ -11,6 +11,7 @@ use crate::protocol::*;
 use crate::schema::DatabaseSchema;
 use crate::tool_generator::ToolGenerator;
 use crate::tools::ToolRegistry;
+use cori_audit::AuditLogger;
 use cori_biscuit::PublicKey;
 use cori_core::config::mcp::{McpConfig, Transport};
 use cori_core::config::rules_definition::RulesDefinition;
@@ -34,6 +35,8 @@ pub struct McpServer {
     rules: Option<RulesDefinition>,
     /// Public key for token verification (required for HTTP transport).
     public_key: Option<PublicKey>,
+    /// Audit logger for tracking tool calls.
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl McpServer {
@@ -50,7 +53,20 @@ impl McpServer {
             pool: None,
             rules: None,
             public_key: None,
+            audit_logger: None,
         }
+    }
+
+    /// Set the audit logger.
+    pub fn with_audit_logger(mut self, logger: Arc<AuditLogger>) -> Self {
+        tracing::info!("Setting audit logger on MCP server");
+        self.audit_logger = Some(logger);
+        // Rebuild executor to include audit logger
+        if let Some(role) = &self.role {
+            tracing::info!("Rebuilding executor with audit logger");
+            self.executor = Some(self.build_executor(role));
+        }
+        self
     }
 
     /// Set the role definition for dynamic tool generation.
@@ -124,6 +140,12 @@ impl McpServer {
         }
         if let Some(schema) = &self.schema {
             executor = executor.with_schema(schema.clone());
+        }
+        if let Some(logger) = &self.audit_logger {
+            tracing::info!("Adding audit logger to executor");
+            executor = executor.with_audit_logger(logger.clone());
+        } else {
+            tracing::warn!("No audit logger available when building executor");
         }
         executor
     }
@@ -212,6 +234,7 @@ impl McpServer {
         let pool = self.pool.clone();
         let schema = self.schema.clone();
         let rules = self.rules.clone();
+        let audit_logger = self.audit_logger.clone();
 
         // Spawn request handler task
         tokio::spawn(async move {
@@ -242,6 +265,7 @@ impl McpServer {
                 temp_server.pool = pool.clone();
                 temp_server.rules = rules.clone();
                 temp_server.schema = schema.clone();
+                temp_server.audit_logger = audit_logger.clone();
 
                 if let Some(r) = &temp_server.role {
                     temp_server.executor = Some(temp_server.build_executor(r));

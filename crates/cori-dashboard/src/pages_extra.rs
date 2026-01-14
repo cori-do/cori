@@ -8,6 +8,21 @@ use cori_mcp::{ApprovalRequest, ApprovalStatus};
 use std::collections::HashMap;
 
 // =============================================================================
+// Pagination Types
+// =============================================================================
+
+/// Pagination information for list pages.
+#[derive(Debug, Clone)]
+pub struct PaginationInfo {
+    pub current_page: usize,
+    pub total_pages: usize,
+    pub total_count: usize,
+    pub page_size: usize,
+    pub has_prev: bool,
+    pub has_next: bool,
+}
+
+// =============================================================================
 // Tokens Page
 // =============================================================================
 
@@ -258,180 +273,455 @@ pub fn token_inspect_fragment(info: &crate::api_types::TokenInspectResponse) -> 
 // Audit Logs Page
 // =============================================================================
 
-pub fn audit_logs_page(events: &[AuditEvent], filters: &crate::api_types::AuditQueryParams) -> String {
-    let event_rows: String = events.iter().map(|e| {
-        let event_type_badge = match e.event_type {
-            AuditEventType::QueryExecuted => badge("Executed", "green"),
-            AuditEventType::QueryFailed => badge("Failed", "red"),
-            AuditEventType::AuthenticationFailed => badge("Auth Failed", "red"),
-            AuditEventType::AuthorizationDenied => badge("Denied", "orange"),
-            AuditEventType::ToolCalled => badge("Tool Call", "blue"),
-            AuditEventType::ApprovalRequired => badge("Pending", "yellow"),
-            AuditEventType::ActionApproved => badge("Approved", "green"),
-            AuditEventType::ActionRejected => badge("Rejected", "red"),
-            _ => badge(&format!("{:?}", e.event_type), "gray"),
-        };
+pub fn audit_logs_page(
+    events: &[AuditEvent],
+    filters: &crate::api_types::AuditQueryParams,
+    pagination: &PaginationInfo,
+) -> String {
+    let event_rows: String = events
+        .iter()
+        .map(|e| {
+            let event_type_badge = match e.event_type {
+                AuditEventType::QueryExecuted => badge("Executed", "green"),
+                AuditEventType::QueryFailed => badge("Failed", "red"),
+                AuditEventType::AuthenticationFailed => badge("Auth Failed", "red"),
+                AuditEventType::AuthorizationDenied => badge("Denied", "orange"),
+                AuditEventType::ToolCalled => badge("Tool Call", "blue"),
+                AuditEventType::ApprovalRequested => badge("Pending", "yellow"),
+                AuditEventType::Approved => badge("Approved", "green"),
+                AuditEventType::Denied => badge("Rejected", "red"),
+            };
 
-        format!(
-            r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer" 
-                    @click="selectedEvent = '{event_id}'"
+            format!(
+                r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer" 
+                    @click="sidePanelOpen = true"
                     hx-get="/api/audit/{event_id}" hx-target="#event-detail" hx-swap="innerHTML">
                 <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">{time}</td>
                 <td class="px-4 py-3">{event_type_badge}</td>
                 <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{tenant}</td>
                 <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{role}</td>
-                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 max-w-xs truncate font-mono">{query}</td>
+                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 max-w-xs truncate font-mono" title="{query_full}">{query}</td>
                 <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{duration}</td>
             </tr>"##,
-            event_id = e.event_id,
-            time = e.occurred_at.format("%H:%M:%S"),
-            event_type_badge = event_type_badge,
-            tenant = e.tenant_id.as_deref().unwrap_or("-"),
-            role = e.role.as_deref().unwrap_or("-"),
-            query = e.original_query.as_deref().unwrap_or(e.tool_name.as_deref().unwrap_or("-")),
-            duration = e.duration_ms.map(|d| format!("{}ms", d)).unwrap_or("-".to_string()),
+                event_id = e.event_id,
+                time = e.occurred_at.format("%Y-%m-%d %H:%M:%S"),
+                event_type_badge = event_type_badge,
+                tenant = html_escape(&e.tenant_id),
+                role = html_escape(&e.role),
+                query = html_escape(&truncate_str(e.sql.as_deref().unwrap_or(&e.action), 60)),
+                query_full = html_escape(e.sql.as_deref().unwrap_or(&e.action)),
+                duration = e
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "-".to_string()),
+            )
+        })
+        .collect();
+
+    // Build base query params for pagination links
+    let base_params = build_filter_params(filters);
+    let current_sort = filters.sort_by.as_deref().unwrap_or("occurred_at");
+    let current_dir = filters.sort_dir.as_deref().unwrap_or("desc");
+
+    // Generate sortable column headers
+    let sort_header = |field: &str, label: &str| -> String {
+        let is_current = current_sort == field;
+        let next_dir = if is_current && current_dir == "desc" {
+            "asc"
+        } else {
+            "desc"
+        };
+        let icon = if is_current {
+            if current_dir == "desc" {
+                r#"<i class="fas fa-sort-down ml-1"></i>"#
+            } else {
+                r#"<i class="fas fa-sort-up ml-1"></i>"#
+            }
+        } else {
+            r#"<i class="fas fa-sort ml-1 opacity-30"></i>"#
+        };
+
+        format!(
+            r##"<th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase cursor-pointer hover:text-gray-700 dark:hover:text-gray-200"
+                hx-get="/audit?{base_params}&sort_by={field}&sort_dir={next_dir}&page=1"
+                hx-target="body" hx-push-url="true">
+                {label}{icon}
+            </th>"##,
+            base_params = base_params,
+            field = field,
+            next_dir = next_dir,
+            label = label,
+            icon = icon
         )
-    }).collect();
+    };
+
+    // Pagination controls
+    let pagination_html = if pagination.total_pages > 1 {
+        let mut pages_html = String::new();
+
+        // Previous button
+        if pagination.has_prev {
+            pages_html.push_str(&format!(
+                r##"<a href="/audit?{base_params}&page={prev}&sort_by={sort}&sort_dir={dir}" 
+                    class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-l-lg hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <i class="fas fa-chevron-left"></i>
+                </a>"##,
+                base_params = base_params,
+                prev = pagination.current_page - 1,
+                sort = current_sort,
+                dir = current_dir
+            ));
+        } else {
+            pages_html.push_str(
+                r##"<span class="px-3 py-2 text-sm font-medium text-gray-400 dark:text-gray-600 bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-l-lg cursor-not-allowed">
+                    <i class="fas fa-chevron-left"></i>
+                </span>"##,
+            );
+        }
+
+        // Page numbers
+        let start_page = (pagination.current_page.saturating_sub(2)).max(1);
+        let end_page = (start_page + 4).min(pagination.total_pages);
+
+        if start_page > 1 {
+            pages_html.push_str(&format!(
+                r##"<a href="/audit?{base_params}&page=1&sort_by={sort}&sort_dir={dir}" 
+                    class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border-t border-b border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700">1</a>"##,
+                base_params = base_params,
+                sort = current_sort,
+                dir = current_dir
+            ));
+            if start_page > 2 {
+                pages_html.push_str(
+                    r##"<span class="px-3 py-2 text-sm text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 border-t border-b border-gray-300 dark:border-gray-600">...</span>"##,
+                );
+            }
+        }
+
+        for page in start_page..=end_page {
+            if page == pagination.current_page {
+                pages_html.push_str(&format!(
+                    r##"<span class="px-3 py-2 text-sm font-medium text-white bg-primary-600 border border-primary-600">{page}</span>"##,
+                    page = page
+                ));
+            } else {
+                pages_html.push_str(&format!(
+                    r##"<a href="/audit?{base_params}&page={page}&sort_by={sort}&sort_dir={dir}" 
+                        class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border-t border-b border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700">{page}</a>"##,
+                    base_params = base_params,
+                    page = page,
+                    sort = current_sort,
+                    dir = current_dir
+                ));
+            }
+        }
+
+        if end_page < pagination.total_pages {
+            if end_page < pagination.total_pages - 1 {
+                pages_html.push_str(
+                    r##"<span class="px-3 py-2 text-sm text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 border-t border-b border-gray-300 dark:border-gray-600">...</span>"##,
+                );
+            }
+            pages_html.push_str(&format!(
+                r##"<a href="/audit?{base_params}&page={last}&sort_by={sort}&sort_dir={dir}" 
+                    class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border-t border-b border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700">{last}</a>"##,
+                base_params = base_params,
+                last = pagination.total_pages,
+                sort = current_sort,
+                dir = current_dir
+            ));
+        }
+
+        // Next button
+        if pagination.has_next {
+            pages_html.push_str(&format!(
+                r##"<a href="/audit?{base_params}&page={next}&sort_by={sort}&sort_dir={dir}" 
+                    class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-r-lg hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <i class="fas fa-chevron-right"></i>
+                </a>"##,
+                base_params = base_params,
+                next = pagination.current_page + 1,
+                sort = current_sort,
+                dir = current_dir
+            ));
+        } else {
+            pages_html.push_str(
+                r##"<span class="px-3 py-2 text-sm font-medium text-gray-400 dark:text-gray-600 bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-r-lg cursor-not-allowed">
+                    <i class="fas fa-chevron-right"></i>
+                </span>"##,
+            );
+        }
+
+        format!(
+            r##"<div class="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
+                <div class="text-sm text-gray-600 dark:text-gray-400">
+                    Showing {start} - {end} of {total} events
+                </div>
+                <div class="flex">
+                    {pages_html}
+                </div>
+            </div>"##,
+            start = ((pagination.current_page - 1) * pagination.page_size) + 1,
+            end = (pagination.current_page * pagination.page_size).min(pagination.total_count),
+            total = pagination.total_count,
+            pages_html = pages_html
+        )
+    } else if pagination.total_count > 0 {
+        format!(
+            r##"<div class="px-4 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
+                Showing all {total} events
+            </div>"##,
+            total = pagination.total_count
+        )
+    } else {
+        String::new()
+    };
 
     let content = format!(
         r##"<div class="flex items-center justify-between mb-6">
             <div>
                 <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Audit Logs</h1>
-                <p class="text-gray-600 dark:text-gray-400">Query execution history and events</p>
+                <p class="text-gray-600 dark:text-gray-400">Query execution history and events ({total_count} total)</p>
             </div>
-            <button hx-get="/api/audit" hx-target="#audit-table" hx-swap="innerHTML" 
-                    class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
+            <a href="/audit" class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
                 <i class="fas fa-sync-alt"></i>
                 <span>Refresh</span>
-            </button>
+            </a>
         </div>
         
-        <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
-            <div class="p-4 border-b border-gray-200 dark:border-gray-700">
-                <form hx-get="/api/audit" hx-target="#audit-table" hx-swap="innerHTML" class="flex flex-wrap gap-4">
-                    <input type="text" name="tenant_id" placeholder="Filter by tenant..." value="{tenant_filter}"
-                           class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm">
-                    <input type="text" name="role" placeholder="Filter by role..." value="{role_filter}"
-                           class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm">
-                    <select name="event_type" class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm">
-                        <option value="">All event types</option>
-                        <option value="query_executed">Query Executed</option>
-                        <option value="query_failed">Query Failed</option>
-                        <option value="authentication_failed">Auth Failed</option>
-                        <option value="authorization_denied">Authorization Denied</option>
-                        <option value="tool_called">Tool Called</option>
-                    </select>
-                    <button type="submit" class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium">
-                        <i class="fas fa-filter mr-2"></i>Filter
-                    </button>
-                </form>
+        <div class="relative" x-data="{{ sidePanelOpen: false }}">
+            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
+                <div class="p-4 border-b border-gray-200 dark:border-gray-700">
+                    <form action="/audit" method="get" class="flex flex-wrap gap-4">
+                        <input type="text" name="tenant_id" placeholder="Filter by tenant..." value="{tenant_filter}"
+                               class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white">
+                        <input type="text" name="role" placeholder="Filter by role..." value="{role_filter}"
+                               class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white">
+                        <select name="event_type" class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white">
+                            <option value="">All event types</option>
+                            <option value="query_executed" {sel_executed}>Query Executed</option>
+                            <option value="query_failed" {sel_failed}>Query Failed</option>
+                            <option value="tool_called" {sel_tool}>Tool Called</option>
+                            <option value="approval_requested" {sel_approval}>Approval Requested</option>
+                            <option value="approved" {sel_approved}>Approved</option>
+                            <option value="denied" {sel_denied}>Denied</option>
+                            <option value="authentication_failed" {sel_auth_fail}>Auth Failed</option>
+                            <option value="authorization_denied" {sel_authz_denied}>Authorization Denied</option>
+                        </select>
+                        <input type="hidden" name="sort_by" value="{sort_by}">
+                        <input type="hidden" name="sort_dir" value="{sort_dir}">
+                        <button type="submit" class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium">
+                            <i class="fas fa-filter mr-2"></i>Filter
+                        </button>
+                        <a href="/audit" class="px-4 py-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium">
+                            Clear
+                        </a>
+                    </form>
+                </div>
+                
+                <div id="audit-table" class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50 dark:bg-gray-900">
+                            <tr>
+                                {th_time}
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Event</th>
+                                {th_tenant}
+                                {th_role}
+                                {th_action}
+                                {th_duration}
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                            {event_rows}
+                        </tbody>
+                    </table>
+                    
+                    {empty_state_html}
+                </div>
+                
+                {pagination_html}
             </div>
             
-            <div id="audit-table" class="overflow-x-auto" x-data="{{ selectedEvent: null }}">
-                <table class="w-full">
-                    <thead class="bg-gray-50 dark:bg-gray-900">
-                        <tr>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Time</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Event</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Tenant</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Role</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Query/Tool</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Duration</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
-                        {event_rows}
-                    </tbody>
-                </table>
-                
-                {empty_state}
+            <!-- Side Panel -->
+            <div x-show="sidePanelOpen" 
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="transition ease-in duration-200"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 @click="sidePanelOpen = false"
+                 class="fixed inset-0 bg-gray-900/50 z-40"
+                 style="display: none;">
             </div>
-        </div>
-        
-        <div id="event-detail"></div>"##,
-        tenant_filter = filters.tenant_id.as_deref().unwrap_or(""),
-        role_filter = filters.role.as_deref().unwrap_or(""),
+            
+            <div x-show="sidePanelOpen"
+                 x-transition:enter="transition ease-out duration-300 transform"
+                 x-transition:enter-start="translate-x-full"
+                 x-transition:enter-end="translate-x-0"
+                 x-transition:leave="transition ease-in duration-200 transform"
+                 x-transition:leave-start="translate-x-0"
+                 x-transition:leave-end="translate-x-full"
+                 class="fixed right-0 top-0 h-full w-full md:w-2/3 lg:w-1/2 bg-white dark:bg-gray-800 shadow-2xl z-50 overflow-y-auto"
+                 style="display: none;"
+                 @click.away="sidePanelOpen = false">
+                <div id="event-detail" class="p-6"></div>
+            </div>
+        </div>"##,
+        total_count = pagination.total_count,
+        tenant_filter = html_escape(filters.tenant_id.as_deref().unwrap_or("")),
+        role_filter = html_escape(filters.role.as_deref().unwrap_or("")),
+        sort_by = current_sort,
+        sort_dir = current_dir,
+        sel_executed = selected_if(filters.event_type.as_deref(), "query_executed"),
+        sel_failed = selected_if(filters.event_type.as_deref(), "query_failed"),
+        sel_tool = selected_if(filters.event_type.as_deref(), "tool_called"),
+        sel_approval = selected_if(filters.event_type.as_deref(), "approval_requested"),
+        sel_approved = selected_if(filters.event_type.as_deref(), "approved"),
+        sel_denied = selected_if(filters.event_type.as_deref(), "denied"),
+        sel_auth_fail = selected_if(filters.event_type.as_deref(), "authentication_failed"),
+        sel_authz_denied = selected_if(filters.event_type.as_deref(), "authorization_denied"),
+        th_time = sort_header("occurred_at", "Time"),
+        th_tenant = sort_header("tenant_id", "Tenant"),
+        th_role = sort_header("role", "Role"),
+        th_action = sort_header("action", "Action/Query"),
+        th_duration = sort_header("duration_ms", "Duration"),
         event_rows = event_rows,
-        empty_state = if events.is_empty() {
+        empty_state_html = if events.is_empty() {
             r##"<div class="text-center py-12">
                 <i class="fas fa-scroll text-4xl text-gray-400 dark:text-gray-600 mb-4"></i>
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white">No audit events</h3>
                 <p class="text-gray-500 dark:text-gray-400">Events will appear here as queries are executed.</p>
             </div>"##
-        } else { "" },
+        } else {
+            ""
+        },
+        pagination_html = pagination_html,
     );
 
     layout("Audit Logs", &content)
 }
 
+/// Build query params string from filters (excluding pagination/sort).
+fn build_filter_params(filters: &crate::api_types::AuditQueryParams) -> String {
+    let mut params = Vec::new();
+    if let Some(ref t) = filters.tenant_id {
+        if !t.is_empty() {
+            params.push(format!("tenant_id={}", urlencoding::encode(t)));
+        }
+    }
+    if let Some(ref r) = filters.role {
+        if !r.is_empty() {
+            params.push(format!("role={}", urlencoding::encode(r)));
+        }
+    }
+    if let Some(ref e) = filters.event_type {
+        if !e.is_empty() {
+            params.push(format!("event_type={}", urlencoding::encode(e)));
+        }
+    }
+    params.join("&")
+}
+
+/// Return "selected" if value matches target.
+fn selected_if(value: Option<&str>, target: &str) -> &'static str {
+    if value == Some(target) {
+        "selected"
+    } else {
+        ""
+    }
+}
+
+/// HTML escape a string.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Truncate a string to max length, adding ellipsis if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
 /// Audit event detail HTML fragment.
 pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
-    let query_section = event.original_query.as_ref().map(|q| {
-        let rewritten = event.rewritten_query.as_deref().unwrap_or(q);
+    let query_section = event.sql.as_ref().map(|q| {
         format!(
-            r##"<div class="space-y-4">
-                <div>
-                    <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Original Query</h4>
-                    <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg text-sm overflow-x-auto"><code>{original}</code></pre>
-                </div>
-                <div>
-                    <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Rewritten Query (with RLS)</h4>
-                    <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg text-sm overflow-x-auto"><code>{rewritten}</code></pre>
-                </div>
+            r##"<div class="mb-6">
+                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">SQL Query</h4>
+                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg text-sm overflow-x-auto"><code>{sql}</code></pre>
             </div>"##,
-            original = q.replace('<', "&lt;").replace('>', "&gt;"),
-            rewritten = rewritten.replace('<', "&lt;").replace('>', "&gt;"),
+            sql = q.replace('<', "&lt;").replace('>', "&gt;"),
         )
     }).unwrap_or_default();
 
     format!(
-        r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Event Details</h3>
-                <button onclick="document.getElementById('event-detail').innerHTML = ''" class="text-gray-400 hover:text-gray-600">
-                    <i class="fas fa-times"></i>
+        r##"<div class="h-full flex flex-col">
+            <div class="flex items-center justify-between mb-6 pb-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-xl font-semibold text-gray-900 dark:text-white">Event Details</h3>
+                <button @click="sidePanelOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-2">
+                    <i class="fas fa-times text-xl"></i>
                 </button>
             </div>
             
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div>
-                    <span class="text-sm text-gray-500 dark:text-gray-400">Event ID</span>
-                    <p class="font-mono text-sm text-gray-900 dark:text-white">{event_id}</p>
+            <div class="flex-1 overflow-y-auto">
+                <div class="grid grid-cols-2 gap-4 mb-6">
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Event ID</span>
+                        <p class="font-mono text-sm text-gray-900 dark:text-white break-all">{event_id}</p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Type</span>
+                        <p class="font-medium text-gray-900 dark:text-white">{event_type:?}</p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Tenant</span>
+                        <p class="text-gray-900 dark:text-white">{tenant_id}</p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Role</span>
+                        <p class="text-gray-900 dark:text-white">{role}</p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Occurred At</span>
+                        <p class="text-gray-900 dark:text-white">{occurred_at}</p>
+                    </div>
+                    <div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Duration</span>
+                        <p class="text-gray-900 dark:text-white">{duration}</p>
+                    </div>
                 </div>
-                <div>
-                    <span class="text-sm text-gray-500 dark:text-gray-400">Type</span>
-                    <p class="font-medium text-gray-900 dark:text-white">{event_type:?}</p>
-                </div>
-                <div>
-                    <span class="text-sm text-gray-500 dark:text-gray-400">Occurred At</span>
-                    <p class="text-gray-900 dark:text-white">{occurred_at}</p>
-                </div>
-                <div>
-                    <span class="text-sm text-gray-500 dark:text-gray-400">Duration</span>
-                    <p class="text-gray-900 dark:text-white">{duration}</p>
-                </div>
+                
+                {query_section}
+                
+                {error_section}
+                
+                {meta_section}
             </div>
-            
-            {query_section}
-            
-            {error_section}
-            
-            {meta_section}
         </div>"##,
         event_id = event.event_id,
         event_type = event.event_type,
+        tenant_id = html_escape(&event.tenant_id),
+        role = html_escape(&event.role),
         occurred_at = event.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
         duration = event.duration_ms.map(|d| format!("{}ms", d)).unwrap_or("-".to_string()),
         query_section = query_section,
         error_section = event.error.as_ref().map(|e| format!(
-            r#"<div class="mt-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+            r#"<div class="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
                 <h4 class="text-sm font-medium text-red-700 dark:text-red-300 mb-1">Error</h4>
                 <p class="text-red-600 dark:text-red-400 text-sm">{}</p>
-            </div>"#, e
+            </div>"#, html_escape(e)
         )).unwrap_or_default(),
         meta_section = if !event.meta.is_null() {
             format!(
-                r#"<div class="mt-4">
+                r#"<div class="mb-6">
                     <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Metadata</h4>
                     <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg text-sm overflow-x-auto"><code>{}</code></pre>
                 </div>"#,

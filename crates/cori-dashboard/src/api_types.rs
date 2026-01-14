@@ -198,7 +198,7 @@ pub struct TokenInspectResponse {
 // =============================================================================
 
 /// Query parameters for audit logs.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AuditQueryParams {
     pub tenant_id: Option<String>,
     pub role: Option<String>,
@@ -207,6 +207,12 @@ pub struct AuditQueryParams {
     pub end_time: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Page number (1-indexed, alternative to offset).
+    pub page: Option<usize>,
+    /// Sort by field (occurred_at, role, tenant_id, action, duration_ms).
+    pub sort_by: Option<String>,
+    /// Sort direction: "asc" or "desc" (default: desc).
+    pub sort_dir: Option<String>,
 }
 
 /// Audit event response.

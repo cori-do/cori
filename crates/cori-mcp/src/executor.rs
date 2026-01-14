@@ -6,11 +6,13 @@
 //! - Dry-run execution
 //! - Constraint validation
 //! - Result formatting
+//! - Audit logging
 
 use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
 use crate::schema::DatabaseSchema;
 use crate::validator::{OperationType, ToolValidator, ValidationRequest};
+use cori_audit::AuditLogger;
 use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
 use cori_core::RoleDefinition;
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,7 @@ use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +35,9 @@ pub struct ExecutionResult {
     /// Error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// SQL query that was executed (for audit logging).
+    #[serde(skip)]
+    pub executed_sql: Option<String>,
 }
 
 impl ExecutionResult {
@@ -42,6 +48,18 @@ impl ExecutionResult {
             content: vec![ToolContent::Json { json: value }],
             is_dry_run: false,
             error: None,
+            executed_sql: None,
+        }
+    }
+
+    /// Create a successful result with JSON content and SQL.
+    pub fn success_with_sql(value: Value, sql: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            content: vec![ToolContent::Json { json: value }],
+            is_dry_run: false,
+            error: None,
+            executed_sql: Some(sql.into()),
         }
     }
 
@@ -54,6 +72,7 @@ impl ExecutionResult {
             }],
             is_dry_run: true,
             error: None,
+            executed_sql: None,
         }
     }
 
@@ -65,6 +84,7 @@ impl ExecutionResult {
             content: vec![ToolContent::Text { text: msg.clone() }],
             is_dry_run: false,
             error: Some(msg),
+            executed_sql: None,
         }
     }
 
@@ -77,6 +97,7 @@ impl ExecutionResult {
             }],
             is_dry_run: false,
             error: None,
+            executed_sql: None,
         }
     }
 }
@@ -104,6 +125,8 @@ pub struct ToolExecutor {
     rules: Option<RulesDefinition>,
     /// Database schema for primary key lookup.
     schema: Option<DatabaseSchema>,
+    /// Audit logger for tracking tool calls and queries.
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl ToolExecutor {
@@ -115,7 +138,14 @@ impl ToolExecutor {
             pool: None,
             rules: None,
             schema: None,
+            audit_logger: None,
         }
+    }
+
+    /// Set the audit logger.
+    pub fn with_audit_logger(mut self, logger: Arc<AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
     }
 
     /// Set the database connection pool.
@@ -207,6 +237,8 @@ impl ToolExecutor {
         options: &CallToolOptions,
         context: &ExecutionContext,
     ) -> ExecutionResult {
+        let start_time = Instant::now();
+
         // 0. Parse tool name to determine operation and table
         let operation = self.parse_tool_operation(&tool.name);
 
@@ -248,6 +280,12 @@ impl ToolExecutor {
 
         // 2. Validate arguments against tool schema constraints
         if let Err(e) = self.validate_arguments(tool, &arguments) {
+            // Log authorization denied
+            if let Some(logger) = &self.audit_logger {
+                let _ = logger
+                    .log_authorization_denied(&context.role, &context.tenant_id, &tool.name, &e)
+                    .await;
+            }
             return ExecutionResult::error(e);
         }
 
@@ -268,11 +306,23 @@ impl ToolExecutor {
                 &context.role,
             );
 
+            // Log approval request
+            if let Some(logger) = &self.audit_logger {
+                let _ = logger
+                    .log_approval_requested(
+                        &context.role,
+                        &context.tenant_id,
+                        &tool.name,
+                        &request.id,
+                    )
+                    .await;
+            }
+
             return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
         }
 
         // 4. Execute based on operation type
-        match operation {
+        let result = match operation {
             ToolOperation::Get { table } => {
                 self.execute_get(&table, &arguments, options, context).await
             }
@@ -295,7 +345,41 @@ impl ToolExecutor {
                 self.execute_custom(&name, &arguments, options, context)
                     .await
             }
+        };
+
+        // Log execution result
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        if let Some(logger) = &self.audit_logger {
+            if result.success {
+                // Extract row count from result if available
+                let row_count = result
+                    .content
+                    .first()
+                    .and_then(|c| match c {
+                        ToolContent::Json { json } => json.get("count").and_then(|v| v.as_u64()),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+
+                let sql = result.executed_sql.as_deref().unwrap_or("");
+                let _ = logger
+                    .log_query_executed(
+                        &context.role,
+                        &context.tenant_id,
+                        &tool.name,
+                        sql,
+                        row_count,
+                        duration_ms,
+                    )
+                    .await;
+            } else if let Some(error) = &result.error {
+                let _ = logger
+                    .log_query_failed(&context.role, &context.tenant_id, &tool.name, None, error)
+                    .await;
+            }
         }
+
+        result
     }
 
     /// Validate arguments against tool constraints.
@@ -531,12 +615,12 @@ impl ToolExecutor {
         match result {
             Ok(Some(row)) => {
                 let data = row_to_json(&row, &columns);
-                ExecutionResult::success_json(data)
+                ExecutionResult::success_with_sql(data, &query)
             }
-            Ok(None) => ExecutionResult::success_json(json!({
+            Ok(None) => ExecutionResult::success_with_sql(json!({
                 "data": null,
                 "message": "Record not found"
-            })),
+            }), &query),
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }
@@ -655,12 +739,12 @@ impl ToolExecutor {
         match result {
             Ok(rows) => {
                 let data: Vec<Value> = rows.iter().map(|r| row_to_json(r, &columns)).collect();
-                ExecutionResult::success_json(json!({
+                ExecutionResult::success_with_sql(json!({
                     "data": data,
                     "count": data.len(),
                     "limit": effective_limit,
                     "offset": offset
-                }))
+                }), &query)
             }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -801,10 +885,10 @@ impl ToolExecutor {
         match sqlx::query(&query).fetch_one(pool).await {
             Ok(row) => {
                 let data = row_to_json(&row, &[]);
-                ExecutionResult::success_json(json!({
+                ExecutionResult::success_with_sql(json!({
                     "data": data,
                     "message": "Record created successfully"
-                }))
+                }), &query)
             }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -963,10 +1047,10 @@ impl ToolExecutor {
         match sqlx::query(&query).fetch_optional(pool).await {
             Ok(Some(row)) => {
                 let data = row_to_json(&row, &[]);
-                ExecutionResult::success_json(json!({
+                ExecutionResult::success_with_sql(json!({
                     "data": data,
                     "message": "Record updated successfully"
-                }))
+                }), &query)
             }
             Ok(None) => ExecutionResult::error("Record not found or access denied"),
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
@@ -1043,10 +1127,10 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_optional(pool).await
         {
-            Ok(Some(_)) => ExecutionResult::success_json(json!({
+            Ok(Some(_)) => ExecutionResult::success_with_sql(json!({
                 "message": "Record deleted successfully",
                 "id": id_value
-            })),
+            }), &query),
             Ok(None) => ExecutionResult::error("Record not found or access denied"),
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }

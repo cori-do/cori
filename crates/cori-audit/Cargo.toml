@@ -32,3 +32,5 @@ async-trait.workspace = true
 # Internal crates
 cori-core = { path = "../cori-core" }
 
+[dev-dependencies]
+tempfile = "3"
