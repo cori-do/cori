@@ -48,4 +48,22 @@ pub struct ValidationRequest<'a> {
     pub role_name: &'a str,
     /// Optional: current row values for update validation (old.* conditions).
     pub current_row: Option<&'a Value>,
+    /// The primary key column names for the table (supports composite keys).
+    /// Returns empty vector if not provided.
+    pub primary_key_columns: Option<Vec<&'a str>>,
+}
+
+impl<'a> ValidationRequest<'a> {
+    /// Get the primary key column names. Returns empty vector if not provided.
+    pub fn pk_columns(&self) -> Vec<&str> {
+        self.primary_key_columns
+            .as_ref()
+            .map(|cols| cols.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Check if a column is one of the primary key columns.
+    pub fn is_pk_column(&self, column: &str) -> bool {
+        self.pk_columns().contains(&column)
+    }
 }

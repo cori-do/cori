@@ -98,14 +98,15 @@ impl ConstraintValidator {
         arguments: &Value,
         current_row: Option<&Value>,
         is_tenant_column: impl Fn(&str) -> bool,
+        pk_columns: &[&str],
     ) -> Result<(), ValidationError> {
         let args = arguments.as_object();
 
         // Validate each field being updated
         if let Some(obj) = args {
             for (key, value) in obj {
-                // Skip 'id' field
-                if key == "id" {
+                // Skip primary key columns
+                if pk_columns.contains(&key.as_str()) {
                     continue;
                 }
 
@@ -163,12 +164,14 @@ impl ConstraintValidator {
         &self,
         perms: &TablePermissions,
         arguments: &Value,
+        pk_columns: &[&str],
     ) -> Vec<String> {
         let mut approval_fields = Vec::new();
 
         if let Some(obj) = arguments.as_object() {
             for key in obj.keys() {
-                if key == "id" {
+                // Skip primary key columns
+                if pk_columns.contains(&key.as_str()) {
                     continue;
                 }
                 if let Some(constraints) = perms.updatable.get_constraints(key) {

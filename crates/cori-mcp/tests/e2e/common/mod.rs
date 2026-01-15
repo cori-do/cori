@@ -17,6 +17,7 @@ use cori_core::config::rules_definition::{
 use cori_mcp::approval::ApprovalManager;
 use cori_mcp::executor::{ExecutionContext, ToolExecutor};
 use cori_mcp::protocol::{ToolContent, ToolDefinition};
+use cori_mcp::schema::{ColumnSchema, DatabaseSchema, TableSchema};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -153,6 +154,7 @@ impl TestContext {
         ToolExecutor::new(role, approval_manager)
             .with_pool(self.pool.clone())
             .with_rules(rules)
+            .with_schema(create_test_schema())
     }
 
     /// Create an executor with the default support agent role
@@ -212,16 +214,45 @@ pub fn assert_failure(result: &cori_mcp::executor::ExecutionResult, msg: &str) {
 // TOOL DEFINITION BUILDERS
 // =============================================================================
 
+/// Get the primary key column name for a table (e.g., Customer -> customer_id)
+fn pk_column_for(entity: &str) -> String {
+    // Convert entity name to lowercase and singularize to get PK column name
+    // e.g., "Customer" -> "customer" -> "customer_id"
+    // e.g., "Customers" -> "customers" -> "customer" -> "customer_id"
+    let lower = entity.to_lowercase();
+    format!("{}_id", singularize(&lower))
+}
+
+/// Singularize a table name (e.g., customers -> customer)
+fn singularize(s: &str) -> String {
+    if s.ends_with("ies") {
+        format!("{}y", &s[..s.len() - 3])
+    } else if s.ends_with("es") {
+        // Handle cases like "addresses" -> "address"
+        let base = &s[..s.len() - 2];
+        if base.ends_with("ss") || base.ends_with("ch") || base.ends_with("sh") || base.ends_with("x") {
+            base.to_string()
+        } else {
+            s[..s.len() - 1].to_string()
+        }
+    } else if s.ends_with('s') && s.len() > 1 {
+        s[..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Create a GET tool definition for a table
-pub fn get_tool(table: &str) -> ToolDefinition {
-    let name = format!("get{}", capitalize_first(table));
+pub fn get_tool(entity: &str) -> ToolDefinition {
+    let name = format!("get{}", capitalize_first(entity));
+    let pk_col = pk_column_for(entity);
     ToolDefinition {
         name,
-        description: Some(format!("Get {} by ID", table)),
+        description: Some(format!("Get {} by primary key", entity)),
         input_schema: json!({
             "type": "object",
-            "properties": { "id": { "type": "integer" } },
-            "required": ["id"]
+            "properties": { pk_col.clone(): { "type": "integer" } },
+            "required": [pk_col]
         }),
         annotations: None,
     }
@@ -259,30 +290,32 @@ pub fn create_tool(table: &str, properties: Value) -> ToolDefinition {
 }
 
 /// Create an UPDATE tool definition for a table
-pub fn update_tool(table: &str, properties: Value) -> ToolDefinition {
-    let name = format!("update{}", capitalize_first(table));
+pub fn update_tool(entity: &str, properties: Value) -> ToolDefinition {
+    let name = format!("update{}", capitalize_first(entity));
+    let pk_col = pk_column_for(entity);
     ToolDefinition {
         name,
-        description: Some(format!("Update {}", table)),
+        description: Some(format!("Update {}", entity)),
         input_schema: json!({
             "type": "object",
             "properties": properties,
-            "required": ["id"]
+            "required": [pk_col]
         }),
         annotations: None,
     }
 }
 
 /// Create a DELETE tool definition for a table
-pub fn delete_tool(table: &str) -> ToolDefinition {
-    let name = format!("delete{}", capitalize_first(table));
+pub fn delete_tool(entity: &str) -> ToolDefinition {
+    let name = format!("delete{}", capitalize_first(entity));
+    let pk_col = pk_column_for(entity);
     ToolDefinition {
         name,
-        description: Some(format!("Delete {}", table)),
+        description: Some(format!("Delete {}", entity)),
         input_schema: json!({
             "type": "object",
-            "properties": { "id": { "type": "integer" } },
-            "required": ["id"]
+            "properties": { pk_col.clone(): { "type": "integer" } },
+            "required": [pk_col]
         }),
         annotations: None,
     }
@@ -735,4 +768,196 @@ pub fn create_role_with_approval_columns() -> RoleDefinition {
         approvals: None,
         tables,
     }
+}
+
+// =============================================================================
+// DATABASE SCHEMA FOR E2E TESTS
+// =============================================================================
+
+/// Create the database schema for E2E tests.
+/// This maps to the demo schema.sql tables.
+pub fn create_test_schema() -> DatabaseSchema {
+    let mut schema = DatabaseSchema::new();
+
+    // Organizations table
+    let mut organizations = TableSchema::new("organizations");
+    organizations.add_column(ColumnSchema::new("organization_id", "integer"));
+    organizations.add_column(ColumnSchema::new("name", "varchar"));
+    organizations.add_column(ColumnSchema::new("slug", "varchar"));
+    organizations.add_column(ColumnSchema::new("plan", "varchar"));
+    organizations.primary_key.push("organization_id".to_string());
+    schema.add_table(organizations);
+
+    // Customers table
+    let mut customers = TableSchema::new("customers");
+    customers.add_column(ColumnSchema::new("customer_id", "integer"));
+    customers.add_column(ColumnSchema::new("organization_id", "integer"));
+    customers.add_column(ColumnSchema::new("first_name", "varchar"));
+    customers.add_column(ColumnSchema::new("last_name", "varchar"));
+    customers.add_column(ColumnSchema::new("email", "varchar"));
+    customers.add_column(ColumnSchema::new("phone", "varchar"));
+    customers.add_column(ColumnSchema::new("company", "varchar"));
+    customers.add_column(ColumnSchema::new("status", "varchar"));
+    customers.add_column(ColumnSchema::new("notes", "text"));
+    customers.add_column(ColumnSchema::new("lifetime_value", "numeric"));
+    customers.add_column(ColumnSchema::new("created_at", "timestamp"));
+    customers.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    customers.primary_key.push("customer_id".to_string());
+    schema.add_table(customers);
+
+    // Orders table
+    let mut orders = TableSchema::new("orders");
+    orders.add_column(ColumnSchema::new("order_id", "integer"));
+    orders.add_column(ColumnSchema::new("organization_id", "integer"));
+    orders.add_column(ColumnSchema::new("customer_id", "integer"));
+    orders.add_column(ColumnSchema::new("order_number", "varchar"));
+    orders.add_column(ColumnSchema::new("status", "varchar"));
+    orders.add_column(ColumnSchema::new("subtotal", "numeric"));
+    orders.add_column(ColumnSchema::new("total_amount", "numeric"));
+    orders.add_column(ColumnSchema::new("shipping_cost", "numeric"));
+    orders.add_column(ColumnSchema::new("tax_amount", "numeric"));
+    orders.add_column(ColumnSchema::new("discount_amount", "numeric"));
+    orders.add_column(ColumnSchema::new("order_date", "date"));
+    orders.add_column(ColumnSchema::new("created_at", "timestamp"));
+    orders.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    orders.primary_key.push("order_id".to_string());
+    schema.add_table(orders);
+
+    // Tickets table
+    let mut tickets = TableSchema::new("tickets");
+    tickets.add_column(ColumnSchema::new("ticket_id", "integer"));
+    tickets.add_column(ColumnSchema::new("organization_id", "integer"));
+    tickets.add_column(ColumnSchema::new("customer_id", "integer"));
+    tickets.add_column(ColumnSchema::new("ticket_number", "varchar"));
+    tickets.add_column(ColumnSchema::new("subject", "varchar"));
+    tickets.add_column(ColumnSchema::new("description", "text"));
+    tickets.add_column(ColumnSchema::new("status", "varchar"));
+    tickets.add_column(ColumnSchema::new("priority", "varchar"));
+    tickets.add_column(ColumnSchema::new("category", "varchar"));
+    tickets.add_column(ColumnSchema::new("assigned_to", "integer"));
+    tickets.add_column(ColumnSchema::new("created_at", "timestamp"));
+    tickets.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    tickets.primary_key.push("ticket_id".to_string());
+    schema.add_table(tickets);
+
+    // Products table
+    let mut products = TableSchema::new("products");
+    products.add_column(ColumnSchema::new("product_id", "integer"));
+    products.add_column(ColumnSchema::new("organization_id", "integer"));
+    products.add_column(ColumnSchema::new("name", "varchar"));
+    products.add_column(ColumnSchema::new("description", "text"));
+    products.add_column(ColumnSchema::new("sku", "varchar"));
+    products.add_column(ColumnSchema::new("price", "numeric"));
+    products.add_column(ColumnSchema::new("cost", "numeric"));
+    products.add_column(ColumnSchema::new("category", "varchar"));
+    products.add_column(ColumnSchema::new("stock_quantity", "integer"));
+    products.add_column(ColumnSchema::new("is_active", "boolean"));
+    products.add_column(ColumnSchema::new("created_at", "timestamp"));
+    products.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    products.primary_key.push("product_id".to_string());
+    schema.add_table(products);
+
+    // Users table
+    let mut users = TableSchema::new("users");
+    users.add_column(ColumnSchema::new("user_id", "integer"));
+    users.add_column(ColumnSchema::new("organization_id", "integer"));
+    users.add_column(ColumnSchema::new("username", "varchar"));
+    users.add_column(ColumnSchema::new("email", "varchar"));
+    users.add_column(ColumnSchema::new("password_hash", "varchar"));
+    users.add_column(ColumnSchema::new("first_name", "varchar"));
+    users.add_column(ColumnSchema::new("last_name", "varchar"));
+    users.add_column(ColumnSchema::new("role", "varchar"));
+    users.add_column(ColumnSchema::new("is_active", "boolean"));
+    users.add_column(ColumnSchema::new("last_login_at", "timestamp"));
+    users.add_column(ColumnSchema::new("created_at", "timestamp"));
+    users.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    users.primary_key.push("user_id".to_string());
+    schema.add_table(users);
+
+    // Contacts table
+    let mut contacts = TableSchema::new("contacts");
+    contacts.add_column(ColumnSchema::new("contact_id", "integer"));
+    contacts.add_column(ColumnSchema::new("organization_id", "integer"));
+    contacts.add_column(ColumnSchema::new("customer_id", "integer"));
+    contacts.add_column(ColumnSchema::new("first_name", "varchar"));
+    contacts.add_column(ColumnSchema::new("last_name", "varchar"));
+    contacts.add_column(ColumnSchema::new("position", "varchar"));
+    contacts.add_column(ColumnSchema::new("email", "varchar"));
+    contacts.add_column(ColumnSchema::new("phone", "varchar"));
+    contacts.add_column(ColumnSchema::new("is_primary", "boolean"));
+    contacts.add_column(ColumnSchema::new("created_at", "timestamp"));
+    contacts.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    contacts.primary_key.push("contact_id".to_string());
+    schema.add_table(contacts);
+
+    // Addresses table
+    let mut addresses = TableSchema::new("addresses");
+    addresses.add_column(ColumnSchema::new("address_id", "integer"));
+    addresses.add_column(ColumnSchema::new("organization_id", "integer"));
+    addresses.add_column(ColumnSchema::new("customer_id", "integer"));
+    addresses.add_column(ColumnSchema::new("street", "varchar"));
+    addresses.add_column(ColumnSchema::new("city", "varchar"));
+    addresses.add_column(ColumnSchema::new("state", "varchar"));
+    addresses.add_column(ColumnSchema::new("zip", "varchar"));
+    addresses.add_column(ColumnSchema::new("country", "varchar"));
+    addresses.add_column(ColumnSchema::new("is_billing", "boolean"));
+    addresses.add_column(ColumnSchema::new("is_shipping", "boolean"));
+    addresses.add_column(ColumnSchema::new("created_at", "timestamp"));
+    addresses.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    addresses.primary_key.push("address_id".to_string());
+    schema.add_table(addresses);
+
+    // Opportunities table
+    let mut opportunities = TableSchema::new("opportunities");
+    opportunities.add_column(ColumnSchema::new("opportunity_id", "integer"));
+    opportunities.add_column(ColumnSchema::new("organization_id", "integer"));
+    opportunities.add_column(ColumnSchema::new("customer_id", "integer"));
+    opportunities.add_column(ColumnSchema::new("name", "varchar"));
+    opportunities.add_column(ColumnSchema::new("value", "numeric"));
+    opportunities.add_column(ColumnSchema::new("probability", "integer"));
+    opportunities.add_column(ColumnSchema::new("stage", "varchar"));
+    opportunities.add_column(ColumnSchema::new("expected_close_date", "date"));
+    opportunities.add_column(ColumnSchema::new("assigned_to", "integer"));
+    opportunities.add_column(ColumnSchema::new("source", "varchar"));
+    opportunities.add_column(ColumnSchema::new("notes", "text"));
+    opportunities.add_column(ColumnSchema::new("won_at", "timestamp"));
+    opportunities.add_column(ColumnSchema::new("lost_at", "timestamp"));
+    opportunities.add_column(ColumnSchema::new("lost_reason", "varchar"));
+    opportunities.add_column(ColumnSchema::new("created_at", "timestamp"));
+    opportunities.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    opportunities.primary_key.push("opportunity_id".to_string());
+    schema.add_table(opportunities);
+
+    // Invoices table
+    let mut invoices = TableSchema::new("invoices");
+    invoices.add_column(ColumnSchema::new("invoice_id", "integer"));
+    invoices.add_column(ColumnSchema::new("organization_id", "integer"));
+    invoices.add_column(ColumnSchema::new("order_id", "integer"));
+    invoices.add_column(ColumnSchema::new("invoice_number", "varchar"));
+    invoices.add_column(ColumnSchema::new("invoice_date", "date"));
+    invoices.add_column(ColumnSchema::new("due_date", "date"));
+    invoices.add_column(ColumnSchema::new("status", "varchar"));
+    invoices.add_column(ColumnSchema::new("total_amount", "numeric"));
+    invoices.add_column(ColumnSchema::new("paid_amount", "numeric"));
+    invoices.add_column(ColumnSchema::new("created_at", "timestamp"));
+    invoices.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    invoices.primary_key.push("invoice_id".to_string());
+    schema.add_table(invoices);
+
+    // Payments table
+    let mut payments = TableSchema::new("payments");
+    payments.add_column(ColumnSchema::new("payment_id", "integer"));
+    payments.add_column(ColumnSchema::new("organization_id", "integer"));
+    payments.add_column(ColumnSchema::new("invoice_id", "integer"));
+    payments.add_column(ColumnSchema::new("payment_date", "date"));
+    payments.add_column(ColumnSchema::new("amount", "numeric"));
+    payments.add_column(ColumnSchema::new("payment_method", "varchar"));
+    payments.add_column(ColumnSchema::new("reference_number", "varchar"));
+    payments.add_column(ColumnSchema::new("notes", "text"));
+    payments.add_column(ColumnSchema::new("created_at", "timestamp"));
+    payments.add_column(ColumnSchema::new("updated_at", "timestamp"));
+    payments.primary_key.push("payment_id".to_string());
+    schema.add_table(payments);
+
+    schema
 }

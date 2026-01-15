@@ -38,7 +38,7 @@ pub async fn test_role_empty_name_fails(ctx: &TestContext) {
     let result = executor
         .execute(
             &get_tool("Customer"),
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &context,
         )
@@ -86,7 +86,7 @@ pub async fn test_table_not_in_role_access_denied(ctx: &TestContext) {
     let result = executor
         .execute(
             &get_tool("Order"),
-            json!({ "id": 1 }),
+            json!({ "order_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -135,7 +135,7 @@ pub async fn test_get_requires_readable_columns(ctx: &TestContext) {
     let result = executor
         .execute(
             &get_tool("Customer"),
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -297,8 +297,8 @@ pub async fn test_update_not_allowed_without_updatable_columns(ctx: &TestContext
 
     let result = executor
         .execute(
-            &update_tool("Customer", json!({ "id": { "type": "integer" }, "name": { "type": "string" } })),
-            json!({ "id": 1, "name": "new name" }),
+            &update_tool("Customer", json!({ "customer_id": { "type": "integer" }, "name": { "type": "string" } })),
+            json!({ "customer_id": 1, "name": "new name" }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -348,7 +348,7 @@ pub async fn test_delete_not_allowed_when_deletable_false(ctx: &TestContext) {
     let result = executor
         .execute(
             &delete_tool("Customer"),
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -659,9 +659,9 @@ pub async fn test_update_only_when_new_value_restriction_fails(ctx: &TestContext
         .execute(
             &update_tool(
                 "Ticket",
-                json!({ "id": { "type": "integer" }, "status": { "type": "string" } }),
+                json!({ "ticket_id": { "type": "integer" }, "status": { "type": "string" } }),
             ),
-            json!({ "id": 1, "status": "invalid_status" }),
+            json!({ "ticket_id": 1, "status": "invalid_status" }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -782,7 +782,7 @@ pub async fn test_tenant_required_for_tenant_scoped_table(ctx: &TestContext) {
     let result = executor
         .execute(
             &get_tool("Customer"),
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &context,
         )

@@ -36,7 +36,7 @@ pub async fn test_update_ticket_status(ctx: &TestContext) {
     let before = executor
         .execute(
             &get_tool,
-            json!({ "id": 1 }),
+            json!({ "ticket_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -50,7 +50,7 @@ pub async fn test_update_ticket_status(ctx: &TestContext) {
     let update_tool = update_tool(
         "Ticket",
         json!({
-            "id": { "type": "integer" },
+            "ticket_id": { "type": "integer" },
             "status": { "type": "string" }
         }),
     );
@@ -64,7 +64,7 @@ pub async fn test_update_ticket_status(ctx: &TestContext) {
     let result = executor
         .execute(
             &update_tool,
-            json!({ "id": 1, "status": new_status }),
+            json!({ "ticket_id": 1, "status": new_status }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -76,7 +76,7 @@ pub async fn test_update_ticket_status(ctx: &TestContext) {
     let after = executor
         .execute(
             &get_tool,
-            json!({ "id": 1 }),
+            json!({ "ticket_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -128,7 +128,7 @@ pub async fn test_update_with_value_restriction_valid(ctx: &TestContext) {
     let update_tool = update_tool(
         "Ticket",
         json!({
-            "id": { "type": "integer" },
+            "ticket_id": { "type": "integer" },
             "status": { "type": "string" }
         }),
     );
@@ -136,7 +136,7 @@ pub async fn test_update_with_value_restriction_valid(ctx: &TestContext) {
     let result = executor
         .execute(
             &update_tool,
-            json!({ "id": 1, "status": "in_progress" }),
+            json!({ "ticket_id": 1, "status": "in_progress" }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -154,7 +154,7 @@ pub async fn test_update_with_value_restriction_invalid(ctx: &TestContext) {
     let update_tool = update_tool(
         "Ticket",
         json!({
-            "id": { "type": "integer" },
+            "ticket_id": { "type": "integer" },
             "status": { "type": "string" }
         }),
     );
@@ -163,7 +163,7 @@ pub async fn test_update_with_value_restriction_invalid(ctx: &TestContext) {
     let result = executor
         .execute(
             &update_tool,
-            json!({ "id": 1, "status": "invalid_status" }),
+            json!({ "ticket_id": 1, "status": "invalid_status" }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -566,7 +566,7 @@ pub async fn test_update_non_updatable_column_ignored(ctx: &TestContext) {
     let update_tool = update_tool(
         "Ticket",
         json!({
-            "id": { "type": "integer" },
+            "ticket_id": { "type": "integer" },
             "subject": { "type": "string" }
         }),
     );
@@ -575,7 +575,7 @@ pub async fn test_update_non_updatable_column_ignored(ctx: &TestContext) {
     let _result = executor
         .execute(
             &update_tool,
-            json!({ "id": 1, "subject": "Hacked subject" }),
+            json!({ "ticket_id": 1, "subject": "Hacked subject" }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -586,7 +586,7 @@ pub async fn test_update_non_updatable_column_ignored(ctx: &TestContext) {
     let verify = executor
         .execute(
             &get_tool,
-            json!({ "id": 1 }),
+            json!({ "ticket_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -856,7 +856,7 @@ pub async fn test_update_dry_run(ctx: &TestContext) {
     let update_tool = update_tool(
         "Ticket",
         json!({
-            "id": { "type": "integer" },
+            "ticket_id": { "type": "integer" },
             "status": { "type": "string" }
         }),
     );
@@ -864,7 +864,7 @@ pub async fn test_update_dry_run(ctx: &TestContext) {
     let result = executor
         .execute(
             &update_tool,
-            json!({ "id": 1, "status": "resolved" }),
+            json!({ "ticket_id": 1, "status": "resolved" }),
             &CallToolOptions { dry_run: true },
             &create_context("1"),
         )

@@ -258,7 +258,7 @@ pub async fn test_approval_manager_create_request(_ctx: &TestContext) {
 
     let request = manager.create_request(
         "updateTicket",
-        json!({ "id": 1, "priority": "critical" }),
+        json!({ "ticket_id": 1, "priority": "critical" }),
         vec!["priority".to_string()],
         "tenant_1",
         "support_agent",
@@ -285,7 +285,7 @@ pub async fn test_approval_manager_approve_request(_ctx: &TestContext) {
 
     let request = manager.create_request(
         "updateTicket",
-        json!({ "id": 1, "priority": "high" }),
+        json!({ "ticket_id": 1, "priority": "high" }),
         vec!["priority".to_string()],
         "tenant_1",
         "support_agent",
@@ -314,7 +314,7 @@ pub async fn test_approval_manager_reject_request(_ctx: &TestContext) {
 
     let request = manager.create_request(
         "deleteRecord",
-        json!({ "id": 42 }),
+        json!({ "record_id": 42 }),
         vec![],
         "tenant_1",
         "support_agent",
@@ -342,7 +342,7 @@ pub async fn test_approval_manager_cancel_request(_ctx: &TestContext) {
 
     let request = manager.create_request(
         "updateRecord",
-        json!({ "id": 1 }),
+        json!({ "record_id": 1 }),
         vec![],
         "tenant_1",
         "agent",
@@ -502,7 +502,7 @@ pub async fn test_approval_workflow_create_pending(_ctx: &TestContext) {
     // Simulate creating an action that requires approval
     let _request = manager.create_request(
         "tickets/update",
-        json!({ "id": 1, "priority": "critical" }),
+        json!({ "ticket_id": 1, "priority": "critical" }),
         vec!["priority".to_string()],
         "1",
         &role.name,
@@ -526,7 +526,7 @@ pub async fn test_approval_workflow_full_cycle(_ctx: &TestContext) {
     // 1. Create pending request
     let request = manager.create_request(
         "tickets/update",
-        json!({ "id": 1, "priority": "critical" }),
+        json!({ "ticket_id": 1, "priority": "critical" }),
         vec!["priority".to_string()],
         "1",
         "support_agent",
@@ -563,7 +563,7 @@ pub async fn test_approval_workflow_rejection_cycle(_ctx: &TestContext) {
     // 1. Create pending request
     let request = manager.create_request(
         "orders/delete",
-        json!({ "id": 999 }),
+        json!({ "order_id": 999 }),
         vec![],
         "1",
         "support_agent",

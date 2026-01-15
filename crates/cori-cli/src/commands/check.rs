@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use cori_core::config::{
     ApprovalConfig, ApprovalRequirement, CoriConfig, CreatableColumns, DeletablePermission,
-    GroupDefinition, UpdatableColumns,
+    GroupDefinition, ReadableConfig, UpdatableColumns,
 };
 
 // ============================================================================
@@ -294,6 +294,9 @@ pub async fn run_quiet(config_path: &Path) -> Result<CheckResults> {
     // 8. Non-null column constraints
     results.extend(check_nonnull_columns(&config, &base_dir)?);
 
+    // 9. Primary key access for update/delete operations
+    results.extend(check_primary_key_access(&config, &base_dir)?);
+
     Ok(results)
 }
 
@@ -380,6 +383,10 @@ pub async fn run(config_path: &Path) -> Result<()> {
     // 8. Non-null column constraints
     println!("  ⚡ Checking non-null column constraints...");
     results.extend(check_nonnull_columns(&config, &base_dir)?);
+
+    // 9. Primary key access for update/delete operations
+    println!("  🔑 Checking primary key access for update/delete...");
+    results.extend(check_primary_key_access(&config, &base_dir)?);
 
     // Print results
     results.print_summary();
@@ -1233,6 +1240,93 @@ fn check_nonnull_columns(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
                                 );
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+// ============================================================================
+// Check 9: Primary Key Access for Update/Delete Operations
+// ============================================================================
+
+fn check_primary_key_access(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckFinding>> {
+    let mut findings = Vec::new();
+
+    let schema = match &config.schema {
+        Some(s) => s,
+        None => return Ok(findings), // Already warned in table check
+    };
+
+    // Build table -> primary key columns map
+    let table_primary_keys: HashMap<&str, Vec<&str>> = schema
+        .tables
+        .iter()
+        .map(|t| {
+            (
+                t.name.as_str(),
+                t.primary_key.iter().map(|c| c.as_str()).collect(),
+            )
+        })
+        .collect();
+
+    // Check each role
+    for (role_name, role) in &config.roles {
+        for (table_name, perms) in &role.tables {
+            // Get primary key columns for this table
+            let pk_columns = match table_primary_keys.get(table_name.as_str()) {
+                Some(pks) if !pks.is_empty() => pks,
+                _ => continue, // Table has no PK or table not in schema - skip
+            };
+
+            // Get readable columns for this role
+            let readable_cols: HashSet<&str> = match &perms.readable {
+                ReadableConfig::All(_) => {
+                    // All columns are readable, so PKs are included
+                    continue;
+                }
+                ReadableConfig::List(cols) => cols.iter().map(|c| c.as_str()).collect(),
+                ReadableConfig::Config(cfg) => match &cfg.columns {
+                    cori_core::config::ColumnList::All(_) => continue,
+                    cori_core::config::ColumnList::List(cols) => {
+                        cols.iter().map(|c| c.as_str()).collect()
+                    }
+                },
+            };
+
+            // Check if role allows update
+            let allows_update = !perms.updatable.is_empty();
+
+            // Check if role allows delete
+            let allows_delete = perms.deletable.is_allowed();
+
+            // If update or delete is allowed, all PK columns must be readable
+            if allows_update || allows_delete {
+                let operation = if allows_update && allows_delete {
+                    "update and delete"
+                } else if allows_update {
+                    "update"
+                } else {
+                    "delete"
+                };
+
+                for pk_col in pk_columns {
+                    if !readable_cols.contains(pk_col) {
+                        findings.push(
+                            CheckFinding::error(
+                                "primary-key-access",
+                                format!(
+                                    "Role '{}' allows {} on table '{}' but primary key column '{}' is not readable. \
+                                     Add '{}' to readable columns to enable row identification.",
+                                    role_name, operation, table_name, pk_col, pk_col
+                                ),
+                            )
+                            .with_file(format!("roles/{}.yaml", role_name))
+                            .with_location(format!("tables.{}.readable", table_name)),
+                        );
                     }
                 }
             }

@@ -108,6 +108,7 @@ impl<'a> ToolValidator<'a> {
     fn validate_update(&self, request: &ValidationRequest) -> Result<(), ValidationError> {
         let table = request.table;
         let perms = self.role_validator.get_table_permissions(table)?;
+        let pk_columns = request.pk_columns();
 
         // Validate constraints (updatable columns, only_when)
         self.constraint_validator.validate_update(
@@ -116,6 +117,7 @@ impl<'a> ToolValidator<'a> {
             request.arguments,
             request.current_row,
             |col| self.is_tenant_column(table, col),
+            &pk_columns,
         )?;
 
         // Validate column values against rules (patterns, allowed_values)
@@ -140,8 +142,8 @@ impl<'a> ToolValidator<'a> {
 
         if let Some(obj) = request.arguments.as_object() {
             for (key, value) in obj {
-                // Skip id field
-                if key == "id" {
+                // Skip primary key column
+                if request.is_pk_column(key) {
                     continue;
                 }
 
@@ -197,9 +199,10 @@ impl<'a> ToolValidator<'a> {
     /// Check if an UPDATE operation requires approval.
     fn update_requires_approval(&self, request: &ValidationRequest) -> Option<Vec<String>> {
         let perms = self.role_validator.get_table_permissions(request.table).ok()?;
+        let pk_columns = request.pk_columns();
         let fields = self
             .constraint_validator
-            .get_update_approval_fields(perms, request.arguments);
+            .get_update_approval_fields(perms, request.arguments, &pk_columns);
         if fields.is_empty() {
             None
         } else {
@@ -299,7 +302,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -322,7 +325,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -345,7 +348,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -364,7 +367,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -387,7 +390,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -410,7 +413,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -433,7 +436,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: None,
         };
 
         let result = validator.validate(&request);
@@ -456,7 +459,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -479,7 +482,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -502,7 +505,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -525,7 +528,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -544,7 +547,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -567,7 +570,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);
@@ -590,7 +593,7 @@ mod tests {
             tenant_id: "tenant1",
             role_name: "test_role",
             current_row: None,
-            
+            primary_key_columns: Some(vec!["id"]),
         };
 
         let result = validator.validate(&request);

@@ -27,7 +27,7 @@ pub async fn test_cross_tenant_get_blocked(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("2"), // Different tenant!
         )
@@ -140,7 +140,7 @@ pub async fn test_null_tenant_fails(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("   "), // Whitespace tenant
         )

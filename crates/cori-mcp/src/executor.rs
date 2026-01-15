@@ -215,18 +215,16 @@ impl ToolExecutor {
         Ok(())
     }
 
-    /// Get the primary key column for a table from schema.
-    /// Falls back to deriving from table name if schema not available.
-    fn get_primary_key_column(&self, table: &str) -> String {
+    /// Get the primary key columns for a table from schema.
+    /// Returns empty vector if no primary key is defined in the schema.
+    fn get_primary_key_columns(&self, table: &str) -> Vec<String> {
         if let Some(schema) = &self.schema {
             if let Some(table_schema) = schema.get_table(table) {
-                if let Some(pk) = table_schema.primary_key.first() {
-                    return pk.clone();
-                }
+                return table_schema.primary_key.clone();
             }
         }
-        // Fallback: derive from table name (e.g., customers -> customer_id)
-        format!("{}_id", singularize(table))
+        // No schema or table not found - return empty (no PK)
+        Vec::new()
     }
 
     /// Execute a tool call.
@@ -257,6 +255,10 @@ impl ToolExecutor {
             }
         };
 
+        // Get primary key columns from schema (supports composite keys)
+        let pk_columns = self.get_primary_key_columns(table);
+        let pk_column_refs: Vec<&str> = pk_columns.iter().map(|s| s.as_str()).collect();
+
         // Build the validation request
         let validation_request = ValidationRequest {
             operation: op_type,
@@ -265,6 +267,7 @@ impl ToolExecutor {
             tenant_id: &context.tenant_id,
             role_name: &context.role,
             current_row: None, // Will be populated in update if we fetch the row
+            primary_key_columns: Some(pk_column_refs.clone()),
         };
 
         // Create validator with role and optionally rules
@@ -520,14 +523,40 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        let id = arguments.get("id");
+        
+        // Get primary key columns from schema (supports composite keys)
+        let pk_columns = self.get_primary_key_columns(table);
+        
+        // Cannot execute GET without a primary key
+        if pk_columns.is_empty() {
+            return ExecutionResult::error(format!(
+                "Cannot get record from table '{}': no primary key defined in schema",
+                table
+            ));
+        }
+        
         let tenant_column = self.tenant_column_for_table(table);
 
+        // Extract all PK values from arguments
+        let mut pk_values: Vec<(&str, i64)> = Vec::new();
+        for pk_col in &pk_columns {
+            match arguments.get(pk_col) {
+                Some(v) => {
+                    let val = v.as_i64().unwrap_or(0);
+                    pk_values.push((pk_col, val));
+                }
+                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+            }
+        }
+
         if options.dry_run {
+            let pk_conditions: Vec<String> = pk_columns.iter().enumerate()
+                .map(|(i, col)| format!("{} = ${}", col, i + 1))
+                .collect();
             let where_clause = if let Some(tc) = &tenant_column {
-                format!(" WHERE id = $1 AND {} = $2", tc)
+                format!(" WHERE {} AND {} = ${}", pk_conditions.join(" AND "), tc, pk_columns.len() + 1)
             } else {
-                " WHERE id = $1".to_string()
+                format!(" WHERE {}", pk_conditions.join(" AND "))
             };
             return ExecutionResult::dry_run(DryRunResult {
                 dry_run: true,
@@ -536,7 +565,8 @@ impl ToolExecutor {
                 }),
                 preview: Some(json!({
                     "query": format!("SELECT * FROM {}{}", table, where_clause),
-                    "params": if tenant_column.is_some() { json!([id, context.tenant_id]) } else { json!([id]) }
+                    "pk_columns": pk_columns,
+                    "tenant_id": context.tenant_id
                 })),
             });
         }
@@ -557,6 +587,11 @@ impl ToolExecutor {
             columns.join(", ")
         };
 
+        // Build primary key conditions
+        let pk_conditions: Vec<String> = pk_values.iter()
+            .map(|(col, val)| format!("{} = {}", col, val))
+            .collect();
+
         // Build optional tenant condition - embed directly since it comes from trusted token
         let tenant_condition = tenant_column.as_ref().map(|tc| {
             if context.tenant_id.parse::<i64>().is_ok() {
@@ -566,24 +601,15 @@ impl ToolExecutor {
             }
         });
 
-        // Parse id as i64 for query (common case)
-        let id_value: i64 = match id {
-            Some(v) => v.as_i64().unwrap_or(0),
-            None => return ExecutionResult::error("Missing required field: id"),
-        };
-
-        // Get primary key column from schema (or fallback to convention)
-        let pk_column = self.get_primary_key_column(table);
-
         let query = if let Some(tc) = tenant_condition {
             format!(
-                "SELECT {} FROM {} WHERE {} = {} AND {}",
-                column_list, table, pk_column, id_value, tc
+                "SELECT {} FROM {} WHERE {} AND {}",
+                column_list, table, pk_conditions.join(" AND "), tc
             )
         } else {
             format!(
-                "SELECT {} FROM {} WHERE {} = {}",
-                column_list, table, pk_column, id_value
+                "SELECT {} FROM {} WHERE {}",
+                column_list, table, pk_conditions.join(" AND ")
             )
         };
 
@@ -884,8 +910,31 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        let id = arguments.get("id");
+        
+        // Get primary key columns from schema (supports composite keys)
+        let pk_columns = self.get_primary_key_columns(table);
+        
+        // Cannot execute UPDATE without a primary key
+        if pk_columns.is_empty() {
+            return ExecutionResult::error(format!(
+                "Cannot update record in table '{}': no primary key defined in schema",
+                table
+            ));
+        }
+        
         let tenant_column = self.tenant_column_for_table(table);
+
+        // Extract all PK values from arguments
+        let mut pk_values: Vec<(&str, i64)> = Vec::new();
+        for pk_col in &pk_columns {
+            match arguments.get(pk_col) {
+                Some(v) => {
+                    let val = v.as_i64().unwrap_or(0);
+                    pk_values.push((pk_col, val));
+                }
+                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+            }
+        }
 
         if options.dry_run {
             return ExecutionResult::dry_run(DryRunResult {
@@ -896,7 +945,7 @@ impl ToolExecutor {
                 preview: Some(json!({
                     "operation": "UPDATE",
                     "table": table,
-                    "id": id,
+                    "pk_columns": pk_columns,
                     "changes": arguments,
                     "tenant_id": context.tenant_id
                 })),
@@ -911,22 +960,18 @@ impl ToolExecutor {
             }
         };
 
-        let id_value: i64 = match id {
-            Some(v) => v.as_i64().unwrap_or(0),
-            None => return ExecutionResult::error("Missing required field: id"),
-        };
-
         // Get updatable columns for this table from role definition
         let updatable_columns = self.role.tables.get(table).map(|p| &p.updatable);
 
-        // Build UPDATE statement from arguments (excluding id)
+        // Build UPDATE statement from arguments (excluding primary key columns)
         let empty_map = serde_json::Map::new();
         let obj = arguments.as_object().unwrap_or(&empty_map);
         let mut set_clauses = Vec::new();
         let mut rejected_columns = Vec::new();
 
         for (key, value) in obj {
-            if key == "id" {
+            // Skip primary key columns
+            if pk_columns.contains(key) {
                 continue;
             }
             // Validate column name (alphanumeric and underscore only)
@@ -990,6 +1035,11 @@ impl ToolExecutor {
             ));
         }
 
+        // Build primary key conditions
+        let pk_conditions: Vec<String> = pk_values.iter()
+            .map(|(col, val)| format!("{} = {}", col, val))
+            .collect();
+
         // Build optional tenant condition - embed directly since it comes from trusted token
         let tenant_condition = tenant_column.as_ref().map(|tc| {
             if context.tenant_id.parse::<i64>().is_ok() {
@@ -999,25 +1049,20 @@ impl ToolExecutor {
             }
         });
 
-        // Get primary key column from schema (or fallback to convention)
-        let pk_column = self.get_primary_key_column(table);
-
         let query = if let Some(tc) = tenant_condition {
             format!(
-                "UPDATE {} SET {} WHERE {} = {} AND {} RETURNING *",
+                "UPDATE {} SET {} WHERE {} AND {} RETURNING *",
                 table,
                 set_clauses.join(", "),
-                pk_column,
-                id_value,
+                pk_conditions.join(" AND "),
                 tc
             )
         } else {
             format!(
-                "UPDATE {} SET {} WHERE {} = {} RETURNING *",
+                "UPDATE {} SET {} WHERE {} RETURNING *",
                 table,
                 set_clauses.join(", "),
-                pk_column,
-                id_value
+                pk_conditions.join(" AND ")
             )
         };
 
@@ -1047,8 +1092,31 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        let id = arguments.get("id");
+        
+        // Get primary key columns from schema (supports composite keys)
+        let pk_columns = self.get_primary_key_columns(table);
+        
+        // Cannot execute DELETE without a primary key
+        if pk_columns.is_empty() {
+            return ExecutionResult::error(format!(
+                "Cannot delete record from table '{}': no primary key defined in schema",
+                table
+            ));
+        }
+        
         let tenant_column = self.tenant_column_for_table(table);
+
+        // Extract all PK values from arguments
+        let mut pk_values: Vec<(&str, i64)> = Vec::new();
+        for pk_col in &pk_columns {
+            match arguments.get(pk_col) {
+                Some(v) => {
+                    let val = v.as_i64().unwrap_or(0);
+                    pk_values.push((pk_col, val));
+                }
+                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+            }
+        }
 
         if options.dry_run {
             return ExecutionResult::dry_run(DryRunResult {
@@ -1059,7 +1127,7 @@ impl ToolExecutor {
                 preview: Some(json!({
                     "operation": "DELETE",
                     "table": table,
-                    "id": id,
+                    "pk_columns": pk_columns,
                     "tenant_id": context.tenant_id
                 })),
             });
@@ -1073,10 +1141,10 @@ impl ToolExecutor {
             }
         };
 
-        let id_value: i64 = match id {
-            Some(v) => v.as_i64().unwrap_or(0),
-            None => return ExecutionResult::error("Missing required field: id"),
-        };
+        // Build primary key conditions
+        let pk_conditions: Vec<String> = pk_values.iter()
+            .map(|(col, val)| format!("{} = {}", col, val))
+            .collect();
 
         // Build optional tenant condition - embed directly since it comes from trusted token
         let tenant_condition = tenant_column.as_ref().map(|tc| {
@@ -1087,18 +1155,18 @@ impl ToolExecutor {
             }
         });
 
-        // Get primary key column from schema (or fallback to convention)
-        let pk_column = self.get_primary_key_column(table);
+        // Build RETURNING clause with all PK columns
+        let returning_cols = pk_columns.join(", ");
 
         let query = if let Some(tc) = tenant_condition {
             format!(
-                "DELETE FROM {} WHERE {} = {} AND {} RETURNING {}",
-                table, pk_column, id_value, tc, pk_column
+                "DELETE FROM {} WHERE {} AND {} RETURNING {}",
+                table, pk_conditions.join(" AND "), tc, returning_cols
             )
         } else {
             format!(
-                "DELETE FROM {} WHERE {} = {} RETURNING {}",
-                table, pk_column, id_value, pk_column
+                "DELETE FROM {} WHERE {} RETURNING {}",
+                table, pk_conditions.join(" AND "), returning_cols
             )
         };
 
@@ -1106,10 +1174,14 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_optional(pool).await
         {
-            Ok(Some(_)) => ExecutionResult::success_with_sql(json!({
+            Ok(Some(row)) => {
+                // Build response with all PK values
+                let deleted_keys = row_to_json(&row, &pk_columns);
+                ExecutionResult::success_with_sql(json!({
                 "message": "Record deleted successfully",
-                "id": id_value
-            }), &query),
+                "deleted": deleted_keys
+            }), &query)
+            }
             Ok(None) => ExecutionResult::error("Record not found or access denied"),
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -1156,51 +1228,6 @@ fn snake_case(s: &str) -> String {
         }
     }
     result
-}
-
-/// Simple singularization (removes trailing 's' or 'es').
-fn singularize(s: &str) -> String {
-    // Common irregular plurals
-    let irregulars = [
-        ("people", "person"),
-        ("children", "child"),
-        ("men", "man"),
-        ("women", "woman"),
-        ("mice", "mouse"),
-        ("geese", "goose"),
-        ("teeth", "tooth"),
-        ("feet", "foot"),
-    ];
-    
-    for (plural, singular) in irregulars {
-        if s == plural {
-            return singular.to_string();
-        }
-    }
-    
-    // Words ending in 'ies' -> 'y' (e.g., categories -> category)
-    if s.ends_with("ies") && s.len() > 3 {
-        return format!("{}y", &s[..s.len() - 3]);
-    }
-    
-    // Words ending in 'es' that should keep the 'e' (e.g., boxes -> box)
-    // Be careful about words like "status" that end in "us" not "es"
-    if s.ends_with("xes") || s.ends_with("ches") || s.ends_with("shes") || s.ends_with("sses") {
-        return s[..s.len() - 2].to_string();
-    }
-    
-    // Words ending in 'ves' -> 'f' or 'fe' (e.g., leaves -> leaf)
-    if s.ends_with("ves") {
-        return format!("{}f", &s[..s.len() - 3]);
-    }
-    
-    // Words ending in 's' but not 'ss' or 'us' or 'is' (e.g., users -> user)
-    if s.ends_with('s') && !s.ends_with("ss") && !s.ends_with("us") && !s.ends_with("is") {
-        return s[..s.len() - 1].to_string();
-    }
-    
-    // Return as-is if no rule matched
-    s.to_string()
 }
 
 /// Simple pluralization.
@@ -1368,14 +1395,6 @@ mod tests {
         assert_eq!(snake_case("User"), "user");
         assert_eq!(snake_case("OrderItem"), "order_item");
         assert_eq!(snake_case("APIKey"), "a_p_i_key");
-    }
-
-    #[test]
-    fn test_singularize() {
-        assert_eq!(singularize("users"), "user");
-        assert_eq!(singularize("categories"), "category");
-        assert_eq!(singularize("boxes"), "box");
-        assert_eq!(singularize("status"), "status");
     }
 
     #[test]

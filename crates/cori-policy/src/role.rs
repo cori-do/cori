@@ -72,9 +72,11 @@ impl<'a> RoleValidator<'a> {
             ));
         }
 
-        // GET requires an ID
-        if request.arguments.get("id").is_none() {
-            return Err(ValidationError::missing_identifier("GET"));
+        // GET requires all primary key columns to be provided
+        for pk_column in request.pk_columns() {
+            if request.arguments.get(pk_column).is_none() {
+                return Err(ValidationError::missing_identifier("GET"));
+            }
         }
 
         Ok(())
@@ -127,9 +129,11 @@ impl<'a> RoleValidator<'a> {
             return Err(ValidationError::update_not_allowed(table));
         }
 
-        // UPDATE requires an ID (single row update)
-        if request.arguments.get("id").is_none() {
-            return Err(ValidationError::missing_identifier("UPDATE"));
+        // UPDATE requires all primary key columns (single row update)
+        for pk_column in request.pk_columns() {
+            if request.arguments.get(pk_column).is_none() {
+                return Err(ValidationError::missing_identifier("UPDATE"));
+            }
         }
 
         Ok(perms)
@@ -145,9 +149,11 @@ impl<'a> RoleValidator<'a> {
             return Err(ValidationError::delete_not_allowed(table));
         }
 
-        // DELETE requires an ID (single row delete)
-        if request.arguments.get("id").is_none() {
-            return Err(ValidationError::missing_identifier("DELETE"));
+        // DELETE requires all primary key columns (single row delete)
+        for pk_column in request.pk_columns() {
+            if request.arguments.get(pk_column).is_none() {
+                return Err(ValidationError::missing_identifier("DELETE"));
+            }
         }
 
         Ok(())

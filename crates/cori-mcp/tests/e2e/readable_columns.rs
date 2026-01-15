@@ -29,7 +29,7 @@ pub async fn test_only_readable_columns_returned(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -72,7 +72,7 @@ pub async fn test_non_readable_columns_excluded(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -156,7 +156,7 @@ pub async fn test_all_columns_readable(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )

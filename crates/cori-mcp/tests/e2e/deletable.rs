@@ -95,7 +95,7 @@ pub async fn test_delete_allowed(ctx: &TestContext) {
     let delete_result = executor
         .execute(
             &delete_tool,
-            json!({ "id": ticket_id }),
+            json!({ "ticket_id": ticket_id }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -108,7 +108,7 @@ pub async fn test_delete_allowed(ctx: &TestContext) {
     let verify = executor
         .execute(
             &get_tool,
-            json!({ "id": ticket_id }),
+            json!({ "ticket_id": ticket_id }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -180,7 +180,7 @@ pub async fn test_delete_cross_tenant_blocked(ctx: &TestContext) {
     let result = executor
         .execute(
             &delete_tool,
-            json!({ "id": 4 }),  // ticket_id 4 belongs to tenant 2 (Globex)
+            json!({ "ticket_id": 4 }),  // ticket_id 4 belongs to tenant 2 (Globex)
             &CallToolOptions::default(),
             &create_context("1"),  // We're tenant 1 (Acme)
         )
@@ -490,7 +490,7 @@ pub async fn test_delete_dry_run(ctx: &TestContext) {
     let result = executor
         .execute(
             &delete_tool,
-            json!({ "id": 1 }),
+            json!({ "ticket_id": 1 }),
             &CallToolOptions { dry_run: true },
             &create_context("1"),
         )
@@ -504,7 +504,7 @@ pub async fn test_delete_dry_run(ctx: &TestContext) {
     let verify = executor
         .execute(
             &get_tool,
-            json!({ "id": 1 }),
+            json!({ "ticket_id": 1 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
