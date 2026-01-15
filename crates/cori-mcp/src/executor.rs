@@ -11,8 +11,8 @@
 use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
 use crate::schema::DatabaseSchema;
-use crate::validator::{OperationType, ToolValidator, ValidationRequest};
 use cori_audit::AuditLogger;
+use cori_policy::{OperationType, ToolValidator, ValidationRequest};
 use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
 use cori_core::RoleDefinition;
 use serde::{Deserialize, Serialize};
@@ -273,40 +273,29 @@ impl ToolExecutor {
             validator = validator.with_rules(rules);
         }
 
-        // Validate the request
+        // Validate the request (checks permissions and constraints)
         if let Err(e) = validator.validate(&validation_request) {
-            return ExecutionResult::error(e.to_string());
-        }
-
-        // 2. Validate arguments against tool schema constraints
-        if let Err(e) = self.validate_arguments(tool, &arguments) {
             // Log authorization denied
             if let Some(logger) = &self.audit_logger {
                 let _ = logger
-                    .log_authorization_denied(&context.role, &context.tenant_id, &tool.name, &e)
+                    .log_authorization_denied(&context.role, &context.tenant_id, &tool.name, &e.to_string())
                     .await;
             }
-            return ExecutionResult::error(e);
+            return ExecutionResult::error(e.to_string());
         }
 
-        // 3. Check if approval is required
-        if self.requires_approval(tool, &arguments) && !options.dry_run {
-            // Create approval request
-            let approval_fields = tool
-                .annotations
-                .as_ref()
-                .and_then(|a| a.approval_fields.clone())
-                .unwrap_or_default();
+        // 2. Check if approval is required (role-level requires_approval)
+        if let Some(approval_fields) = validator.requires_approval(&validation_request) {
+            if !options.dry_run {
+                let request = self.approval_manager.create_request(
+                    &tool.name,
+                    arguments.clone(),
+                    approval_fields,
+                    &context.tenant_id,
+                    &context.role,
+                );
 
-            let request = self.approval_manager.create_request(
-                &tool.name,
-                arguments.clone(),
-                approval_fields,
-                &context.tenant_id,
-                &context.role,
-            );
-
-            // Log approval request
+                            // Log approval request
             if let Some(logger) = &self.audit_logger {
                 let _ = logger
                     .log_approval_requested(
@@ -317,8 +306,14 @@ impl ToolExecutor {
                     )
                     .await;
             }
+                return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
+            }
+            // In dry-run mode, continue to show what would happen
+        }
 
-            return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
+        // 3. Validate arguments against tool schema constraints
+        if let Err(e) = self.validate_arguments(tool, &arguments) {
+            return ExecutionResult::error(e);
         }
 
         // 4. Execute based on operation type
@@ -476,22 +471,6 @@ impl ToolExecutor {
             "null" => value.is_null(),
             _ => true,
         }
-    }
-
-    /// Check if approval is required for this tool call.
-    fn requires_approval(&self, tool: &ToolDefinition, arguments: &Value) -> bool {
-        if let Some(annotations) = &tool.annotations {
-            if annotations.requires_approval == Some(true) {
-                // Check if any approval fields are being modified
-                if let Some(fields) = &annotations.approval_fields {
-                    return fields
-                        .iter()
-                        .any(|f| arguments.get(f).is_some());
-                }
-                return true;
-            }
-        }
-        false
     }
 
     /// Parse tool name to determine the operation.

@@ -33,12 +33,12 @@ chrono.workspace = true
 # UUID generation
 uuid.workspace = true
 
-# Regex for pattern validation
-regex = "1.10"
-
 # Async stream utilities
 futures = "0.3"
 async-stream = "0.3"
+
+# Regex for JSON schema pattern validation
+regex = "1.10"
 
 # Database access
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "bigdecimal", "uuid"] }
@@ -48,6 +48,7 @@ bigdecimal = "0.4"
 
 # Internal crates
 cori-core = { path = "../cori-core" }
+cori-policy = { path = "../cori-policy" }
 cori-biscuit = { path = "../cori-biscuit" }
 cori-audit = { path = "../cori-audit" }
 

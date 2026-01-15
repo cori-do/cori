@@ -587,6 +587,7 @@ dependencies = [
  "cori-audit",
  "cori-biscuit",
  "cori-core",
+ "cori-policy",
  "futures",
  "regex",
  "serde",
@@ -598,6 +599,18 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "cori-policy"
+version = "0.5.1"
+dependencies = [
+ "cori-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]
