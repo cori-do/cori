@@ -4,6 +4,9 @@ members = [
   # Core types and schemas
   "crates/cori-core",
   
+  # Policy validation and enforcement
+  "crates/cori-policy",
+  
   # Database adapters
   "crates/cori-adapter-pg",
   

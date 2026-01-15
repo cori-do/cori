@@ -18,7 +18,7 @@ pub async fn test_get_customer_by_id(ctx: &TestContext) {
 
     // Customer 1 belongs to organization 1 (Acme)
     let result = executor
-        .execute(&tool, json!({ "id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(&tool, json!({ "customer_id": 1 }), &CallToolOptions::default(), &create_context("1"))
         .await;
 
     assert_success(&result, "GET customer should succeed");
@@ -49,7 +49,7 @@ pub async fn test_get_order_by_id(ctx: &TestContext) {
 
     // Order 1 belongs to org 1 with known values
     let result = executor
-        .execute(&tool, json!({ "id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(&tool, json!({ "order_id": 1 }), &CallToolOptions::default(), &create_context("1"))
         .await;
 
     assert_success(&result, "GET order should succeed");
@@ -99,7 +99,7 @@ pub async fn test_get_invoice_by_id(ctx: &TestContext) {
 
     // Invoice 1 belongs to org 1
     let result = executor
-        .execute(&tool, json!({ "id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(&tool, json!({ "invoice_id": 1 }), &CallToolOptions::default(), &create_context("1"))
         .await;
 
     assert_success(&result, "GET invoice should succeed");
@@ -132,7 +132,7 @@ pub async fn test_get_nonexistent_record(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 99999 }),
+            json!({ "customer_id": 99999 }),
             &CallToolOptions::default(),
             &create_context("1"),
         )
@@ -442,7 +442,7 @@ pub async fn test_dry_run_get(ctx: &TestContext) {
     let result = executor
         .execute(
             &tool,
-            json!({ "id": 1 }),
+            json!({ "customer_id": 1 }),
             &CallToolOptions { dry_run: true },
             &create_context("1"),
         )

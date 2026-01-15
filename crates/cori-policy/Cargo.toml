@@ -1,0 +1,25 @@
+[package]
+name = "cori-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Policy validation and enforcement for Cori - role permissions, rules, and constraints"
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Regex for pattern validation
+regex = "1.10"
+
+# Internal crates
+cori-core = { path = "../cori-core" }
+
+[dev-dependencies]

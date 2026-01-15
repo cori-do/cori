@@ -63,25 +63,32 @@ impl ToolGenerator {
         // Singularize the table name before converting to PascalCase for entity name
         let singular_name = singularize(table_name);
         let entity_name = pascal_case(&singular_name);
+        
+        // Check if table has a primary key (needed for get, update, delete operations)
+        let has_primary_key = !table_schema.primary_key.is_empty();
 
-        // get{Entity} - if readable
+        // get{Entity} - if readable AND table has primary key
         if self.role.can_read(table_name) {
-            tools.push(self.generate_get_tool(table_name, &entity_name, table_schema));
+            // get requires primary key to identify a single record
+            if has_primary_key {
+                tools.push(self.generate_get_tool(table_name, &entity_name, table_schema));
+            }
+            // list always works (no PK needed)
             tools.push(self.generate_list_tool(table_name, &entity_name, table_schema));
         }
 
-        // create{Entity} - if can create
+        // create{Entity} - if can create (no PK needed for insert)
         if self.role.can_create(table_name) {
             tools.push(self.generate_create_tool(table_name, &entity_name, table_schema));
         }
 
-        // update{Entity} - if can update
-        if self.role.can_update(table_name) {
+        // update{Entity} - if can update AND table has primary key
+        if self.role.can_update(table_name) && has_primary_key {
             tools.push(self.generate_update_tool(table_name, &entity_name, table_schema));
         }
 
-        // delete{Entity} - if can delete
-        if self.role.can_delete(table_name) {
+        // delete{Entity} - if can delete AND table has primary key
+        if self.role.can_delete(table_name) && has_primary_key {
             tools.push(self.generate_delete_tool(table_name, &entity_name, table_schema));
         }
 
@@ -156,25 +163,30 @@ impl ToolGenerator {
         entity_name: &str,
         table_schema: &TableSchema,
     ) -> ToolDefinition {
-        let id_type = table_schema.get_id_type();
-        let id_description = if let Some(pk) = table_schema.primary_key.first() {
-            pk.clone()
-        } else {
-            "id".to_string()
-        };
+        let pk_names = table_schema.get_primary_key_names();
+        let pk_columns = table_schema.get_primary_key_columns();
+        
+        // Build properties for all PK columns
+        let mut properties = serde_json::Map::new();
+        for col in &pk_columns {
+            properties.insert(
+                col.name.clone(),
+                json!({
+                    "type": col.json_schema_type(),
+                    "description": format!("{} primary key column ({})", entity_name, col.name)
+                }),
+            );
+        }
+
+        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
 
         ToolDefinition {
             name: format!("get{}", entity_name),
-            description: Some(format!("Retrieve a {} by ID", table_name)),
+            description: Some(format!("Retrieve a {} by primary key ({})", table_name, pk_desc)),
             input_schema: json!({
                 "type": "object",
-                "properties": {
-                    "id": {
-                        "type": id_type,
-                        "description": format!("{} {}", entity_name, id_description)
-                    }
-                },
-                "required": ["id"]
+                "properties": properties,
+                "required": pk_names
             }),
             annotations: Some(ToolAnnotations {
                 requires_approval: Some(false),
@@ -276,26 +288,31 @@ impl ToolGenerator {
         let (mut properties, _) = self.generate_input_schema(table_name, table_schema, false);
         let requires_approval = self.role.table_requires_approval(table_name);
         let approval_fields = self.role.get_approval_columns(table_name);
-        let id_type = table_schema.get_id_type();
+        let pk_names = table_schema.get_primary_key_names();
+        let pk_columns = table_schema.get_primary_key_columns();
 
-        // Add id to properties
+        // Add all primary key columns to properties
         if let Value::Object(ref mut props) = properties {
-            props.insert(
-                "id".to_string(),
-                json!({
-                    "type": id_type,
-                    "description": format!("{} ID", entity_name)
-                }),
-            );
+            for col in &pk_columns {
+                props.insert(
+                    col.name.clone(),
+                    json!({
+                        "type": col.json_schema_type(),
+                        "description": format!("{} primary key column ({})", entity_name, col.name)
+                    }),
+                );
+            }
         }
+
+        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
 
         ToolDefinition {
             name: format!("update{}", entity_name),
-            description: Some(format!("Update an existing {}", table_name)),
+            description: Some(format!("Update an existing {} by primary key ({})", table_name, pk_desc)),
             input_schema: json!({
                 "type": "object",
                 "properties": properties,
-                "required": ["id"]
+                "required": pk_names
             }),
             annotations: Some(ToolAnnotations {
                 requires_approval: Some(requires_approval),
@@ -317,20 +334,30 @@ impl ToolGenerator {
         entity_name: &str,
         table_schema: &TableSchema,
     ) -> ToolDefinition {
-        let id_type = table_schema.get_id_type();
+        let pk_names = table_schema.get_primary_key_names();
+        let pk_columns = table_schema.get_primary_key_columns();
+
+        // Build properties for all PK columns
+        let mut properties = serde_json::Map::new();
+        for col in &pk_columns {
+            properties.insert(
+                col.name.clone(),
+                json!({
+                    "type": col.json_schema_type(),
+                    "description": format!("{} primary key column ({})", entity_name, col.name)
+                }),
+            );
+        }
+
+        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
 
         ToolDefinition {
             name: format!("delete{}", entity_name),
-            description: Some(format!("Delete a {}", table_name)),
+            description: Some(format!("Delete a {} by primary key ({})", table_name, pk_desc)),
             input_schema: json!({
                 "type": "object",
-                "properties": {
-                    "id": {
-                        "type": id_type,
-                        "description": format!("{} ID", entity_name)
-                    }
-                },
-                "required": ["id"]
+                "properties": properties,
+                "required": pk_names
             }),
             annotations: Some(ToolAnnotations {
                 requires_approval: Some(true),
@@ -701,7 +728,7 @@ fn pluralize(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::schema::ColumnSchema;
-    use cori_core::TablePermissions;
+    use cori_core::{config::AllColumns, TablePermissions};
     use std::collections::HashMap;
 
     #[test]
@@ -813,5 +840,98 @@ mod tests {
         // Check requires approval
         let annotations = update_tool.annotations.as_ref().unwrap();
         assert_eq!(annotations.requires_approval, Some(true));
+    }
+
+    #[test]
+    fn test_no_get_update_delete_without_primary_key() {
+        // Test that get, update, delete tools are NOT generated for tables without primary keys
+        let mut role = RoleDefinition {
+            name: "test".to_string(),
+            description: None,
+            approvals: None,
+            tables: HashMap::new(),
+        };
+
+        // Create role with full permissions (readable, updatable, deletable)
+        role.tables.insert(
+            "logs".to_string(),
+            TablePermissions {
+                readable: ReadableConfig::List(vec![
+                    "timestamp".to_string(),
+                    "message".to_string(),
+                ]),
+                creatable: CreatableColumns::All(AllColumns),
+                updatable: UpdatableColumns::All(AllColumns),
+                deletable: cori_core::DeletablePermission::Allowed(true),
+            },
+        );
+
+        // Create schema WITHOUT primary key
+        let mut schema = DatabaseSchema::new();
+        let mut table = crate::schema::TableSchema::new("logs");
+        table.add_column(ColumnSchema::new("timestamp", "timestamp"));
+        table.add_column(ColumnSchema::new("message", "text"));
+        // Note: NO primary_key.push() - table has no PK
+        schema.add_table(table);
+
+        let generator = ToolGenerator::new(role, schema);
+        let tools = generator.generate_all();
+
+        // list should be generated (doesn't need PK)
+        assert!(tools.iter().any(|t| t.name == "listLogs"), "listLogs should be generated");
+        
+        // create should be generated (doesn't need PK)
+        assert!(tools.iter().any(|t| t.name == "createLog"), "createLog should be generated");
+        
+        // get should NOT be generated (needs PK for single record lookup)
+        assert!(!tools.iter().any(|t| t.name == "getLog"), "getLog should NOT be generated without PK");
+        
+        // update should NOT be generated (needs PK to identify row)
+        assert!(!tools.iter().any(|t| t.name == "updateLog"), "updateLog should NOT be generated without PK");
+        
+        // delete should NOT be generated (needs PK to identify row)
+        assert!(!tools.iter().any(|t| t.name == "deleteLog"), "deleteLog should NOT be generated without PK");
+    }
+
+    #[test]
+    fn test_get_update_delete_with_primary_key() {
+        // Test that get, update, delete tools ARE generated for tables WITH primary keys
+        let mut role = RoleDefinition {
+            name: "test".to_string(),
+            description: None,
+            approvals: None,
+            tables: HashMap::new(),
+        };
+
+        role.tables.insert(
+            "items".to_string(),
+            TablePermissions {
+                readable: ReadableConfig::List(vec![
+                    "id".to_string(),
+                    "name".to_string(),
+                ]),
+                creatable: CreatableColumns::All(AllColumns),
+                updatable: UpdatableColumns::All(AllColumns),
+                deletable: cori_core::DeletablePermission::Allowed(true),
+            },
+        );
+
+        // Create schema WITH primary key
+        let mut schema = DatabaseSchema::new();
+        let mut table = crate::schema::TableSchema::new("items");
+        table.add_column(ColumnSchema::new("id", "integer"));
+        table.add_column(ColumnSchema::new("name", "text"));
+        table.primary_key.push("id".to_string()); // Has PK
+        schema.add_table(table);
+
+        let generator = ToolGenerator::new(role, schema);
+        let tools = generator.generate_all();
+
+        // All tools should be generated when PK exists
+        assert!(tools.iter().any(|t| t.name == "listItems"), "listItems should be generated");
+        assert!(tools.iter().any(|t| t.name == "createItem"), "createItem should be generated");
+        assert!(tools.iter().any(|t| t.name == "getItem"), "getItem should be generated with PK");
+        assert!(tools.iter().any(|t| t.name == "updateItem"), "updateItem should be generated with PK");
+        assert!(tools.iter().any(|t| t.name == "deleteItem"), "deleteItem should be generated with PK");
     }
 }

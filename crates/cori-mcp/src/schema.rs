@@ -93,6 +93,11 @@ impl TableSchema {
         }
         "integer"
     }
+
+    /// Get all primary key column names.
+    pub fn get_primary_key_names(&self) -> Vec<&str> {
+        self.primary_key.iter().map(|s| s.as_str()).collect()
+    }
 }
 
 /// Schema information for a database column.
