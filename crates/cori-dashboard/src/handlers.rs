@@ -2,6 +2,7 @@
 
 use axum::{
     extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue},
     response::Html,
     Form,
 };
@@ -576,7 +577,7 @@ pub mod api {
         State(state): State<AppState>,
         Path(id): Path<String>,
         Form(form): Form<ApprovalDecisionForm>,
-    ) -> Result<Html<String>, (StatusCode, String)> {
+    ) -> Result<impl axum::response::IntoResponse, (StatusCode, String)> {
         let manager = state.approval_manager()
             .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
         
@@ -636,7 +637,10 @@ pub mod api {
             }
         }
         
-        Ok(Html(r#"<script>showToast('Approved and executed successfully'); window.location.reload();</script>"#.to_string()))
+        let mut headers = HeaderMap::new();
+        headers.insert("HX-Refresh", HeaderValue::from_static("true"));
+
+        Ok((headers, Html(String::new())))
     }
 
     /// Execute an approved action using the ToolExecutor.
@@ -706,7 +710,7 @@ pub mod api {
         State(state): State<AppState>,
         Path(id): Path<String>,
         Form(form): Form<ApprovalDecisionForm>,
-    ) -> Result<Html<String>, (StatusCode, String)> {
+    ) -> Result<impl axum::response::IntoResponse, (StatusCode, String)> {
         let manager = state.approval_manager()
             .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
         
@@ -730,7 +734,10 @@ pub mod api {
             ).await;
         }
         
-        Ok(Html(r#"<script>showToast('Rejected'); window.location.reload();</script>"#.to_string()))
+        let mut headers = HeaderMap::new();
+        headers.insert("HX-Refresh", HeaderValue::from_static("true"));
+
+        Ok((headers, Html(String::new())))
     }
 
     // -------------------------------------------------------------------------
