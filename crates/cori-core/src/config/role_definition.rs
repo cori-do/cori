@@ -896,6 +896,10 @@ tables:
         assert!(role.can_create_column("users", "any_column"));
         assert!(role.can_update_column("users", "any_column"));
         assert!(role.can_delete("users"));
+        
+        // Also check the higher-level can_create/can_update methods used by tool generator
+        assert!(role.can_create("users"), "can_create should be true for creatable: '*'");
+        assert!(role.can_update("users"), "can_update should be true for updatable: '*'");
     }
 
     #[test]

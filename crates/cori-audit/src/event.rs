@@ -120,6 +120,36 @@ pub struct AuditEvent {
     /// Additional metadata.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub meta: serde_json::Value,
+
+    // ===== Mutation audit fields (for tracking changes) =====
+    /// Tool arguments provided in the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+
+    /// State before mutation (for update/delete operations).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_state: Option<serde_json::Value>,
+
+    /// State after mutation (result of the operation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_state: Option<serde_json::Value>,
+
+    /// Diff showing what changed (computed from before_state and after_state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<serde_json::Value>,
+
+    // ===== Hierarchical linking fields =====
+    /// Parent event ID for hierarchical linking.
+    /// - For Approved/Denied events: points to the ApprovalRequested event
+    /// - For QueryExecuted (post-approval): points to the Approved event
+    /// - For QueryExecuted (direct): points to the ToolCalled event
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<Uuid>,
+
+    /// Correlation ID to group all events in a workflow.
+    /// All events in an approval workflow share the same correlation_id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl AuditEvent {
@@ -148,6 +178,12 @@ impl AuditEvent {
             connection_id: None,
             client_ip: None,
             meta: serde_json::Value::Null,
+            arguments: None,
+            before_state: None,
+            after_state: None,
+            diff: None,
+            parent_event_id: None,
+            correlation_id: None,
         }
     }
 
@@ -206,6 +242,16 @@ impl AuditEvent {
 
         if self.dry_run == Some(true) {
             line.push_str(" dry_run=true");
+        }
+
+        // Include diff summary if present
+        if let Some(ref diff) = self.diff {
+            if let Some(obj) = diff.as_object() {
+                let changed_fields: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+                if !changed_fields.is_empty() {
+                    line.push_str(&format!(" changed_fields=[{}]", changed_fields.join(",")));
+                }
+            }
         }
 
         line
@@ -297,9 +343,124 @@ impl AuditEventBuilder {
         self
     }
 
+    /// Set the tool arguments.
+    pub fn arguments(mut self, args: serde_json::Value) -> Self {
+        self.event.arguments = Some(args);
+        self
+    }
+
+    /// Set the state before mutation.
+    pub fn before_state(mut self, state: serde_json::Value) -> Self {
+        self.event.before_state = Some(state);
+        self
+    }
+
+    /// Set the state after mutation.
+    pub fn after_state(mut self, state: serde_json::Value) -> Self {
+        self.event.after_state = Some(state);
+        self
+    }
+
+    /// Set the diff showing what changed.
+    pub fn diff(mut self, diff: serde_json::Value) -> Self {
+        self.event.diff = Some(diff);
+        self
+    }
+
+    /// Compute and set the diff from before_state and after_state.
+    /// The diff shows fields that changed, with old and new values.
+    pub fn compute_diff(mut self) -> Self {
+        if let (Some(before), Some(after)) = (&self.event.before_state, &self.event.after_state) {
+            let diff = compute_json_diff(before, after);
+            if !diff.is_null() {
+                self.event.diff = Some(diff);
+            }
+        }
+        self
+    }
+
+    /// Set the parent event ID for hierarchical linking.
+    pub fn parent_event_id(mut self, parent_id: Uuid) -> Self {
+        self.event.parent_event_id = Some(parent_id);
+        self
+    }
+
+    /// Set the correlation ID for workflow grouping.
+    pub fn correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
+        self.event.correlation_id = Some(correlation_id.into());
+        self
+    }
+
     /// Build the audit event.
     pub fn build(self) -> AuditEvent {
         self.event
+    }
+}
+
+/// Compute a diff between two JSON values.
+/// Returns an object with changed fields showing { "old": ..., "new": ... }
+pub fn compute_json_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+
+    match (before, after) {
+        (Value::Object(before_obj), Value::Object(after_obj)) => {
+            let mut diff = Map::new();
+
+            // Check all keys in before
+            for (key, before_val) in before_obj {
+                match after_obj.get(key) {
+                    Some(after_val) if before_val != after_val => {
+                        diff.insert(
+                            key.clone(),
+                            json!({
+                                "old": before_val,
+                                "new": after_val
+                            }),
+                        );
+                    }
+                    None => {
+                        diff.insert(
+                            key.clone(),
+                            json!({
+                                "old": before_val,
+                                "new": null
+                            }),
+                        );
+                    }
+                    _ => {} // No change
+                }
+            }
+
+            // Check for new keys in after
+            for (key, after_val) in after_obj {
+                if !before_obj.contains_key(key) {
+                    diff.insert(
+                        key.clone(),
+                        json!({
+                            "old": null,
+                            "new": after_val
+                        }),
+                    );
+                }
+            }
+
+            if diff.is_empty() {
+                Value::Null
+            } else {
+                Value::Object(diff)
+            }
+        }
+        _ => {
+            // For non-object values, return simple diff if different
+            if before != after {
+                json!({
+                    "old": before,
+                    "new": after
+                })
+            } else {
+                Value::Null
+            }
+        }
     }
 }
 

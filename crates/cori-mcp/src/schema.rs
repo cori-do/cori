@@ -246,11 +246,12 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
                 .as_str()
                 .ok_or_else(|| SchemaParseError::MissingField("column.name".to_string()))?;
             
-            // Use native_type for data_type (preferred), fallback to type
-            let data_type = col_json["native_type"]
+            // Support both "data_type" (snapshot.json) and "type"/"native_type" (schema.yaml)
+            let data_type = col_json["data_type"]
                 .as_str()
+                .or_else(|| col_json["native_type"].as_str())
                 .or_else(|| col_json["type"].as_str())
-                .ok_or_else(|| SchemaParseError::MissingField("column.native_type or column.type".to_string()))?;
+                .ok_or_else(|| SchemaParseError::MissingField("column.data_type or column.type".to_string()))?;
 
             let mut column = ColumnSchema::new(col_name, data_type);
             column.nullable = col_json["nullable"].as_bool().unwrap_or(true);

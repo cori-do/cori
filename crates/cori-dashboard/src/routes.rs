@@ -52,6 +52,9 @@ fn api_routes() -> Router<AppState> {
         // Audit API
         .route("/audit", get(handlers::api::audit_list))
         .route("/audit/{id}", get(handlers::api::audit_get))
+        .route("/audit/{id}/tree", get(handlers::api::audit_get_tree))
+        .route("/audit/{id}/children", get(handlers::api::audit_get_children))
+        .route("/audit/{id}/children-rows", get(handlers::api::audit_get_children_rows))
         // Approvals API
         .route("/approvals", get(handlers::api::approvals_list))
         .route("/approvals/{id}", get(handlers::api::approval_get))

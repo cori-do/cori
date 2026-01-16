@@ -38,6 +38,12 @@ pub struct ExecutionResult {
     /// SQL query that was executed (for audit logging).
     #[serde(skip)]
     pub executed_sql: Option<String>,
+    /// State before mutation (for audit logging).
+    #[serde(skip)]
+    pub before_state: Option<Value>,
+    /// State after mutation (for audit logging).
+    #[serde(skip)]
+    pub after_state: Option<Value>,
 }
 
 impl ExecutionResult {
@@ -49,6 +55,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -60,6 +68,26 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: Some(sql.into()),
+            before_state: None,
+            after_state: None,
+        }
+    }
+
+    /// Create a successful mutation result with before/after state for audit.
+    pub fn mutation_success(
+        value: Value,
+        sql: impl Into<String>,
+        before_state: Option<Value>,
+        after_state: Option<Value>,
+    ) -> Self {
+        Self {
+            success: true,
+            content: vec![ToolContent::Json { json: value }],
+            is_dry_run: false,
+            error: None,
+            executed_sql: Some(sql.into()),
+            before_state,
+            after_state,
         }
     }
 
@@ -73,6 +101,8 @@ impl ExecutionResult {
             is_dry_run: true,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -85,6 +115,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: Some(msg),
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -98,6 +130,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 }
@@ -315,6 +349,44 @@ impl ToolExecutor {
         }
     }
 
+    /// Fetch current row values by ID for snapshot validation.
+    /// Used when creating approval requests for updates/deletes.
+    async fn fetch_row_snapshot(
+        &self,
+        table: &str,
+        pk_value: i64,
+        tenant_id: &str,
+    ) -> Option<Value> {
+        let pool = self.pool.as_ref()?;
+        let pk_column = self.get_primary_key_columns(table).into_iter().next()?;
+        let tenant_column = self.tenant_column_for_table(table);
+
+        let query = if let Some(tc) = &tenant_column {
+            // With tenant scoping
+            if tenant_id.parse::<i64>().is_ok() {
+                format!(
+                    "SELECT * FROM {} WHERE {} = {} AND {} = {}",
+                    table, pk_column, pk_value, tc, tenant_id
+                )
+            } else {
+                format!(
+                    "SELECT * FROM {} WHERE {} = {} AND {} = '{}'",
+                    table, pk_column, pk_value, tc, tenant_id.replace("'", "''")
+                )
+            }
+        } else {
+            format!(
+                "SELECT * FROM {} WHERE {} = {}",
+                table, pk_column, pk_value
+            )
+        };
+
+        match sqlx::query(&query).fetch_optional(pool).await {
+            Ok(Some(row)) => Some(row_to_json(&row, &[])),
+            _ => None,
+        }
+    }
+
     /// Execute a tool call.
     pub async fn execute(
         &self,
@@ -324,6 +396,12 @@ impl ToolExecutor {
         context: &ExecutionContext,
     ) -> ExecutionResult {
         let start_time = Instant::now();
+
+        // Generate correlation ID for this workflow
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+
+        // Track event IDs for hierarchical linking
+        let mut approval_requested_event_id: Option<uuid::Uuid> = None;
 
         // 0. Parse tool name to determine operation and table
         let operation = self.parse_tool_operation(&tool.name);
@@ -390,7 +468,13 @@ impl ToolExecutor {
             // Log authorization denied
             if let Some(logger) = &self.audit_logger {
                 let _ = logger
-                    .log_authorization_denied(&context.role, &context.tenant_id, &tool.name, &e.to_string())
+                    .log_authorization_denied(
+                        &context.role,
+                        &context.tenant_id,
+                        &tool.name,
+                        &e.to_string(),
+                        Some(&correlation_id),
+                    )
                     .await;
             }
             return ExecutionResult::error(e.to_string());
@@ -399,24 +483,88 @@ impl ToolExecutor {
         // 2. Check if approval is required (role-level requires_approval)
         if let Some(approval_fields) = validator.requires_approval(&validation_request) {
             if !options.dry_run {
-                let request = self.approval_manager.create_request(
-                    &tool.name,
-                    arguments.clone(),
-                    approval_fields,
-                    &context.tenant_id,
-                    &context.role,
-                );
+                // Determine if this is an update/delete operation that needs a snapshot
+                let request = match &operation {
+                    ToolOperation::Update { table } | ToolOperation::Delete { table } => {
+                        // For updates/deletes, snapshot current values for validation
+                        // Get the actual primary key column name from schema
+                        let pk_columns = self.get_primary_key_columns(table);
+                        let pk_value = pk_columns
+                            .first()
+                            .and_then(|pk_col| arguments.get(pk_col))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
 
-                            // Log approval request
+                        if pk_value > 0 {
+                            // Fetch current row values
+                            let snapshot =
+                                self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
+
+                            if let Some(original_values) = snapshot {
+                                // Create request with snapshot
+                                self.approval_manager.create_request_with_snapshot(
+                                    &tool.name,
+                                    arguments.clone(),
+                                    approval_fields,
+                                    &context.tenant_id,
+                                    &context.role,
+                                    table,
+                                    json!(pk_value),
+                                    original_values,
+                                )
+                            } else {
+                                // Record not found, create regular request
+                                self.approval_manager.create_request(
+                                    &tool.name,
+                                    arguments.clone(),
+                                    approval_fields,
+                                    &context.tenant_id,
+                                    &context.role,
+                                )
+                            }
+                        } else {
+                            // No valid ID, create regular request
+                            self.approval_manager.create_request(
+                                &tool.name,
+                                arguments.clone(),
+                                approval_fields,
+                                &context.tenant_id,
+                                &context.role,
+                            )
+                        }
+                    }
+                    _ => {
+                        // For other operations (create, etc.), no snapshot needed
+                        self.approval_manager.create_request(
+                            &tool.name,
+                            arguments.clone(),
+                            approval_fields,
+                            &context.tenant_id,
+                            &context.role,
+                        )
+                    }
+                };
+
+                // Log approval request with full context (arguments and original state)
             if let Some(logger) = &self.audit_logger {
-                let _ = logger
-                    .log_approval_requested(
+                if let Ok(event_id) = logger
+                    .log_approval_requested_with_context(
                         &context.role,
                         &context.tenant_id,
                         &tool.name,
                         &request.id,
+                        request.arguments.clone(),
+                        request.original_values.clone(),
+                        Some(&correlation_id),
                     )
-                    .await;
+                    .await {
+                    approval_requested_event_id = Some(event_id);
+                    
+                    // Update the approval request with audit IDs for hierarchical linking
+                    if let Err(e) = self.approval_manager.update_audit_ids(&request.id, event_id, correlation_id.clone()) {
+                        tracing::warn!(error = %e, "Failed to update approval request with audit IDs");
+                    }
+                }
             }
                 return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
             }
@@ -469,24 +617,139 @@ impl ToolExecutor {
                     .unwrap_or(0);
 
                 let sql = result.executed_sql.as_deref().unwrap_or("");
+                
+                // Check if this is a mutation with before/after state
+                if result.before_state.is_some() || result.after_state.is_some() {
+                    // Log mutation with diff
+                    let _ = logger
+                        .log_mutation_executed(
+                            &context.role,
+                            &context.tenant_id,
+                            &tool.name,
+                            sql,
+                            row_count,
+                            duration_ms,
+                            arguments.clone(),
+                            result.before_state.clone(),
+                            result.after_state.clone(),
+                            approval_requested_event_id,
+                            Some(&correlation_id),
+                        )
+                        .await;
+                } else {
+                    // Log regular query
+                    let _ = logger
+                        .log_query_executed(
+                            &context.role,
+                            &context.tenant_id,
+                            &tool.name,
+                            sql,
+                            row_count,
+                            duration_ms,
+                            approval_requested_event_id,
+                            Some(&correlation_id),
+                        )
+                        .await;
+                }
+            } else if let Some(error) = &result.error {
                 let _ = logger
-                    .log_query_executed(
+                    .log_query_failed(
                         &context.role,
                         &context.tenant_id,
                         &tool.name,
-                        sql,
-                        row_count,
-                        duration_ms,
+                        None,
+                        error,
+                        approval_requested_event_id,
+                        Some(&correlation_id),
                     )
-                    .await;
-            } else if let Some(error) = &result.error {
-                let _ = logger
-                    .log_query_failed(&context.role, &context.tenant_id, &tool.name, None, error)
                     .await;
             }
         }
 
         result
+    }
+
+    /// Execute an approved request after validating that data hasn't changed.
+    ///
+    /// This method should be called by the dashboard after an approval is granted.
+    /// It validates that the original snapshot matches current DB values before executing.
+    pub async fn execute_approved(
+        &self,
+        approval: &crate::approval::ApprovalRequest,
+        context: &ExecutionContext,
+    ) -> ExecutionResult {
+        // Validate snapshot if present (for updates/deletes)
+        if let (Some(table), Some(pk), Some(original_values)) = (
+            &approval.target_table,
+            &approval.target_pk,
+            &approval.original_values,
+        ) {
+            let pk_value = pk.as_i64().unwrap_or(0);
+            if pk_value > 0 {
+                // Fetch current values
+                let current_values = self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
+                
+                match current_values {
+                    Some(current) => {
+                        // Compare with original snapshot
+                        if &current != original_values {
+                            return ExecutionResult::error(format!(
+                                "Data has changed since approval was requested. Original: {}, Current: {}. Please create a new approval request.",
+                                original_values, current
+                            ));
+                        }
+                    }
+                    None => {
+                        return ExecutionResult::error(
+                            "Record not found or access denied. The record may have been deleted.",
+                        );
+                    }
+                }
+            }
+        }
+
+        // Find the tool definition for this request
+        // We need to generate a temporary tool definition for execution
+        let tool = ToolDefinition {
+            name: approval.tool_name.clone(),
+            description: Some(format!("Executing approved request: {}", approval.id)),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+            }),
+            annotations: None,
+        };
+
+        // Execute without dry-run and without re-checking approval
+        let options = CallToolOptions {
+            dry_run: false,
+            ..Default::default()
+        };
+
+        // Parse operation and execute directly (bypass approval check)
+        let operation = self.parse_tool_operation(&tool.name);
+        let arguments = approval.arguments.clone();
+
+        match operation {
+            ToolOperation::Get { table } => {
+                self.execute_get(&table, &arguments, &options, context).await
+            }
+            ToolOperation::List { table } => {
+                self.execute_list(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Create { table } => {
+                self.execute_create(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Update { table } => {
+                self.execute_update(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Delete { table } => {
+                self.execute_delete(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Custom { name } => {
+                self.execute_custom(&name, &arguments, &options, context).await
+            }
+        }
     }
 
     /// Validate arguments against tool constraints.
@@ -998,11 +1261,17 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_one(pool).await {
             Ok(row) => {
-                let data = row_to_json(&row, &[]);
-                ExecutionResult::success_with_sql(json!({
-                    "data": data,
-                    "message": "Record created successfully"
-                }), &query)
+                let after_state = row_to_json(&row, &[]);
+                // For create, before_state is None (record didn't exist)
+                ExecutionResult::mutation_success(
+                    json!({
+                        "data": after_state.clone(),
+                        "message": "Record created successfully"
+                    }),
+                    &query,
+                    None, // No before state for CREATE
+                    Some(after_state),
+                )
             }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -1158,6 +1427,13 @@ impl ToolExecutor {
             }
         });
 
+        // Capture before state for audit (using first PK value)
+        let before_state = if let Some((_, pk_val)) = pk_values.first() {
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+        } else {
+            None
+        };
+
         let query = if let Some(tc) = tenant_condition {
             format!(
                 "UPDATE {} SET {} WHERE {} AND {} RETURNING *",
@@ -1179,13 +1455,37 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_optional(pool).await {
             Ok(Some(row)) => {
-                let data = row_to_json(&row, &[]);
-                ExecutionResult::success_with_sql(json!({
-                    "data": data,
-                    "message": "Record updated successfully"
-                }), &query)
+                let after_state = row_to_json(&row, &[]);
+                ExecutionResult::mutation_success(
+                    json!({
+                        "data": after_state.clone(),
+                        "message": "Record updated successfully"
+                    }),
+                    &query,
+                    before_state,
+                    Some(after_state),
+                )
             }
-            Ok(None) => ExecutionResult::error("Record not found or access denied"),
+            Ok(None) => {
+                // Provide more specific error message
+                let pk_description = pk_values
+                    .iter()
+                    .map(|(col, val)| format!("{} = {}", col, val))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                if tenant_column.is_some() {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists for tenant '{}'. \
+                        The record may not exist or may belong to a different tenant.",
+                        table, pk_description, context.tenant_id
+                    ))
+                } else {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists.",
+                        table, pk_description
+                    ))
+                }
+            }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }
@@ -1264,6 +1564,13 @@ impl ToolExecutor {
             }
         });
 
+        // Capture before state for audit (using first PK value)
+        let before_state = if let Some((_, pk_val)) = pk_values.first() {
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+        } else {
+            None
+        };
+
         // Build RETURNING clause with all PK columns
         let returning_cols = pk_columns.join(", ");
 
@@ -1286,12 +1593,36 @@ impl ToolExecutor {
             Ok(Some(row)) => {
                 // Build response with all PK values
                 let deleted_keys = row_to_json(&row, &pk_columns);
-                ExecutionResult::success_with_sql(json!({
-                "message": "Record deleted successfully",
-                "deleted": deleted_keys
-            }), &query)
+                // For delete, after_state is null (record is gone)
+                ExecutionResult::mutation_success(
+                    json!({
+                        "message": "Record deleted successfully",
+                        "deleted": deleted_keys
+                    }),
+                    &query,
+                    before_state,
+                    None, // Record no longer exists
+                )
             }
-            Ok(None) => ExecutionResult::error("Record not found or access denied"),
+            Ok(None) => {
+                let pk_description = pk_values
+                    .iter()
+                    .map(|(col, val)| format!("{} = {}", col, val))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                if tenant_column.is_some() {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists for tenant '{}'. \
+                        The record may not exist or may belong to a different tenant.",
+                        table, pk_description, context.tenant_id
+                    ))
+                } else {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists.",
+                        table, pk_description
+                    ))
+                }
+            }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }

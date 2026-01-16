@@ -65,6 +65,6 @@ pub mod logger;
 pub mod storage;
 
 pub use error::AuditError;
-pub use event::{AuditEvent, AuditEventBuilder, AuditEventType};
+pub use event::{AuditEvent, AuditEventBuilder, AuditEventType, compute_json_diff};
 pub use logger::{AuditFilter, AuditLogger};
 pub use storage::{AuditStorage, ConsoleStorage, DualStorage, FileStorage, NullStorage};

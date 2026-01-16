@@ -7,7 +7,7 @@ pub mod config;
 // Re-export commonly used config types for convenience
 pub use config::{
     // Main config
-    AuditConfig, BiscuitConfig, CoriConfig, DashboardConfig,
+    ApprovalsConfig, AuditConfig, BiscuitConfig, CoriConfig, DashboardConfig,
     GuardrailsConfig, McpConfig, UpstreamConfig, VirtualSchemaConfig,
     // New schema-based config types
     SchemaDefinition, RulesDefinition, TypesDefinition, RoleDefinition, GroupDefinition,

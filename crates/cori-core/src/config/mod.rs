@@ -82,6 +82,10 @@ pub struct CoriConfig {
     #[serde(default)]
     pub audit: AuditConfig,
 
+    /// Approval workflow configuration.
+    #[serde(default)]
+    pub approvals: ApprovalsConfig,
+
     /// Virtual schema configuration.
     #[serde(default)]
     pub virtual_schema: VirtualSchemaConfig,
@@ -135,6 +139,7 @@ impl Default for CoriConfig {
             mcp: McpConfig::default(),
             dashboard: DashboardConfig::default(),
             audit: AuditConfig::default(),
+            approvals: ApprovalsConfig::default(),
             virtual_schema: VirtualSchemaConfig::default(),
             guardrails: GuardrailsConfig::default(),
             observability: ObservabilityConfig::default(),
@@ -183,6 +188,58 @@ impl Default for VirtualSchemaConfig {
             expose_indexes: false,
         }
     }
+}
+
+/// Approval workflow configuration.
+///
+/// Controls where approvals are stored and how long they remain valid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalsConfig {
+    /// Whether approvals are enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Directory for approval storage files (default: "approvals/").
+    /// Files created:
+    /// - pending.log: Requests awaiting decision
+    /// - approved.log: Approved requests with execution results
+    /// - denied.log: Rejected requests with denial reasons
+    #[serde(default = "default_approvals_directory")]
+    pub directory: PathBuf,
+
+    /// Default TTL for approval requests in hours.
+    #[serde(default = "default_ttl_hours")]
+    pub ttl_hours: u64,
+}
+
+impl Default for ApprovalsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: default_approvals_directory(),
+            ttl_hours: default_ttl_hours(),
+        }
+    }
+}
+
+impl ApprovalsConfig {
+    /// Get the directory path for approval storage.
+    pub fn get_directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Get the default TTL as a chrono Duration.
+    pub fn get_ttl(&self) -> chrono::Duration {
+        chrono::Duration::hours(self.ttl_hours as i64)
+    }
+}
+
+fn default_approvals_directory() -> PathBuf {
+    PathBuf::from("approvals")
+}
+
+fn default_ttl_hours() -> u64 {
+    24
 }
 
 /// Global guardrails configuration.
