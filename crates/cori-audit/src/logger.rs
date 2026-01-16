@@ -82,11 +82,13 @@ impl AuditLogger {
         self.config.enabled
     }
 
-    /// Log an audit event.
-    pub async fn log(&self, event: AuditEvent) -> Result<(), AuditError> {
+    /// Log an audit event and return its ID.
+    pub async fn log(&self, event: AuditEvent) -> Result<uuid::Uuid, AuditError> {
         if !self.config.enabled {
-            return Ok(());
+            return Ok(event.event_id);
         }
+
+        let event_id = event.event_id;
 
         // Also log to tracing for structured logging integration
         tracing::debug!(
@@ -95,15 +97,19 @@ impl AuditLogger {
             tenant = %event.tenant_id,
             role = %event.role,
             action = %event.action,
+            parent_event_id = ?event.parent_event_id,
+            correlation_id = ?event.correlation_id,
             "Audit event"
         );
 
-        self.storage.store(event).await
+        self.storage.store(event).await?;
+        Ok(event_id)
     }
 
     /// Log a tool call event.
     ///
     /// Use this when an MCP tool is invoked.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_tool_call(
         &self,
         role: &str,
@@ -111,7 +117,8 @@ impl AuditLogger {
         action: &str,
         sql: Option<&str>,
         dry_run: bool,
-    ) -> Result<(), AuditError> {
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
         let mut builder = AuditEvent::builder(AuditEventType::ToolCalled, role, tenant_id, action);
 
         if let Some(sql) = sql {
@@ -120,6 +127,9 @@ impl AuditLogger {
         if dry_run {
             builder = builder.dry_run(true);
         }
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
 
         self.log(builder.build()).await
     }
@@ -127,6 +137,7 @@ impl AuditLogger {
     /// Log a query execution event.
     ///
     /// Use this after a query has been executed.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_query_executed(
         &self,
         role: &str,
@@ -135,17 +146,73 @@ impl AuditLogger {
         sql: &str,
         row_count: u64,
         duration_ms: u64,
-    ) -> Result<(), AuditError> {
-        let event = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+            .sql(sql)
+            .row_count(row_count)
+            .duration_ms(duration_ms);
+
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        self.log(builder.build()).await
+    }
+
+    /// Log a mutation execution event with before/after state and diff.
+    ///
+    /// Use this for UPDATE/DELETE operations where you want to track what changed.
+    /// The diff is automatically computed from before_state and after_state.
+    /// Returns the event ID for hierarchical linking.
+    pub async fn log_mutation_executed(
+        &self,
+        role: &str,
+        tenant_id: &str,
+        action: &str,
+        sql: &str,
+        row_count: u64,
+        duration_ms: u64,
+        arguments: serde_json::Value,
+        before_state: Option<serde_json::Value>,
+        after_state: Option<serde_json::Value>,
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
             .sql(sql)
             .row_count(row_count)
             .duration_ms(duration_ms)
-            .build();
+            .arguments(arguments);
 
-        self.log(event).await
+        if let Some(before) = before_state {
+            builder = builder.before_state(before);
+        }
+
+        if let Some(after) = after_state {
+            builder = builder.after_state(after);
+        }
+
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        // Compute diff automatically
+        builder = builder.compute_diff();
+
+        self.log(builder.build()).await
     }
 
     /// Log a query failure event.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_query_failed(
         &self,
         role: &str,
@@ -153,12 +220,22 @@ impl AuditLogger {
         action: &str,
         sql: Option<&str>,
         error: &str,
-    ) -> Result<(), AuditError> {
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
         let mut builder = AuditEvent::builder(AuditEventType::QueryFailed, role, tenant_id, action)
             .error(error);
 
         if let Some(sql) = sql {
             builder = builder.sql(sql);
+        }
+
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
         }
 
         self.log(builder.build()).await
@@ -167,26 +244,67 @@ impl AuditLogger {
     /// Log an approval request event.
     ///
     /// Use this when an action requires human approval.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_approval_requested(
         &self,
         role: &str,
         tenant_id: &str,
         action: &str,
         approval_id: &str,
-    ) -> Result<(), AuditError> {
-        let event = AuditEvent::builder(
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(
+            AuditEventType::ApprovalRequested,
+            role,
+            tenant_id,
+            action,
+        )
+        .approval_id(approval_id);
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        self.log(builder.build()).await
+    }
+
+    /// Log an approval request event with full context.
+    ///
+    /// Use this when an action requires human approval. Includes the arguments
+    /// and original state for audit trail.
+    /// Returns the event ID for hierarchical linking.
+    pub async fn log_approval_requested_with_context(
+        &self,
+        role: &str,
+        tenant_id: &str,
+        action: &str,
+        approval_id: &str,
+        arguments: serde_json::Value,
+        original_values: Option<serde_json::Value>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(
             AuditEventType::ApprovalRequested,
             role,
             tenant_id,
             action,
         )
         .approval_id(approval_id)
-        .build();
+        .arguments(arguments);
 
-        self.log(event).await
+        if let Some(orig) = original_values {
+            builder = builder.before_state(orig);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        self.log(builder.build()).await
     }
 
     /// Log an approval granted event.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_approved(
         &self,
         role: &str,
@@ -194,16 +312,75 @@ impl AuditLogger {
         action: &str,
         approval_id: &str,
         approver: &str,
-    ) -> Result<(), AuditError> {
-        let event = AuditEvent::builder(AuditEventType::Approved, role, tenant_id, action)
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(AuditEventType::Approved, role, tenant_id, action)
             .approval_id(approval_id)
-            .approver(approver)
-            .build();
+            .approver(approver);
 
-        self.log(event).await
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        self.log(builder.build()).await
+    }
+
+    /// Log a mutation that was executed after approval, with full before/after state and diff.
+    ///
+    /// Use this after an approved mutation has been executed. This provides a complete
+    /// audit trail showing: arguments, original values, final result, and computed diff.
+    /// Returns the event ID for hierarchical linking.
+    pub async fn log_approved_mutation_executed(
+        &self,
+        role: &str,
+        tenant_id: &str,
+        action: &str,
+        approval_id: &str,
+        sql: &str,
+        row_count: u64,
+        duration_ms: u64,
+        arguments: serde_json::Value,
+        before_state: Option<serde_json::Value>,
+        after_state: Option<serde_json::Value>,
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+            .approval_id(approval_id)
+            .sql(sql)
+            .row_count(row_count)
+            .duration_ms(duration_ms)
+            .arguments(arguments);
+
+        if let Some(before) = before_state {
+            builder = builder.before_state(before);
+        }
+
+        if let Some(after) = after_state {
+            builder = builder.after_state(after);
+        }
+
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        // Compute diff automatically
+        builder = builder.compute_diff();
+
+        self.log(builder.build()).await
     }
 
     /// Log an approval denied event.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_denied(
         &self,
         role: &str,
@@ -212,7 +389,9 @@ impl AuditLogger {
         approval_id: &str,
         approver: &str,
         reason: Option<&str>,
-    ) -> Result<(), AuditError> {
+        parent_event_id: Option<uuid::Uuid>,
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
         let mut builder = AuditEvent::builder(AuditEventType::Denied, role, tenant_id, action)
             .approval_id(approval_id)
             .approver(approver);
@@ -221,35 +400,49 @@ impl AuditLogger {
             builder = builder.error(reason);
         }
 
+        if let Some(parent_id) = parent_event_id {
+            builder = builder.parent_event_id(parent_id);
+        }
+
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
         self.log(builder.build()).await
     }
 
     /// Log an authorization denied event.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_authorization_denied(
         &self,
         role: &str,
         tenant_id: &str,
         action: &str,
         reason: &str,
-    ) -> Result<(), AuditError> {
-        let event = AuditEvent::builder(
+        correlation_id: Option<&str>,
+    ) -> Result<uuid::Uuid, AuditError> {
+        let mut builder = AuditEvent::builder(
             AuditEventType::AuthorizationDenied,
             role,
             tenant_id,
             action,
         )
-        .error(reason)
-        .build();
+        .error(reason);
 
-        self.log(event).await
+        if let Some(corr_id) = correlation_id {
+            builder = builder.correlation_id(corr_id);
+        }
+
+        self.log(builder.build()).await
     }
 
     /// Log an authentication failure event.
+    /// Returns the event ID for hierarchical linking.
     pub async fn log_authentication_failed(
         &self,
         reason: &str,
         client_ip: Option<&str>,
-    ) -> Result<(), AuditError> {
+    ) -> Result<uuid::Uuid, AuditError> {
         let mut builder = AuditEvent::builder(
             AuditEventType::AuthenticationFailed,
             "unknown",
@@ -303,6 +496,16 @@ impl AuditLogger {
         })
         .await
     }
+
+    /// Get immediate children of an event.
+    pub async fn get_children(&self, parent_event_id: uuid::Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        self.storage.get_children(parent_event_id).await
+    }
+
+    /// Get full event tree (event and all descendants).
+    pub async fn get_event_tree(&self, event_id: uuid::Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        self.storage.get_event_tree(event_id).await
+    }
 }
 
 /// Filter for querying audit events.
@@ -328,6 +531,12 @@ pub struct AuditFilter {
     pub sort_by: Option<String>,
     /// Sort descending (default: true for newest first).
     pub sort_desc: Option<bool>,
+    /// Filter by parent event ID.
+    pub parent_event_id: Option<uuid::Uuid>,
+    /// Filter by correlation ID.
+    pub correlation_id: Option<String>,
+    /// Only return root events (events without a parent).
+    pub root_only: bool,
 }
 
 #[cfg(test)]
@@ -341,7 +550,7 @@ mod tests {
 
         // Should not error even when logging
         logger
-            .log_tool_call("admin", "acme", "test", None, false)
+            .log_tool_call("admin", "acme", "test", None, false, None)
             .await
             .unwrap();
     }
@@ -353,7 +562,7 @@ mod tests {
 
         // Should print to console
         logger
-            .log_tool_call("support_agent", "client_a", "listOrders", None, false)
+            .log_tool_call("support_agent", "client_a", "listOrders", None, false, None)
             .await
             .unwrap();
     }
@@ -369,6 +578,7 @@ mod tests {
                 "getCustomer",
                 Some("SELECT * FROM customers WHERE id = 1"),
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -386,6 +596,8 @@ mod tests {
                 "SELECT * FROM orders WHERE tenant_id = 'client_a'",
                 42,
                 15,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -396,12 +608,12 @@ mod tests {
         let logger = AuditLogger::disabled();
 
         // Request approval
-        logger
-            .log_approval_requested("support_agent", "acme", "deleteOrder", "apr_123")
+        let approval_event_id = logger
+            .log_approval_requested("support_agent", "acme", "deleteOrder", "apr_123", None)
             .await
             .unwrap();
 
-        // Approve
+        // Approve (child of approval request)
         logger
             .log_approved(
                 "support_agent",
@@ -409,11 +621,13 @@ mod tests {
                 "deleteOrder",
                 "apr_123",
                 "admin@example.com",
+                Some(approval_event_id),
+                None,
             )
             .await
             .unwrap();
 
-        // Or deny
+        // Or deny (also child of approval request)
         logger
             .log_denied(
                 "support_agent",
@@ -422,6 +636,8 @@ mod tests {
                 "apr_456",
                 "admin@example.com",
                 Some("Not authorized for bulk deletions"),
+                Some(approval_event_id),
+                None,
             )
             .await
             .unwrap();

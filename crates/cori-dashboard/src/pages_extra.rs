@@ -279,6 +279,10 @@ pub fn audit_logs_page(
     filters: &crate::api_types::AuditQueryParams,
     pagination: &PaginationInfo,
 ) -> String {
+    // Get current view mode (needed for event rendering)
+    let current_view = filters.view.as_deref().unwrap_or("timeline");
+    
+    // Generate event rows with hierarchical support
     let event_rows: String = events
         .iter()
         .map(|e| {
@@ -293,12 +297,48 @@ pub fn audit_logs_page(
                 AuditEventType::Denied => badge("Rejected", "red"),
             };
 
+            // Visual hierarchy indicators
+            let (indent, hierarchy_icon) = if e.parent_event_id.is_some() {
+                if current_view == "timeline" {
+                    // Timeline view: show visual connector and indentation
+                    (
+                        "pl-8",
+                        r#"<span class="absolute left-2 text-gray-400"><i class="fas fa-level-up-alt fa-rotate-90"></i></span>"#
+                    )
+                } else {
+                    // Grouped view: child rows (should be hidden by default and shown when parent is expanded)
+                    ("pl-8", "")
+                }
+            } else {
+                ("", "")
+            };
+
+            // For grouped view, add expand/collapse button for root events
+            let expand_button = if current_view == "hierarchical" && e.parent_event_id.is_none() {
+                format!(
+                    r##"<button class="mr-2 text-gray-500 hover:text-gray-700" 
+                             onclick="event.stopPropagation(); toggleChildren(this, '{}');">
+                        <i class="fas fa-chevron-right"></i>
+                    </button>"##,
+                    e.event_id
+                )
+            } else {
+                String::new()
+            };
+
             format!(
-                r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer" 
+                r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer {row_bg} parent-row" 
+                    data-event-id="{event_id}"
                     @click="sidePanelOpen = true"
                     hx-get="/api/audit/{event_id}" hx-target="#event-detail" hx-swap="innerHTML">
-                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">{time}</td>
-                <td class="px-4 py-3">{event_type_badge}</td>
+                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap relative {indent}">
+                    {hierarchy_icon}
+                    {time}
+                </td>
+                <td class="px-4 py-3">
+                    {expand_button}
+                    {event_type_badge}
+                </td>
                 <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{tenant}</td>
                 <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{role}</td>
                 <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 max-w-xs truncate font-mono" title="{query_full}">{query}</td>
@@ -307,6 +347,7 @@ pub fn audit_logs_page(
                 event_id = e.event_id,
                 time = e.occurred_at.format("%Y-%m-%d %H:%M:%S"),
                 event_type_badge = event_type_badge,
+                expand_button = expand_button,
                 tenant = html_escape(&e.tenant_id),
                 role = html_escape(&e.role),
                 query = html_escape(&truncate_str(e.sql.as_deref().unwrap_or(&e.action), 60)),
@@ -315,6 +356,9 @@ pub fn audit_logs_page(
                     .duration_ms
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "-".to_string()),
+                indent = indent,
+                hierarchy_icon = hierarchy_icon,
+                row_bg = if e.parent_event_id.is_some() { "bg-gray-50/50 dark:bg-gray-700/30" } else { "" },
             )
         })
         .collect();
@@ -477,17 +521,30 @@ pub fn audit_logs_page(
     } else {
         String::new()
     };
-
+    
     let content = format!(
         r##"<div class="flex items-center justify-between mb-6">
             <div>
                 <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Audit Logs</h1>
                 <p class="text-gray-600 dark:text-gray-400">Query execution history and events ({total_count} total)</p>
             </div>
-            <a href="/audit" class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
-                <i class="fas fa-sync-alt"></i>
-                <span>Refresh</span>
-            </a>
+            <div class="flex items-center gap-3">
+                <!-- View Toggle -->
+                <div class="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+                    <a href="/audit?view=timeline&{base_params}" 
+                       class="{timeline_btn_class}">
+                        <i class="fas fa-stream mr-2"></i>Timeline
+                    </a>
+                    <a href="/audit?view=hierarchical&{base_params}" 
+                       class="{grouped_btn_class}">
+                        <i class="fas fa-sitemap mr-2"></i>Grouped
+                    </a>
+                </div>
+                <a href="/audit" class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
+                    <i class="fas fa-sync-alt"></i>
+                    <span>Refresh</span>
+                </a>
+            </div>
         </div>
         
         <div class="relative" x-data="{{ sidePanelOpen: false }}">
@@ -568,7 +625,44 @@ pub fn audit_logs_page(
                  @click.away="sidePanelOpen = false">
                 <div id="event-detail" class="p-6"></div>
             </div>
-        </div>"##,
+        </div>
+        
+        <script>
+        function toggleChildren(button, eventId) {{
+            const icon = button.querySelector('i');
+            const parentRow = button.closest('tr');
+            const existingChildren = parentRow.nextElementSibling?.classList.contains('child-row');
+            
+            if (existingChildren) {{
+                // Collapse: remove all child rows
+                let nextRow = parentRow.nextElementSibling;
+                while (nextRow && nextRow.classList.contains('child-row')) {{
+                    const toRemove = nextRow;
+                    nextRow = nextRow.nextElementSibling;
+                    toRemove.remove();
+                }}
+                icon.classList.remove('fa-chevron-down');
+                icon.classList.add('fa-chevron-right');
+            }} else {{
+                // Expand: fetch and insert children
+                icon.classList.remove('fa-chevron-right');
+                icon.classList.add('fa-chevron-down');
+                
+                fetch(`/api/audit/${{eventId}}/children-rows`)
+                    .then(response => response.text())
+                    .then(html => {{
+                        if (html) {{
+                            parentRow.insertAdjacentHTML('afterend', html);
+                            // Initialize HTMX for new elements
+                            if (window.htmx) {{
+                                htmx.process(parentRow.parentElement);
+                            }}
+                        }}
+                    }})
+                    .catch(err => console.error('Failed to load children:', err));
+            }}
+        }}
+        </script>"##,
         total_count = pagination.total_count,
         tenant_filter = html_escape(filters.tenant_id.as_deref().unwrap_or("")),
         role_filter = html_escape(filters.role.as_deref().unwrap_or("")),
@@ -598,6 +692,17 @@ pub fn audit_logs_page(
             ""
         },
         pagination_html = pagination_html,
+        base_params = build_filter_params(filters),
+        timeline_btn_class = if current_view == "timeline" {
+            "px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-md transition-colors"
+        } else {
+            "px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md transition-colors"
+        },
+        grouped_btn_class = if current_view == "hierarchical" {
+            "px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-md transition-colors"
+        } else {
+            "px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md transition-colors"
+        },
     );
 
     layout("Audit Logs", &content)
@@ -663,6 +768,92 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
         )
     }).unwrap_or_default();
 
+    let json_section = |title: &str, value: &serde_json::Value| -> String {
+        let pretty = serde_json::to_string_pretty(value).unwrap_or_default();
+        let escaped = pretty.replace('<', "&lt;").replace('>', "&gt;");
+        format!(
+            r##"<div class="mb-6">
+                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{}</h4>
+                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg text-sm overflow-x-auto"><code>{}</code></pre>
+            </div>"##,
+            title, escaped
+        )
+    };
+
+    let arguments_section = event
+        .arguments
+        .as_ref()
+        .map(|args| json_section("Arguments", args))
+        .unwrap_or_default();
+
+    let before_section = event
+        .before_state
+        .as_ref()
+        .map(|state| json_section("Before State", state))
+        .unwrap_or_default();
+
+    let after_section = event
+        .after_state
+        .as_ref()
+        .map(|state| json_section("After State", state))
+        .unwrap_or_default();
+
+    let diff_section = event
+        .diff
+        .as_ref()
+        .map(|diff| json_section("Diff", diff))
+        .unwrap_or_default();
+
+    // Related Events section (hierarchical workflow)
+    let related_events_section = if event.parent_event_id.is_some() || event.correlation_id.is_some() {
+        let parent_link = event.parent_event_id.map(|pid| format!(
+            r##"<div class="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-900/30"
+                 hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
+                <i class="fas fa-level-up-alt fa-rotate-90 text-blue-600"></i>
+                <span class="text-sm text-gray-700 dark:text-gray-300">Parent Event</span>
+                <span class="text-xs font-mono text-gray-500">{}</span>
+            </div>"##, pid, pid
+        )).unwrap_or_default();
+        
+        let children_section = format!(
+            r##"<div hx-get="/api/audit/{}/children" hx-trigger="load" hx-swap="innerHTML">
+                <div class="text-sm text-gray-500 italic">Loading children...</div>
+            </div>"##,
+            event.event_id
+        );
+        
+        let correlation_badge = event.correlation_id.as_ref().map(|cid| format!(
+            r##"<div class="flex items-center gap-2">
+                <span class="text-sm text-gray-500">Workflow ID:</span>
+                <span class="text-xs font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{}</span>
+                <a href="/audit?correlation_id={}" class="text-sm text-primary-600 hover:text-primary-700">
+                    <i class="fas fa-external-link-alt"></i> View all
+                </a>
+            </div>"##, cid, cid
+        )).unwrap_or_default();
+        
+        format!(
+            r##"<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
+                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                    <i class="fas fa-project-diagram mr-2"></i>Related Events
+                </h4>
+                <div class="space-y-3">
+                    {}
+                    {}
+                    <div>
+                        <h5 class="text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Child Events</h5>
+                        {}
+                    </div>
+                </div>
+            </div>"##,
+            correlation_badge,
+            parent_link,
+            children_section
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r##"<div class="h-full flex flex-col">
             <div class="flex items-center justify-between mb-6 pb-4 border-b border-gray-200 dark:border-gray-700">
@@ -701,10 +892,17 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
                 </div>
                 
                 {query_section}
+
+                {arguments_section}
+                {before_section}
+                {after_section}
+                {diff_section}
                 
                 {error_section}
                 
                 {meta_section}
+                
+                {related_events_section}
             </div>
         </div>"##,
         event_id = event.event_id,
@@ -714,6 +912,10 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
         occurred_at = event.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
         duration = event.duration_ms.map(|d| format!("{}ms", d)).unwrap_or("-".to_string()),
         query_section = query_section,
+        arguments_section = arguments_section,
+        before_section = before_section,
+        after_section = after_section,
+        diff_section = diff_section,
         error_section = event.error.as_ref().map(|e| format!(
             r#"<div class="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
                 <h4 class="text-sm font-medium text-red-700 dark:text-red-300 mb-1">Error</h4>
@@ -729,6 +931,7 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
                 serde_json::to_string_pretty(&event.meta).unwrap_or_default()
             )
         } else { String::new() },
+        related_events_section = related_events_section,
     )
 }
 
@@ -898,7 +1101,7 @@ fn approval_diff_table(approval: &ApprovalRequest) -> String {
         return String::new();
     }
 
-    let mut before_map = before_obj.cloned().unwrap_or_default();
+    let before_map = before_obj.cloned().unwrap_or_default();
     let mut after_map = before_map.clone();
 
     let is_delete = approval.tool_name.to_lowercase().starts_with("delete");

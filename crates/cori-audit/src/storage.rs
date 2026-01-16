@@ -27,6 +27,12 @@ pub trait AuditStorage: Send + Sync {
 
     /// Get an audit event by ID.
     async fn get(&self, event_id: Uuid) -> Result<Option<AuditEvent>, AuditError>;
+
+    /// Get immediate children of an event.
+    async fn get_children(&self, parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError>;
+
+    /// Get full event tree (event and all descendants).
+    async fn get_event_tree(&self, event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError>;
 }
 
 /// Console storage that outputs human-readable log lines to stdout.
@@ -66,6 +72,16 @@ impl AuditStorage for ConsoleStorage {
     async fn get(&self, _event_id: Uuid) -> Result<Option<AuditEvent>, AuditError> {
         // Console storage doesn't support retrieval
         Ok(None)
+    }
+
+    async fn get_children(&self, _parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        // Console storage doesn't support querying
+        Ok(vec![])
+    }
+
+    async fn get_event_tree(&self, _event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        // Console storage doesn't support querying
+        Ok(vec![])
     }
 }
 
@@ -269,6 +285,57 @@ impl AuditStorage for FileStorage {
 
         Ok(events.iter().find(|e| e.event_id == event_id).cloned())
     }
+
+    async fn get_children(&self, parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        let events = self.events.read().map_err(|e| {
+            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
+        })?;
+
+        let mut children: Vec<_> = events
+            .iter()
+            .filter(|e| e.parent_event_id == Some(parent_event_id))
+            .cloned()
+            .collect();
+
+        // Sort by occurrence time
+        children.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at));
+
+        Ok(children)
+    }
+
+    async fn get_event_tree(&self, event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        let events = self.events.read().map_err(|e| {
+            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
+        })?;
+
+        // Find the root event
+        let root = match events.iter().find(|e| e.event_id == event_id) {
+            Some(e) => e.clone(),
+            None => return Ok(vec![]),
+        };
+
+        let mut tree = vec![root];
+        let mut to_process = vec![event_id];
+
+        // BFS to collect all descendants
+        while let Some(parent_id) = to_process.pop() {
+            let children: Vec<_> = events
+                .iter()
+                .filter(|e| e.parent_event_id == Some(parent_id))
+                .cloned()
+                .collect();
+
+            for child in children {
+                to_process.push(child.event_id);
+                tree.push(child);
+            }
+        }
+
+        // Sort by occurrence time
+        tree.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at));
+
+        Ok(tree)
+    }
 }
 
 impl FileStorage {
@@ -303,6 +370,19 @@ impl FileStorage {
             if event.occurred_at > end {
                 return false;
             }
+        }
+        if let Some(parent_id) = filter.parent_event_id {
+            if event.parent_event_id != Some(parent_id) {
+                return false;
+            }
+        }
+        if let Some(ref correlation_id) = filter.correlation_id {
+            if event.correlation_id.as_ref() != Some(correlation_id) {
+                return false;
+            }
+        }
+        if filter.root_only && event.parent_event_id.is_some() {
+            return false;
         }
         true
     }
@@ -354,6 +434,14 @@ impl AuditStorage for DualStorage {
     async fn get(&self, event_id: Uuid) -> Result<Option<AuditEvent>, AuditError> {
         self.file.get(event_id).await
     }
+
+    async fn get_children(&self, parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        self.file.get_children(parent_event_id).await
+    }
+
+    async fn get_event_tree(&self, event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        self.file.get_event_tree(event_id).await
+    }
 }
 
 /// No-op storage that discards all events.
@@ -390,6 +478,14 @@ impl AuditStorage for NullStorage {
 
     async fn get(&self, _event_id: Uuid) -> Result<Option<AuditEvent>, AuditError> {
         Ok(None)
+    }
+
+    async fn get_children(&self, _parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        Ok(vec![])
+    }
+
+    async fn get_event_tree(&self, _event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+        Ok(vec![])
     }
 }
 

@@ -364,6 +364,33 @@ impl ApprovalFileStorage {
         }
     }
 
+    /// Update an approval request with audit event ID and correlation ID.
+    pub fn update_audit_ids(&self, id: &str, event_id: uuid::Uuid, correlation_id: String) -> Result<(), ApprovalStorageError> {
+        // Try pending first
+        {
+            let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+            if let Some(request) = pending.get_mut(id) {
+                request.set_audit_ids(event_id, correlation_id);
+                // Rewrite the pending file
+                Self::rewrite_file(&self.pending_path(), &pending)?;
+                return Ok(());
+            }
+        }
+
+        // If not in pending, try approved
+        {
+            let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
+            if let Some(request) = approved.get_mut(id) {
+                request.set_audit_ids(event_id, correlation_id);
+                // Rewrite the approved file
+                Self::rewrite_file(&self.approved_path(), &approved)?;
+                return Ok(());
+            }
+        }
+
+        Err(ApprovalStorageError::NotFound(id.to_string()))
+    }
+
     /// Move a request from pending to approved.
     fn move_to_approved(&self, request: ApprovalRequest) -> Result<(), ApprovalStorageError> {
         // Add to approved cache

@@ -213,6 +213,12 @@ pub struct AuditQueryParams {
     pub sort_by: Option<String>,
     /// Sort direction: "asc" or "desc" (default: desc).
     pub sort_dir: Option<String>,
+    /// View mode: "timeline" (default) or "hierarchical" (grouped by correlation_id).
+    pub view: Option<String>,
+    /// Only return root events (events without a parent) for hierarchical view.
+    pub root_only: Option<bool>,
+    /// Filter by correlation ID.
+    pub correlation_id: Option<String>,
 }
 
 /// Audit event response.

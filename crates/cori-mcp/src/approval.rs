@@ -83,6 +83,18 @@ pub struct ApprovalRequest {
     /// Clients can poll for this result using getApprovalResult.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_result: Option<serde_json::Value>,
+
+    // === Audit trail fields for hierarchical event linking ===
+
+    /// Audit event ID of the approval request event.
+    /// Used for hierarchical linking in audit logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_event_id: Option<uuid::Uuid>,
+
+    /// Correlation ID for the entire workflow.
+    /// Links all events in the approval workflow together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -114,6 +126,8 @@ impl ApprovalRequest {
             target_table: None,
             target_pk: None,
             execution_result: None,
+            audit_event_id: None,
+            correlation_id: None,
         }
     }
 
@@ -140,6 +154,12 @@ impl ApprovalRequest {
     /// Set the execution result after approval.
     pub fn set_execution_result(&mut self, result: serde_json::Value) {
         self.execution_result = Some(result);
+    }
+
+    /// Set the audit event ID and correlation ID for hierarchical linking.
+    pub fn set_audit_ids(&mut self, event_id: uuid::Uuid, correlation_id: String) {
+        self.audit_event_id = Some(event_id);
+        self.correlation_id = Some(correlation_id);
     }
 
     /// Check if the request has expired.
@@ -453,6 +473,24 @@ impl ApprovalManager {
             }
             ApprovalStorage::File(storage) => {
                 storage.update_with_result(id, result)
+                    .map_err(|_| ApprovalError::NotFound(id.to_string()))
+            }
+        }
+    }
+
+    /// Update an approval request with audit event ID and correlation ID.
+    pub fn update_audit_ids(&self, id: &str, event_id: uuid::Uuid, correlation_id: String) -> Result<(), ApprovalError> {
+        match &self.storage {
+            ApprovalStorage::InMemory(requests) => {
+                let mut requests = requests.write().unwrap();
+                let request = requests
+                    .get_mut(id)
+                    .ok_or_else(|| ApprovalError::NotFound(id.to_string()))?;
+                request.set_audit_ids(event_id, correlation_id);
+                Ok(())
+            }
+            ApprovalStorage::File(storage) => {
+                storage.update_audit_ids(id, event_id, correlation_id)
                     .map_err(|_| ApprovalError::NotFound(id.to_string()))
             }
         }

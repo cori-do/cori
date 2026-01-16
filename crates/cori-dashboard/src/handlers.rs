@@ -9,6 +9,7 @@ use axum::{
 use crate::state::AppState;
 use crate::pages;
 use crate::pages_extra;
+use crate::templates;
 use cori_audit::logger::AuditFilter;
 
 // =============================================================================
@@ -132,6 +133,9 @@ pub async fn audit_logs(
         offset: None,
         sort_by: None,
         sort_desc: None,
+        parent_event_id: None,
+        correlation_id: None,
+        root_only: false,
     };
     
     // Build filter for query
@@ -146,6 +150,9 @@ pub async fn audit_logs(
         offset,
         sort_by: params.sort_by.clone(),
         sort_desc: Some(sort_desc),
+        parent_event_id: None,
+        correlation_id: None,
+        root_only: false,
     };
     
     let (events, total_count) = if let Some(logger) = state.audit_logger() {
@@ -486,6 +493,9 @@ pub mod api {
         let sort_desc = params.sort_dir.as_deref() != Some("asc");
         
         let (events, total) = if let Some(logger) = state.audit_logger() {
+            // Determine if root_only based on view parameter
+            let root_only = params.view.as_deref() == Some("hierarchical") || params.root_only.unwrap_or(false);
+
             // Count filter (no limit/offset)
             let count_filter = cori_audit::logger::AuditFilter {
                 tenant_id: params.tenant_id.clone(),
@@ -498,6 +508,9 @@ pub mod api {
                 offset: None,
                 sort_by: None,
                 sort_desc: None,
+                parent_event_id: None,
+                correlation_id: params.correlation_id.clone(),
+                root_only,
             };
             
             // Query filter
@@ -512,6 +525,9 @@ pub mod api {
                 offset: params.offset,
                 sort_by: params.sort_by,
                 sort_desc: Some(sort_desc),
+                parent_event_id: None,
+                correlation_id: params.correlation_id,
+                root_only,
             };
             
             let events = logger.query(query_filter).await.unwrap_or_default();
@@ -542,6 +558,132 @@ pub mod api {
         }
         
         Err(StatusCode::NOT_FOUND)
+    }
+
+    pub async fn audit_get_tree(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Vec<cori_audit::AuditEvent>>, StatusCode> {
+        let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+        
+        if let Some(logger) = state.audit_logger() {
+            if let Ok(tree) = logger.get_event_tree(event_id).await {
+                return Ok(Json(tree));
+            }
+        }
+        
+        Err(StatusCode::NOT_FOUND)
+    }
+
+    pub async fn audit_get_children(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> Result<Html<String>, StatusCode> {
+        let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+        
+        if let Some(logger) = state.audit_logger() {
+            if let Ok(children) = logger.get_children(event_id).await {
+                if children.is_empty() {
+                    return Ok(Html(r#"<div class="text-sm text-gray-500 italic">No child events</div>"#.to_string()));
+                }
+                
+                let children_html = children.iter().map(|child| {
+                    let event_type_badge = match child.event_type {
+                        cori_audit::AuditEventType::QueryExecuted => templates::badge("Executed", "green"),
+                        cori_audit::AuditEventType::QueryFailed => templates::badge("Failed", "red"),
+                        cori_audit::AuditEventType::AuthenticationFailed => templates::badge("Auth Failed", "red"),
+                        cori_audit::AuditEventType::AuthorizationDenied => templates::badge("Denied", "orange"),
+                        cori_audit::AuditEventType::ToolCalled => templates::badge("Tool Call", "blue"),
+                        cori_audit::AuditEventType::ApprovalRequested => templates::badge("Pending", "yellow"),
+                        cori_audit::AuditEventType::Approved => templates::badge("Approved", "green"),
+                        cori_audit::AuditEventType::Denied => templates::badge("Rejected", "red"),
+                    };
+                    
+                    format!(
+                        r##"<div class="flex items-center gap-2 p-3 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-600"
+                             hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
+                            {}
+                            <div class="flex-1">
+                                <div class="text-sm text-gray-900 dark:text-white font-medium">{}</div>
+                                <div class="text-xs text-gray-500">{}</div>
+                            </div>
+                            <i class="fas fa-chevron-right text-gray-400"></i>
+                        </div>"##,
+                        child.event_id,
+                        event_type_badge,
+                        child.action,
+                        child.occurred_at.format("%Y-%m-%d %H:%M:%S")
+                    )
+                }).collect::<Vec<_>>().join("\n");
+                
+                return Ok(Html(children_html));
+            }
+        }
+        
+        Err(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    pub async fn audit_get_children_rows(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> Result<Html<String>, StatusCode> {
+        let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+        
+        if let Some(logger) = state.audit_logger() {
+            if let Ok(children) = logger.get_children(event_id).await {
+                if children.is_empty() {
+                    return Ok(Html(String::new()));
+                }
+                
+                let children_html = children.iter().map(|child| {
+                    let event_type_badge = match child.event_type {
+                        cori_audit::AuditEventType::QueryExecuted => templates::badge("Executed", "green"),
+                        cori_audit::AuditEventType::QueryFailed => templates::badge("Failed", "red"),
+                        cori_audit::AuditEventType::AuthenticationFailed => templates::badge("Auth Failed", "red"),
+                        cori_audit::AuditEventType::AuthorizationDenied => templates::badge("Denied", "orange"),
+                        cori_audit::AuditEventType::ToolCalled => templates::badge("Tool Call", "blue"),
+                        cori_audit::AuditEventType::ApprovalRequested => templates::badge("Pending", "yellow"),
+                        cori_audit::AuditEventType::Approved => templates::badge("Approved", "green"),
+                        cori_audit::AuditEventType::Denied => templates::badge("Rejected", "red"),
+                    };
+                    
+                    let sql_or_action = child.sql.as_deref().unwrap_or(&child.action);
+                    let truncated = if sql_or_action.len() > 60 {
+                        format!("{}...", &sql_or_action[..60])
+                    } else {
+                        sql_or_action.to_string()
+                    };
+                    
+                    format!(
+                        r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer bg-gray-50/50 dark:bg-gray-700/30 child-row" 
+                            @click="sidePanelOpen = true"
+                            hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
+                        <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap relative pl-12">
+                            <span class="absolute left-6 text-gray-400"><i class="fas fa-level-up-alt fa-rotate-90"></i></span>
+                            {}
+                        </td>
+                        <td class="px-4 py-3">{}</td>
+                        <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{}</td>
+                        <td class="px-4 py-3 text-sm text-gray-900 dark:text-white">{}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 max-w-xs truncate font-mono" title="{}">{}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{}</td>
+                    </tr>"##,
+                        child.event_id,
+                        child.occurred_at.format("%Y-%m-%d %H:%M:%S"),
+                        event_type_badge,
+                        child.tenant_id,
+                        child.role,
+                        sql_or_action,
+                        truncated,
+                        child.duration_ms.map(|d| format!("{}ms", d)).unwrap_or_else(|| "-".to_string()),
+                    )
+                }).collect::<Vec<_>>().join("\n");
+                
+                return Ok(Html(children_html));
+            }
+        }
+        
+        Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
     // -------------------------------------------------------------------------
@@ -589,49 +731,80 @@ pub mod api {
         manager.approve(&id, approver, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
         
-        // Log the approval event
-        if let Some(logger) = state.audit_logger() {
-            let _ = logger.log_approved(
+        // Log the approval event (child of approval request event)
+        let approved_event_id = if let Some(logger) = state.audit_logger() {
+            logger.log_approved(
                 &approval.role,
                 &approval.tenant_id,
                 &approval.tool_name,
                 &id,
                 approver,
-            ).await;
-        }
+                approval.audit_event_id,
+                approval.correlation_id.as_deref(),
+            ).await.ok()
+        } else {
+            None
+        };
         
         // Execute the approved action
         let execution_result = execute_approved_action(&state, &approval).await;
         
-        // Store the execution result
-        if let Some(result_json) = execution_result {
+        // Store the execution result and log with diff
+        if let Some(result) = execution_result {
+            // Convert to JSON for storage
+            let result_json = serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({
+                "success": result.success,
+                "error": result.error
+            }));
+            
             if let Err(e) = manager.update_with_result(&id, result_json.clone()) {
                 tracing::warn!(error = %e, "Failed to store execution result for approval {}", id);
             }
             
-            // Log the execution result
+            // Log the execution result with diff if this was a mutation
             if let Some(logger) = state.audit_logger() {
-                let success = result_json.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                if success {
-                    // Log successful tool execution
-                    let _ = logger.log_tool_call(
-                        &approval.role,
-                        &approval.tenant_id,
-                        &format!("{} (approved:{})", approval.tool_name, id),
-                        None,
-                        false,
-                    ).await;
+                if result.success {
+                    let sql = result.executed_sql.as_deref().unwrap_or("");
+                    
+                    // Check if this is a mutation with before/after state
+                    if result.before_state.is_some() || result.after_state.is_some() {
+                        // Log approved mutation with full diff (child of approved event)
+                        let _ = logger.log_approved_mutation_executed(
+                            &approval.role,
+                            &approval.tenant_id,
+                            &format!("{} (approved:{})", approval.tool_name, id),
+                            &id,
+                            sql,
+                            1, // row_count
+                            0, // duration_ms (not tracked here)
+                            approval.arguments.clone(),
+                            result.before_state.clone(),
+                            result.after_state.clone(),
+                            approved_event_id,
+                            approval.correlation_id.as_deref(),
+                        ).await;
+                    } else {
+                        // Log successful tool execution without diff
+                        let _ = logger.log_tool_call(
+                            &approval.role,
+                            &approval.tenant_id,
+                            &format!("{} (approved:{})", approval.tool_name, id),
+                            Some(sql),
+                            false,
+                            approval.correlation_id.as_deref(),
+                        ).await;
+                    }
                 } else {
-                    let error = result_json.get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error");
+                    let error = result.error.as_deref().unwrap_or("Unknown error");
                     // Log failed tool execution
                     let _ = logger.log_query_failed(
                         &approval.role,
                         &approval.tenant_id,
                         &format!("{} (approved:{})", approval.tool_name, id),
-                        None,
+                        result.executed_sql.as_deref(),
                         error,
+                        approved_event_id,
+                        approval.correlation_id.as_deref(),
                     ).await;
                 }
             }
@@ -647,7 +820,7 @@ pub mod api {
     async fn execute_approved_action(
         state: &AppState,
         approval: &cori_mcp::ApprovalRequest,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<cori_mcp::ExecutionResult> {
         // Get the role definition for the approval's role
         let role = state.get_role(&approval.role)?;
         
@@ -665,10 +838,9 @@ pub mod api {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to connect to database for approved action execution");
-                return Some(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to connect to database: {}", e)
-                }));
+                return Some(cori_mcp::ExecutionResult::error(
+                    format!("Failed to connect to database: {}", e)
+                ));
             }
         };
         
@@ -696,14 +868,8 @@ pub mod api {
             connection_id: Some(format!("dashboard-approval-{}", approval.id)),
         };
         
-        // Execute the approved action
-        let result = executor.execute_approved(approval, &context).await;
-        
-        // Convert to JSON
-        Some(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({
-            "success": result.success,
-            "error": result.error
-        })))
+        // Execute the approved action and return the full result
+        Some(executor.execute_approved(approval, &context).await)
     }
 
     pub async fn approval_reject(
@@ -722,7 +888,7 @@ pub mod api {
         manager.reject(&id, rejector, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
         
-        // Log the denial event
+        // Log the denial event (child of approval request event)
         if let Some(logger) = state.audit_logger() {
             let _ = logger.log_denied(
                 &approval.role,
@@ -731,6 +897,8 @@ pub mod api {
                 &id,
                 rejector,
                 form.reason.as_deref(),
+                approval.audit_event_id,
+                approval.correlation_id.as_deref(),
             ).await;
         }
         

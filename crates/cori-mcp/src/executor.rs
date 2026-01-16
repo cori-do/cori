@@ -38,6 +38,12 @@ pub struct ExecutionResult {
     /// SQL query that was executed (for audit logging).
     #[serde(skip)]
     pub executed_sql: Option<String>,
+    /// State before mutation (for audit logging).
+    #[serde(skip)]
+    pub before_state: Option<Value>,
+    /// State after mutation (for audit logging).
+    #[serde(skip)]
+    pub after_state: Option<Value>,
 }
 
 impl ExecutionResult {
@@ -49,6 +55,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -60,6 +68,26 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: Some(sql.into()),
+            before_state: None,
+            after_state: None,
+        }
+    }
+
+    /// Create a successful mutation result with before/after state for audit.
+    pub fn mutation_success(
+        value: Value,
+        sql: impl Into<String>,
+        before_state: Option<Value>,
+        after_state: Option<Value>,
+    ) -> Self {
+        Self {
+            success: true,
+            content: vec![ToolContent::Json { json: value }],
+            is_dry_run: false,
+            error: None,
+            executed_sql: Some(sql.into()),
+            before_state,
+            after_state,
         }
     }
 
@@ -73,6 +101,8 @@ impl ExecutionResult {
             is_dry_run: true,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -85,6 +115,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: Some(msg),
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 
@@ -98,6 +130,8 @@ impl ExecutionResult {
             is_dry_run: false,
             error: None,
             executed_sql: None,
+            before_state: None,
+            after_state: None,
         }
     }
 }
@@ -363,6 +397,12 @@ impl ToolExecutor {
     ) -> ExecutionResult {
         let start_time = Instant::now();
 
+        // Generate correlation ID for this workflow
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+
+        // Track event IDs for hierarchical linking
+        let mut approval_requested_event_id: Option<uuid::Uuid> = None;
+
         // 0. Parse tool name to determine operation and table
         let operation = self.parse_tool_operation(&tool.name);
 
@@ -428,7 +468,13 @@ impl ToolExecutor {
             // Log authorization denied
             if let Some(logger) = &self.audit_logger {
                 let _ = logger
-                    .log_authorization_denied(&context.role, &context.tenant_id, &tool.name, &e.to_string())
+                    .log_authorization_denied(
+                        &context.role,
+                        &context.tenant_id,
+                        &tool.name,
+                        &e.to_string(),
+                        Some(&correlation_id),
+                    )
                     .await;
             }
             return ExecutionResult::error(e.to_string());
@@ -499,16 +545,26 @@ impl ToolExecutor {
                     }
                 };
 
-                // Log approval request
+                // Log approval request with full context (arguments and original state)
             if let Some(logger) = &self.audit_logger {
-                let _ = logger
-                    .log_approval_requested(
+                if let Ok(event_id) = logger
+                    .log_approval_requested_with_context(
                         &context.role,
                         &context.tenant_id,
                         &tool.name,
                         &request.id,
+                        request.arguments.clone(),
+                        request.original_values.clone(),
+                        Some(&correlation_id),
                     )
-                    .await;
+                    .await {
+                    approval_requested_event_id = Some(event_id);
+                    
+                    // Update the approval request with audit IDs for hierarchical linking
+                    if let Err(e) = self.approval_manager.update_audit_ids(&request.id, event_id, correlation_id.clone()) {
+                        tracing::warn!(error = %e, "Failed to update approval request with audit IDs");
+                    }
+                }
             }
                 return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
             }
@@ -561,19 +617,51 @@ impl ToolExecutor {
                     .unwrap_or(0);
 
                 let sql = result.executed_sql.as_deref().unwrap_or("");
+                
+                // Check if this is a mutation with before/after state
+                if result.before_state.is_some() || result.after_state.is_some() {
+                    // Log mutation with diff
+                    let _ = logger
+                        .log_mutation_executed(
+                            &context.role,
+                            &context.tenant_id,
+                            &tool.name,
+                            sql,
+                            row_count,
+                            duration_ms,
+                            arguments.clone(),
+                            result.before_state.clone(),
+                            result.after_state.clone(),
+                            approval_requested_event_id,
+                            Some(&correlation_id),
+                        )
+                        .await;
+                } else {
+                    // Log regular query
+                    let _ = logger
+                        .log_query_executed(
+                            &context.role,
+                            &context.tenant_id,
+                            &tool.name,
+                            sql,
+                            row_count,
+                            duration_ms,
+                            approval_requested_event_id,
+                            Some(&correlation_id),
+                        )
+                        .await;
+                }
+            } else if let Some(error) = &result.error {
                 let _ = logger
-                    .log_query_executed(
+                    .log_query_failed(
                         &context.role,
                         &context.tenant_id,
                         &tool.name,
-                        sql,
-                        row_count,
-                        duration_ms,
+                        None,
+                        error,
+                        approval_requested_event_id,
+                        Some(&correlation_id),
                     )
-                    .await;
-            } else if let Some(error) = &result.error {
-                let _ = logger
-                    .log_query_failed(&context.role, &context.tenant_id, &tool.name, None, error)
                     .await;
             }
         }
@@ -1173,11 +1261,17 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_one(pool).await {
             Ok(row) => {
-                let data = row_to_json(&row, &[]);
-                ExecutionResult::success_with_sql(json!({
-                    "data": data,
-                    "message": "Record created successfully"
-                }), &query)
+                let after_state = row_to_json(&row, &[]);
+                // For create, before_state is None (record didn't exist)
+                ExecutionResult::mutation_success(
+                    json!({
+                        "data": after_state.clone(),
+                        "message": "Record created successfully"
+                    }),
+                    &query,
+                    None, // No before state for CREATE
+                    Some(after_state),
+                )
             }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -1333,6 +1427,13 @@ impl ToolExecutor {
             }
         });
 
+        // Capture before state for audit (using first PK value)
+        let before_state = if let Some((_, pk_val)) = pk_values.first() {
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+        } else {
+            None
+        };
+
         let query = if let Some(tc) = tenant_condition {
             format!(
                 "UPDATE {} SET {} WHERE {} AND {} RETURNING *",
@@ -1354,11 +1455,16 @@ impl ToolExecutor {
 
         match sqlx::query(&query).fetch_optional(pool).await {
             Ok(Some(row)) => {
-                let data = row_to_json(&row, &[]);
-                ExecutionResult::success_with_sql(json!({
-                    "data": data,
-                    "message": "Record updated successfully"
-                }), &query)
+                let after_state = row_to_json(&row, &[]);
+                ExecutionResult::mutation_success(
+                    json!({
+                        "data": after_state.clone(),
+                        "message": "Record updated successfully"
+                    }),
+                    &query,
+                    before_state,
+                    Some(after_state),
+                )
             }
             Ok(None) => {
                 // Provide more specific error message
@@ -1458,6 +1564,13 @@ impl ToolExecutor {
             }
         });
 
+        // Capture before state for audit (using first PK value)
+        let before_state = if let Some((_, pk_val)) = pk_values.first() {
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+        } else {
+            None
+        };
+
         // Build RETURNING clause with all PK columns
         let returning_cols = pk_columns.join(", ");
 
@@ -1480,10 +1593,16 @@ impl ToolExecutor {
             Ok(Some(row)) => {
                 // Build response with all PK values
                 let deleted_keys = row_to_json(&row, &pk_columns);
-                ExecutionResult::success_with_sql(json!({
-                "message": "Record deleted successfully",
-                "deleted": deleted_keys
-            }), &query)
+                // For delete, after_state is null (record is gone)
+                ExecutionResult::mutation_success(
+                    json!({
+                        "message": "Record deleted successfully",
+                        "deleted": deleted_keys
+                    }),
+                    &query,
+                    before_state,
+                    None, // Record no longer exists
+                )
             }
             Ok(None) => {
                 let pk_description = pk_values
