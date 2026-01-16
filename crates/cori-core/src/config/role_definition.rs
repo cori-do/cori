@@ -601,6 +601,18 @@ impl OnlyWhen {
         }
         None
     }
+
+    /// Check if any condition references old.* values (current row data).
+    pub fn has_old_conditions(&self) -> bool {
+        for condition_set in self.condition_sets() {
+            for key in condition_set.keys() {
+                if key.starts_with("old.") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl UpdatableColumnConstraints {

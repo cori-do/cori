@@ -37,17 +37,33 @@ impl ToolGenerator {
     }
 
     /// Generate all tools for this role.
+    /// 
+    /// Panics if a table in the role is not found in the schema.
     pub fn generate_all(&self) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
 
         // Generate CRUD tools for each accessible table
-        for (table_name, _perms) in &self.role.tables {
-            if let Some(table_schema) = self.schema.get_table(table_name) {
-                tools.extend(self.generate_table_tools(table_name, table_schema));
-            } else {
-                // Generate tools even without schema (with basic input schemas)
-                tools.extend(self.generate_table_tools_no_schema(table_name));
-            }
+        for (table_name, perms) in &self.role.tables {
+            let table_schema = self.schema.get_table(table_name)
+                .unwrap_or_else(|| panic!("Table '{}' in role '{}' not found in schema. Run 'cori db sync' to update schema.", table_name, self.role.name));
+            
+            tracing::debug!(
+                table = %table_name,
+                role = %self.role.name,
+                can_update = %self.role.can_update(table_name),
+                updatable_cols = ?perms.updatable,
+                has_pk = !table_schema.primary_key.is_empty(),
+                pk = ?table_schema.primary_key,
+                "Generating tools for table"
+            );
+            
+            let table_tools = self.generate_table_tools(table_name, table_schema);
+            tracing::debug!(
+                table = %table_name,
+                tools = ?table_tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+                "Generated tools"
+            );
+            tools.extend(table_tools);
         }
 
         tools
@@ -67,6 +83,14 @@ impl ToolGenerator {
         // Check if table has a primary key (needed for get, update, delete operations)
         let has_primary_key = !table_schema.primary_key.is_empty();
 
+        tracing::debug!(
+            table = %table_name,
+            has_pk = has_primary_key,
+            can_update = self.role.can_update(table_name),
+            pk_columns = ?table_schema.primary_key,
+            "Generating tools for table"
+        );
+
         // get{Entity} - if readable AND table has primary key
         if self.role.can_read(table_name) {
             // get requires primary key to identify a single record
@@ -84,73 +108,13 @@ impl ToolGenerator {
 
         // update{Entity} - if can update AND table has primary key
         if self.role.can_update(table_name) && has_primary_key {
+            tracing::debug!(table = %table_name, "Generating update tool");
             tools.push(self.generate_update_tool(table_name, &entity_name, table_schema));
         }
 
         // delete{Entity} - if can delete AND table has primary key
         if self.role.can_delete(table_name) && has_primary_key {
             tools.push(self.generate_delete_tool(table_name, &entity_name, table_schema));
-        }
-
-        tools
-    }
-
-    /// Generate tools without full schema (fallback).
-    fn generate_table_tools_no_schema(&self, table_name: &str) -> Vec<ToolDefinition> {
-        let mut tools = Vec::new();
-        // Singularize the table name before converting to PascalCase
-        let singular_name = singularize(table_name);
-        let entity_name = pascal_case(&singular_name);
-
-        // get{Entity}
-        if self.role.can_read(table_name) {
-            tools.push(ToolDefinition {
-                name: format!("get{}", entity_name),
-                description: Some(format!("Retrieve a {} by ID", singular_name)),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {
-                            "type": "integer",
-                            "description": format!("{} ID", entity_name)
-                        }
-                    },
-                    "required": ["id"]
-                }),
-                annotations: Some(ToolAnnotations {
-                    requires_approval: Some(false),
-                    dry_run_supported: Some(false),
-                    read_only: Some(true),
-                    ..Default::default()
-                }),
-            });
-
-            tools.push(ToolDefinition {
-                name: format!("list{}", pluralize(&entity_name)),
-                description: Some(format!("List {} with optional filters", table_name)),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": {
-                            "type": "integer",
-                            "default": 50,
-                            "maximum": self.role.get_max_per_page(table_name).unwrap_or(1000),
-                            "description": "Maximum number of results"
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "default": 0,
-                            "description": "Offset for pagination"
-                        }
-                    }
-                }),
-                annotations: Some(ToolAnnotations {
-                    requires_approval: Some(false),
-                    dry_run_supported: Some(false),
-                    read_only: Some(true),
-                    ..Default::default()
-                }),
-            });
         }
 
         tools

@@ -2,43 +2,43 @@
 //!
 //! `cori tools list` - List available tools for a role/token (offline).
 //! `cori tools describe` - Show detailed schema for a specific tool.
+//!
+//! Uses convention over configuration - all paths derived from cori.yaml location.
+//! Uses shared tool_generation module for consistency with MCP server and dashboard.
 
 use anyhow::{Context, Result};
 use cori_biscuit::{keys::load_public_key_file, TokenVerifier};
-use cori_core::config::role_definition::RoleDefinition;
-use cori_core::config::McpConfig;
-use cori_mcp::McpServer;
+use cori_core::config::CoriConfig;
 use std::path::PathBuf;
 
-/// Resolve a public key from either a file path or a hex-encoded string.
-fn resolve_public_key(key_path: Option<PathBuf>) -> Result<cori_biscuit::PublicKey> {
-    let path = key_path.context(
-        "Public key not provided. Pass --key <path>",
-    )?;
-
-    load_public_key_file(&path)
-        .with_context(|| format!("Failed to load public key from file: {}", path.display()))
+/// Generate tools for a role using the shared tool_generation module.
+/// This ensures CLI, MCP server, and dashboard all use identical logic.
+fn generate_tools_for_role(
+    config: &CoriConfig,
+    role_name: &str,
+) -> Result<Vec<cori_mcp::ToolDefinition>> {
+    cori_mcp::tool_generation::generate_tools_for_role(config, role_name)
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// List tools available for a role or token.
-pub fn list(
-    role: Option<String>,
-    token: Option<PathBuf>,
-    key: Option<PathBuf>,
-    roles_dir: PathBuf,
-    verbose: bool,
-) -> Result<()> {
+pub fn list(config_path: PathBuf, role: Option<String>, token: Option<PathBuf>, verbose: bool) -> Result<()> {
+    // Load configuration with all context (roles, schema, etc.)
+    let config = CoriConfig::load_with_context(&config_path)
+        .with_context(|| format!("Failed to load configuration from {:?}", config_path))?;
+
     // Determine role either from --role flag or from token
     let (role_name, tenant) = if let Some(token_path) = token {
         // Load and verify token to get role
-        let public_key = resolve_public_key(key)?;
+        let public_key = load_public_key_from_config(&config, &config_path)?;
         let token_str = std::fs::read_to_string(&token_path)
             .with_context(|| format!("Failed to read token file: {:?}", token_path))?
             .trim()
             .to_string();
 
         let verifier = TokenVerifier::new(public_key);
-        let verified = verifier.verify(&token_str)
+        let verified = verifier
+            .verify(&token_str)
             .context("Token verification failed")?;
 
         (verified.role.clone(), verified.tenant.clone())
@@ -48,19 +48,6 @@ pub fn list(
         anyhow::bail!("Either --role or --token is required");
     };
 
-    // Load role configuration
-    let role_path = roles_dir.join(format!("{}.yaml", role_name));
-    let role_config = if role_path.exists() {
-        RoleDefinition::from_file(&role_path)
-            .with_context(|| format!("Failed to load role config: {:?}", role_path))?
-    } else {
-        anyhow::bail!(
-            "No role configuration file found at {:?} for role '{}'",
-            role_path,
-            role_name
-        );
-    };
-
     // Print header
     println!("\n🔑 Role Information:");
     println!("   Role: {}", role_name);
@@ -68,18 +55,13 @@ pub fn list(
         println!("   Tenant: {}", t);
     }
 
-    // Create server and generate tools
-    let mcp_config = McpConfig::default();
-    let mut server = McpServer::new(mcp_config).with_role(role_config.clone());
-
-    // Generate tools
-    server.generate_tools();
+    // Generate tools using shared logic (same as MCP server and dashboard)
+    let tools = generate_tools_for_role(&config, &role_name)?;
 
     // Print available tools
-    let tools = server.tools_mut().list();
     println!("\n🔧 Available Tools ({}):", tools.len());
 
-    for tool in tools {
+    for tool in &tools {
         let annotations = tool.annotations.as_ref();
         let read_only = annotations.map_or(false, |a| a.read_only == Some(true));
         let requires_approval = annotations.map_or(false, |a| a.requires_approval == Some(true));
@@ -113,24 +95,26 @@ pub fn list(
     }
 
     // Print table access summary
-    println!("\n📊 Table Access:");
-    for (table, perms) in &role_config.tables {
-        let can_read = !perms.readable.is_empty();
-        let can_write = !perms.creatable.is_empty() || !perms.updatable.is_empty();
+    if let Some(role_config) = config.get_role(&role_name) {
+        println!("\n📊 Table Access:");
+        for (table, perms) in &role_config.tables {
+            let can_read = !perms.readable.is_empty();
+            let can_write = !perms.creatable.is_empty() || !perms.updatable.is_empty();
 
-        let mut access = Vec::new();
-        if can_read {
-            access.push("read");
-        }
-        if can_write {
-            access.push("write");
-        }
+            let mut access = Vec::new();
+            if can_read {
+                access.push("read");
+            }
+            if can_write {
+                access.push("write");
+            }
 
-        if access.is_empty() {
-            access.push("none");
-        }
+            if access.is_empty() {
+                access.push("none");
+            }
 
-        println!("   • {} ({})", table, access.join(", "));
+            println!("   • {} ({})", table, access.join(", "));
+        }
     }
 
     println!();
@@ -138,30 +122,57 @@ pub fn list(
     Ok(())
 }
 
-/// Show detailed schema for a specific tool.
-pub fn describe(tool_name: String, role: String, roles_dir: PathBuf) -> Result<()> {
-    // Load role configuration
-    let role_path = roles_dir.join(format!("{}.yaml", role));
-    let role_config = if role_path.exists() {
-        RoleDefinition::from_file(&role_path)
-            .with_context(|| format!("Failed to load role config: {:?}", role_path))?
-    } else {
-        anyhow::bail!(
-            "No role configuration file found at {:?} for role '{}'",
-            role_path,
-            role
-        );
-    };
+/// Load public key from configuration or standard location.
+fn load_public_key_from_config(
+    config: &CoriConfig,
+    config_path: &PathBuf,
+) -> Result<cori_biscuit::PublicKey> {
+    let base_dir = config_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
 
-    // Create server and generate tools
-    let mcp_config = McpConfig::default();
-    let mut server = McpServer::new(mcp_config).with_role(role_config);
+    // Try from biscuit config
+    if let Some(ref key_file) = config.biscuit.public_key_file {
+        let path = if key_file.is_absolute() {
+            key_file.clone()
+        } else {
+            base_dir.join(key_file)
+        };
+        if path.exists() {
+            return load_public_key_file(&path)
+                .with_context(|| format!("Failed to load public key from {:?}", path));
+        }
+    }
 
-    // Generate tools
-    server.generate_tools();
+    // Try from environment variable
+    if let Some(ref env_var) = config.biscuit.public_key_env {
+        if let Ok(key_str) = std::env::var(env_var) {
+            return cori_biscuit::keys::load_public_key_hex(&key_str)
+                .with_context(|| format!("Failed to parse public key from env var {}", env_var));
+        }
+    }
+
+    // Try default location
+    let default_path = base_dir.join("keys/public.key");
+    if default_path.exists() {
+        return load_public_key_file(&default_path)
+            .with_context(|| format!("Failed to load public key from {:?}", default_path));
+    }
+
+    anyhow::bail!(
+        "No public key found. Configure biscuit.public_key_file in cori.yaml or place key in keys/public.key"
+    )
+}/// Show detailed schema for a specific tool.
+pub fn describe(config_path: PathBuf, tool_name: String, role: String) -> Result<()> {
+    // Load configuration with all context
+    let config = CoriConfig::load_with_context(&config_path)
+        .with_context(|| format!("Failed to load configuration from {:?}", config_path))?;
+
+    // Generate tools using shared logic (same as MCP server and dashboard)
+    let tools = generate_tools_for_role(&config, &role)?;
 
     // Find the specific tool
-    let tools = server.tools_mut().list();
     let tool = tools
         .iter()
         .find(|t| t.name == tool_name)
@@ -169,7 +180,7 @@ pub fn describe(tool_name: String, role: String, roles_dir: PathBuf) -> Result<(
 
     // Print tool details
     println!("\nTool: {}", tool.name);
-    
+
     if let Some(desc) = &tool.description {
         println!("\nDescription: {}", desc);
     }

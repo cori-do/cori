@@ -76,6 +76,7 @@ pub mod http_transport;
 pub mod protocol;
 pub mod schema;
 pub mod server;
+pub mod tool_generation;
 pub mod tool_generator;
 pub mod tools;
 

@@ -49,10 +49,10 @@ tables:
       status:
         only_when:
           - old.status: open
-            new.status: [in_progress, pending, resolved, closed]
+            new.status: [in_progress, pending_customer, resolved, closed]
           - old.status: in_progress
-            new.status: [open, pending, resolved, closed]
-          - old.status: pending
+            new.status: [open, pending_customer, resolved, closed]
+          - old.status: pending_customer
             new.status: [open, in_progress, resolved, closed]
           - old.status: resolved
             new.status: [open, closed]

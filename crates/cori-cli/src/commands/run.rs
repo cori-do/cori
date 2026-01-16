@@ -44,18 +44,6 @@ pub struct RunConfig {
     /// Dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfigFile,
-
-    /// Directory containing role definition files (each .yaml file = one role).
-    #[serde(default)]
-    pub roles_dir: Option<PathBuf>,
-
-    /// List of individual role definition files.
-    #[serde(default)]
-    pub role_files: Vec<PathBuf>,
-
-    /// Inline role definitions (can be combined with roles_dir/role_files).
-    #[serde(default)]
-    pub roles: HashMap<String, RoleConfigFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,201 +136,6 @@ impl Default for DashboardConfigFile {
     }
 }
 
-/// Role configuration loaded from a file or inline.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct RoleConfigFile {
-    /// Role name (optional in inline definitions, required in file definitions).
-    #[serde(default)]
-    pub name: Option<String>,
-
-    /// Description of the role.
-    #[serde(default)]
-    pub description: Option<String>,
-
-    /// Table access configuration.
-    #[serde(default)]
-    pub tables: HashMap<String, TableConfigFile>,
-
-    /// Blocked SQL operations.
-    #[serde(default)]
-    pub blocked_operations: Vec<String>,
-}
-
-/// Table access configuration within a role.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct TableConfigFile {
-    /// Columns that can be read. Can be a list of column names or "*" for all.
-    #[serde(default)]
-    pub readable: ReadableColumnsConfig,
-
-    /// Columns that can be edited, with optional constraints.
-    #[serde(default)]
-    pub editable: EditableColumnsConfig,
-
-    /// Tenant column for this table (overrides default).
-    #[serde(default)]
-    pub tenant_column: Option<String>,
-}
-
-/// Configuration for readable columns - can be a list or "*" for all.
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub enum ReadableColumnsConfig {
-    #[default]
-    None,
-    All,
-    List(Vec<String>),
-}
-
-impl<'de> serde::Deserialize<'de> for ReadableColumnsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::{self, Visitor};
-
-        struct ReadableColumnsVisitor;
-
-        impl<'de> Visitor<'de> for ReadableColumnsVisitor {
-            type Value = ReadableColumnsConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str(r#"a list of column names or "*""#)
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                if v == "*" {
-                    Ok(ReadableColumnsConfig::All)
-                } else {
-                    Err(de::Error::custom(format!(
-                        r#"expected "*" or a list, got "{}""#,
-                        v
-                    )))
-                }
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: de::SeqAccess<'de>,
-            {
-                let mut columns = Vec::new();
-                while let Some(col) = seq.next_element::<String>()? {
-                    columns.push(col);
-                }
-                Ok(ReadableColumnsConfig::List(columns))
-            }
-        }
-
-        deserializer.deserialize_any(ReadableColumnsVisitor)
-    }
-}
-
-/// Configuration for editable columns - can be a map, empty list, or "*" for all.
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub enum EditableColumnsConfig {
-    #[default]
-    None,
-    All,
-    Map(HashMap<String, ColumnConstraintsConfig>),
-}
-
-impl<'de> serde::Deserialize<'de> for EditableColumnsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::{self, Visitor};
-
-        struct EditableColumnsVisitor;
-
-        impl<'de> Visitor<'de> for EditableColumnsVisitor {
-            type Value = EditableColumnsConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str(r#"a map of column constraints, an empty list, or "*""#)
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                if v == "*" {
-                    Ok(EditableColumnsConfig::All)
-                } else {
-                    Err(de::Error::custom(format!(
-                        r#"expected "*" or a map, got "{}""#,
-                        v
-                    )))
-                }
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: de::SeqAccess<'de>,
-            {
-                // Empty list means no editable columns
-                let _: Option<serde::de::IgnoredAny> = seq.next_element()?;
-                Ok(EditableColumnsConfig::None)
-            }
-
-            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                let mut constraints = HashMap::new();
-                while let Some((key, value)) =
-                    map.next_entry::<String, ColumnConstraintsConfig>()?
-                {
-                    constraints.insert(key, value);
-                }
-                Ok(EditableColumnsConfig::Map(constraints))
-            }
-        }
-
-        deserializer.deserialize_any(EditableColumnsVisitor)
-    }
-}
-
-/// Constraints on an editable column.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[allow(dead_code)]
-pub struct ColumnConstraintsConfig {
-    /// Allowed values (whitelist).
-    #[serde(default)]
-    pub allowed_values: Option<Vec<String>>,
-
-    /// Regex pattern the value must match.
-    #[serde(default)]
-    pub pattern: Option<String>,
-
-    /// Minimum value (for numeric columns).
-    #[serde(default)]
-    pub min: Option<f64>,
-
-    /// Maximum value (for numeric columns).
-    #[serde(default)]
-    pub max: Option<f64>,
-
-    /// Whether changes require human approval.
-    #[serde(default)]
-    pub requires_approval: bool,
-}
-
-/// Loaded role with resolved name.
-#[derive(Debug, Clone)]
-pub struct LoadedRole {
-    /// Role name.
-    pub name: String,
-    /// Role configuration.
-    pub config: RoleConfigFile,
-}
-
 fn default_upstream_port() -> u16 {
     5432
 }
@@ -371,8 +164,8 @@ fn default_dashboard_port() -> u16 {
 ///
 /// # Arguments
 /// * `config_path` - Path to configuration file (default: cori.yaml)
-/// * `http` - Use HTTP transport for MCP (default for multi-tenant)
-/// * `stdio` - Use stdio transport for MCP (requires token)
+/// * `http` - Use HTTP transport for MCP (override config)
+/// * `stdio` - Use stdio transport for MCP (override config, requires token)
 /// * `token` - Token file for stdio mode (or use CORI_TOKEN env var)
 /// * `mcp_port` - Override MCP HTTP port
 /// * `dashboard_port` - Override dashboard port
@@ -387,9 +180,39 @@ pub async fn run(
     dashboard_port: Option<u16>,
     no_dashboard: bool,
 ) -> Result<()> {
-    // Determine transport mode
-    // If both --http and --stdio are specified, or neither, default to HTTP
-    let use_stdio = stdio && !http;
+    // Load configuration first (needed to determine default transport)
+    let config_str = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+
+    // Support both YAML and TOML
+    let run_config: RunConfig =
+        if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
+            toml::from_str(&config_str)?
+        } else {
+            serde_yaml::from_str(&config_str)?
+        };
+
+    // Determine transport mode:
+    // 1. CLI flags (--http or --stdio) override config if explicitly provided
+    // 2. Otherwise, use cori.yaml mcp.transport setting
+    // 3. Default to "http" if nothing is specified
+    let (use_stdio, transport_source) = if stdio {
+        // --stdio CLI flag explicitly passed → use stdio
+        (true, "CLI flag --stdio")
+    } else if http {
+        // --http CLI flag explicitly passed → use HTTP
+        (false, "CLI flag --http")
+    } else {
+        // Neither CLI flag passed → use config file setting
+        let config_transport = run_config.mcp.transport.as_deref().unwrap_or("http");
+        (config_transport == "stdio", "config file (mcp.transport)")
+    };
+
+    info!(
+        transport = if use_stdio { "stdio" } else { "http" },
+        source = transport_source,
+        "Transport mode determined"
+    );
 
     // For stdio mode, we need a token
     if use_stdio {
@@ -403,18 +226,6 @@ pub async fn run(
         }
     }
 
-    // Load configuration
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-
-    // Support both YAML and TOML
-    let run_config: RunConfig =
-        if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
-            toml::from_str(&config_str)?
-        } else {
-            serde_yaml::from_str(&config_str)?
-        };
-
     info!(config = %config_path.display(), "Loading configuration");
 
     // Get the directory containing the config file for resolving relative paths
@@ -426,12 +237,17 @@ pub async fn run(
     // Build database URL
     let database_url = build_database_url(&run_config.upstream)?;
 
-    // Load roles from configuration
-    let roles = load_roles(&run_config, &config_dir)?;
-    for role in &roles {
+    // Load roles from CoriConfig using the same approach as CLI tools command
+    // This ensures consistent role definition parsing with creatable/updatable
+    let cori_config = cori_core::config::CoriConfig::load_with_context(&config_path)
+        .with_context(|| format!("Failed to load CoriConfig from {:?}", config_path))?;
+    
+    // Get roles directly from CoriConfig (already properly parsed as RoleDefinition)
+    let core_roles: HashMap<String, RoleDefinition> = cori_config.roles().clone();
+    for (role_name, role) in &core_roles {
         info!(
-            role = %role.name,
-            tables = role.config.tables.len(),
+            role = %role_name,
+            tables = role.tables.len(),
             "Role loaded"
         );
     }
@@ -460,9 +276,19 @@ pub async fn run(
 
     // Build audit logger if enabled
     let audit_logger = if run_config.audit.enabled {
+        // Resolve audit directory relative to config_dir if it's a relative path
+        let audit_dir = {
+            let dir_path = PathBuf::from(&run_config.audit.directory);
+            if dir_path.is_absolute() {
+                run_config.audit.directory.clone()
+            } else {
+                config_dir.join(&run_config.audit.directory).to_string_lossy().to_string()
+            }
+        };
+        
         let audit_config = AuditConfig {
             enabled: run_config.audit.enabled,
-            directory: run_config.audit.directory.clone(),
+            directory: audit_dir.clone(),
             stdout: run_config.audit.stdout,
             retention_days: run_config.audit.retention_days,
             log_queries: run_config.audit.log_queries,
@@ -485,15 +311,14 @@ pub async fn run(
     // Create shared approval manager for MCP and dashboard
     let approval_manager = Arc::new(ApprovalManager::default());
 
-    // Convert loaded roles to cori_core RoleDefinition for MCP
-    let core_roles: HashMap<String, RoleDefinition> = roles
-        .iter()
-        .map(|r| (r.name.clone(), convert_to_role_definition(r)))
-        .collect();
-
-    // Load schema for MCP tool generation
-    let schema_path = config_dir.join("schema/snapshot.json");
-    let schema = load_schema(&schema_path);
+    // Load schema for MCP tool generation using CoriConfig (required)
+    // This ensures we use the same from_schema_definition path as CLI tools command
+    let schema = {
+        let schema_def = cori_config.get_schema()
+            .ok_or_else(|| anyhow::anyhow!("No schema found. Run 'cori db sync' to generate schema/schema.yaml"))?;
+        cori_mcp::schema::from_schema_definition(schema_def)
+    };
+    info!("Loaded schema from schema/schema.yaml");
 
     // Determine effective ports
     let effective_mcp_port = mcp_port.unwrap_or(run_config.mcp.http_port);
@@ -505,7 +330,7 @@ pub async fn run(
         mcp_port = effective_mcp_port,
         dashboard_enabled = dashboard_enabled,
         dashboard_port = effective_dashboard_port,
-        roles_loaded = roles.len(),
+        roles_loaded = core_roles.len(),
         "Starting Cori"
     );
 
@@ -554,7 +379,7 @@ async fn run_http_mode(
     mcp_public_key: Option<PublicKey>,
     database_url: &str,
     rules: Option<RulesDefinition>,
-    schema: Option<cori_mcp::schema::DatabaseSchema>,
+    schema: cori_mcp::schema::DatabaseSchema,
     approval_manager: Arc<ApprovalManager>,
     run_config: RunConfig,
     core_roles: HashMap<String, RoleDefinition>,
@@ -570,88 +395,80 @@ async fn run_http_mode(
     // START ALL SERVICES CONCURRENTLY
     // ============================================
 
-    // 1. Start MCP Server (if enabled and transport is HTTP)
+    // 1. Start MCP Server (if enabled)
+    // Note: Transport mode was already determined by CLI flags or config,
+    // so we're guaranteed to be in HTTP mode here.
     if run_config.mcp.enabled {
-        let transport = run_config.mcp.transport.as_deref().unwrap_or("http");
+        let mcp_config = McpConfig {
+            enabled: true,
+            transport: Transport::Http,
+            host: "127.0.0.1".to_string(),
+            port: mcp_port,
+        };
 
-        if transport == "http" {
-            let mcp_config = McpConfig {
-                enabled: true,
-                transport: Transport::Http,
-                host: "127.0.0.1".to_string(),
-                port: mcp_port,
-            };
+        let database_url = database_url.to_string();
+        let rules_for_mcp = rules.clone();
+        let schema = schema.clone();
+        let core_roles = core_roles.clone();
+        let approval_manager = approval_manager.clone();
+        let public_key = mcp_public_key.clone();
+        let audit_logger_for_mcp = audit_logger.clone();
 
-            let database_url = database_url.to_string();
-            let rules_for_mcp = rules.clone();
-            let schema = schema.clone();
-            let core_roles = core_roles.clone();
-            let approval_manager = approval_manager.clone();
-            let public_key = mcp_public_key.clone();
-            let audit_logger_for_mcp = audit_logger.clone();
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                port = mcp_config.port,
+                auth_enabled = public_key.is_some(),
+                audit_enabled = audit_logger_for_mcp.is_some(),
+                "Starting MCP HTTP server"
+            );
 
-            let handle = tokio::spawn(async move {
-                tracing::info!(
-                    port = mcp_config.port,
-                    auth_enabled = public_key.is_some(),
-                    audit_enabled = audit_logger_for_mcp.is_some(),
-                    "Starting MCP HTTP server"
-                );
+            // Connect to database
+            match PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&database_url)
+                .await
+            {
+                Ok(pool) => {
+                    // Create MCP server
+                    let mut server = McpServer::new(mcp_config)
+                        .with_pool(pool)
+                        .with_approval_manager(approval_manager);
 
-                // Connect to database
-                match PgPoolOptions::new()
-                    .max_connections(5)
-                    .connect(&database_url)
-                    .await
-                {
-                    Ok(pool) => {
-                        // Create MCP server
-                        let mut server = McpServer::new(mcp_config)
-                            .with_pool(pool)
-                            .with_approval_manager(approval_manager);
-
-                        // Add audit logger if enabled
-                        if let Some(logger) = audit_logger_for_mcp {
-                            server = server.with_audit_logger(logger);
-                        }
-
-                        // Add rules if loaded
-                        if let Some(r) = rules_for_mcp {
-                            server = server.with_rules(r);
-                        }
-
-                        // Add public key for authentication if available
-                        if let Some(pk) = public_key {
-                            server = server.with_public_key(pk);
-                        }
-
-                        if let Some(s) = schema {
-                            server = server.with_schema(s);
-                        }
-
-                        // If there's a default role, use it for tool generation
-                        if let Some((_name, role_config)) = core_roles.iter().next() {
-                            server = server.with_role(role_config.clone());
-                            server.generate_tools();
-                        }
-
-                        // Use run_http directly
-                        if let Err(e) = server.run_http().await {
-                            tracing::error!(error = %e, "MCP server error");
-                        }
+                    // Add audit logger if enabled
+                    if let Some(logger) = audit_logger_for_mcp {
+                        server = server.with_audit_logger(logger);
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to connect to database for MCP server");
+
+                    // Add rules if loaded
+                    if let Some(r) = rules_for_mcp {
+                        server = server.with_rules(r);
+                    }
+
+                    // Add public key for authentication if available
+                    if let Some(pk) = public_key {
+                        server = server.with_public_key(pk);
+                    }
+
+                    // Add schema (must be before with_roles for proper tool generation)
+                    server = server.with_schema(schema);
+
+                    // Pre-generate tools for all roles at startup (HTTP mode)
+                    // Each request will use the pre-generated tools for its token's role
+                    if !core_roles.is_empty() {
+                        server = server.with_roles(core_roles);
+                    }
+
+                    // Use run_http directly
+                    if let Err(e) = server.run_http().await {
+                        tracing::error!(error = %e, "MCP server error");
                     }
                 }
-            });
-            handles.push(handle);
-        } else {
-            tracing::info!(
-                transport = transport,
-                "MCP server configured for stdio transport - not starting in serve mode"
-            );
-        }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to connect to database for MCP server");
+                }
+            }
+        });
+        handles.push(handle);
     }
 
     // Start Dashboard (if enabled)
@@ -712,7 +529,7 @@ async fn run_stdio_mode(
     public_key: PublicKey,
     database_url: &str,
     rules: Option<RulesDefinition>,
-    schema: Option<cori_mcp::schema::DatabaseSchema>,
+    schema: cori_mcp::schema::DatabaseSchema,
     approval_manager: Arc<ApprovalManager>,
     run_config: RunConfig,
     core_roles: HashMap<String, RoleDefinition>,
@@ -813,10 +630,8 @@ async fn run_stdio_mode(
         server = server.with_rules(r);
     }
 
-    // Add schema if loaded
-    if let Some(s) = schema {
-        server = server.with_schema(s);
-    }
+    // Add schema (required for tool generation)
+    server = server.with_schema(schema);
 
     // Add role (must be after schema for proper executor setup)
     server = server.with_role(role_config);
@@ -866,37 +681,6 @@ fn load_token(token_file: Option<PathBuf>) -> Result<String> {
         }
     } else {
         anyhow::bail!("No token provided. Use --token <file> or set CORI_TOKEN env var")
-    }
-}
-
-/// Load schema from snapshot file if available.
-fn load_schema(schema_path: &Path) -> Option<cori_mcp::schema::DatabaseSchema> {
-    if !schema_path.exists() {
-        info!("No schema file found at {}", schema_path.display());
-        return None;
-    }
-
-    match fs::read_to_string(schema_path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(json) => match cori_mcp::schema::parse_schema_from_json(&json) {
-                Ok(s) => {
-                    info!("Loaded schema from {}", schema_path.display());
-                    Some(s)
-                }
-                Err(e) => {
-                    warn!("Failed to parse schema: {:?}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                warn!("Failed to parse schema file as JSON: {}", e);
-                None
-            }
-        },
-        Err(e) => {
-            warn!("Failed to read schema file: {}", e);
-            None
-        }
     }
 }
 
@@ -954,171 +738,6 @@ fn load_rules(config_dir: &Path) -> Result<Option<RulesDefinition>> {
     } else {
         info!("No rules file found at {}", rules_path.display());
         Ok(None)
-    }
-}
-
-/// Load roles from configuration (directory, individual files, or inline).
-fn load_roles(config: &RunConfig, config_dir: &Path) -> Result<Vec<LoadedRole>> {
-    let mut roles = Vec::new();
-
-    // Load from roles directory if specified or default
-    let roles_dir = config.roles_dir.as_ref()
-        .map(|p| if p.is_absolute() { p.clone() } else { config_dir.join(p) })
-        .unwrap_or_else(|| config_dir.join("roles"));
-
-    if roles_dir.exists() && roles_dir.is_dir() {
-        for entry in fs::read_dir(&roles_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-                match load_role_from_file(&path) {
-                    Ok(role) => roles.push(role),
-                    Err(e) => warn!(path = %path.display(), error = %e, "Failed to load role"),
-                }
-            }
-        }
-    }
-
-    // Load from individual role files
-    for path in &config.role_files {
-        let full_path = if path.is_absolute() {
-            path.clone()
-        } else {
-            config_dir.join(path)
-        };
-        match load_role_from_file(&full_path) {
-            Ok(role) => roles.push(role),
-            Err(e) => warn!(path = %full_path.display(), error = %e, "Failed to load role"),
-        }
-    }
-
-    // Load inline roles
-    for (name, config) in &config.roles {
-        roles.push(LoadedRole {
-            name: name.clone(),
-            config: config.clone(),
-        });
-    }
-
-    Ok(roles)
-}
-
-/// Load a single role from a YAML file.
-fn load_role_from_file(path: &Path) -> Result<LoadedRole> {
-    let content = fs::read_to_string(path)?;
-    let config: RoleConfigFile = serde_yaml::from_str(&content)?;
-    
-    // Derive role name from filename if not specified
-    let name = config.name.clone().unwrap_or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unnamed")
-            .to_string()
-    });
-
-    Ok(LoadedRole { name, config })
-}
-
-/// Convert a LoadedRole to cori_core RoleDefinition.
-fn convert_to_role_definition(loaded: &LoadedRole) -> RoleDefinition {
-    use cori_core::config::role_definition::{
-        AllColumns, CreatableColumns, CreatableColumnConstraints,
-        DeletablePermission, ReadableConfig, TablePermissions, UpdatableColumns,
-        UpdatableColumnConstraints, ApprovalRequirement,
-    };
-
-    let mut tables = HashMap::new();
-
-    for (table_name, table_config) in &loaded.config.tables {
-        let readable = match &table_config.readable {
-            ReadableColumnsConfig::All => ReadableConfig::All(AllColumns),
-            ReadableColumnsConfig::List(cols) => ReadableConfig::List(cols.clone()),
-            ReadableColumnsConfig::None => ReadableConfig::List(Vec::new()),
-        };
-
-        // Convert editable to both creatable and updatable (old model didn't distinguish)
-        let (creatable, updatable) = match &table_config.editable {
-            EditableColumnsConfig::All => (
-                CreatableColumns::All(AllColumns),
-                UpdatableColumns::All(AllColumns),
-            ),
-            EditableColumnsConfig::Map(map) => {
-                let creatable_map: HashMap<String, CreatableColumnConstraints> = map
-                    .iter()
-                    .map(|(col, constraints)| {
-                        let restrict_to = constraints.allowed_values.as_ref().map(|vals| {
-                            vals.iter().map(|v| serde_json::Value::String(v.clone())).collect()
-                        });
-                        (
-                            col.clone(),
-                            CreatableColumnConstraints {
-                                required: false,
-                                default: None,
-                                restrict_to,
-                                requires_approval: if constraints.requires_approval { 
-                                    Some(ApprovalRequirement::Simple(true)) 
-                                } else { 
-                                    None 
-                                },
-                                guidance: None,
-                            },
-                        )
-                    })
-                    .collect();
-                let updatable_map: HashMap<String, UpdatableColumnConstraints> = map
-                    .iter()
-                    .map(|(col, constraints)| {
-                        // Convert allowed_values to only_when with new.<col>: [values] pattern
-                        let only_when = constraints.allowed_values.as_ref().map(|vals| {
-                            let key = format!("new.{}", col);
-                            let values: Vec<serde_json::Value> = vals.iter()
-                                .map(|v| serde_json::Value::String(v.clone()))
-                                .collect();
-                            let mut conditions = HashMap::new();
-                            conditions.insert(key, cori_core::config::role_definition::ColumnCondition::In(values));
-                            cori_core::config::role_definition::OnlyWhen::Single(conditions)
-                        });
-                        (
-                            col.clone(),
-                            UpdatableColumnConstraints {
-                                only_when,
-                                requires_approval: if constraints.requires_approval { 
-                                    Some(ApprovalRequirement::Simple(true)) 
-                                } else { 
-                                    None 
-                                },
-                                guidance: None,
-                            },
-                        )
-                    })
-                    .collect();
-                (
-                    CreatableColumns::Map(creatable_map),
-                    UpdatableColumns::Map(updatable_map),
-                )
-            }
-            EditableColumnsConfig::None => (
-                CreatableColumns::Map(HashMap::new()),
-                UpdatableColumns::Map(HashMap::new()),
-            ),
-        };
-
-        tables.insert(
-            table_name.clone(),
-            TablePermissions {
-                readable,
-                creatable,
-                updatable,
-                deletable: DeletablePermission::Allowed(false), // Default to no delete
-            },
-        );
-    }
-
-    RoleDefinition {
-        name: loaded.name.clone(),
-        description: loaded.config.description.clone(),
-        approvals: None,
-        tables,
     }
 }
 

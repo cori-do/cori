@@ -51,21 +51,14 @@ pub async fn role_detail(
     Path(name): Path<String>,
 ) -> Html<String> {
     if let Some(role) = state.get_role(&name) {
-        // Generate MCP tools preview
-        let schema = state.schema_cache();
-        let mcp_tools = if let Some(schema) = &schema {
-            let db_schema = crate::schema_converter::convert_to_db_schema(schema);
-            let generator = cori_mcp::ToolGenerator::new(role.clone(), db_schema);
-            let tools: Vec<serde_json::Value> = generator.generate_all()
-                .into_iter()
-                .map(|t| serde_json::to_value(t).unwrap_or_default())
-                .collect();
-            Some(tools)
-        } else {
-            None
-        };
+        // Generate MCP tools preview using shared logic
+        let tools = state.generate_tools_for_role(&role);
+        let mcp_tools: Vec<serde_json::Value> = tools
+            .into_iter()
+            .map(|t| serde_json::to_value(t).unwrap_or_default())
+            .collect();
         
-        Html(pages::role_detail_page(&role, mcp_tools.as_deref()))
+        Html(pages::role_detail_page(&role, Some(&mcp_tools)))
     } else {
         Html(crate::templates::layout("Role Not Found", &crate::templates::empty_state(
             "exclamation-triangle",
@@ -342,28 +335,22 @@ pub mod api {
         Path(name): Path<String>,
     ) -> Result<Json<McpToolPreviewResponse>, StatusCode> {
         let role = state.get_role(&name).ok_or(StatusCode::NOT_FOUND)?;
-        let schema = state.schema_cache();
         
-        let tools = if let Some(schema) = schema {
-            let db_schema = crate::schema_converter::convert_to_db_schema(&schema);
-            let generator = cori_mcp::ToolGenerator::new(role, db_schema);
-            generator.generate_all()
-                .into_iter()
-                .map(|t| McpToolResponse {
-                    name: t.name,
-                    description: t.description,
-                    input_schema: t.input_schema,
-                    annotations: McpToolAnnotationsResponse {
-                        requires_approval: t.annotations.as_ref().and_then(|a| a.requires_approval).unwrap_or(false),
-                        dry_run_supported: t.annotations.as_ref().and_then(|a| a.dry_run_supported).unwrap_or(false),
-                        read_only: t.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false),
-                        approval_fields: t.annotations.and_then(|a| a.approval_fields).unwrap_or_default(),
-                    },
-                })
-                .collect()
-        } else {
-            vec![]
-        };
+        // Use shared tool generation logic
+        let tools = state.generate_tools_for_role(&role)
+            .into_iter()
+            .map(|t| McpToolResponse {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+                annotations: McpToolAnnotationsResponse {
+                    requires_approval: t.annotations.as_ref().and_then(|a| a.requires_approval).unwrap_or(false),
+                    dry_run_supported: t.annotations.as_ref().and_then(|a| a.dry_run_supported).unwrap_or(false),
+                    read_only: t.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false),
+                    approval_fields: t.annotations.and_then(|a| a.approval_fields).unwrap_or_default(),
+                },
+            })
+            .collect();
         
         Ok(Json(McpToolPreviewResponse {
             role: name,

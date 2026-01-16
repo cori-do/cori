@@ -91,7 +91,7 @@ tables:
     tenant: organization_id
     columns:
       status:
-        allowed_values: [active, inactive, pending, archived]
+        allowed_values: [open, in_progress, pending_customer, resolved, closed]
   users:
     tenant: organization_id
     columns:

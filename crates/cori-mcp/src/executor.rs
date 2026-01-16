@@ -227,6 +227,94 @@ impl ToolExecutor {
         Vec::new()
     }
 
+    /// Check if a role has old.* constraints for a table that require fetching current row.
+    fn role_has_old_constraints(&self, table: &str) -> bool {
+        if let Some(perms) = self.role.tables.get(table) {
+            // Check if any updatable column has only_when constraints with old.* conditions
+            for col_name in perms.updatable.column_names() {
+                if let Some(constraints) = perms.updatable.get_constraints(col_name) {
+                    if let Some(only_when) = &constraints.only_when {
+                        if only_when.has_old_conditions() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Fetch the current row from database for UPDATE validation.
+    async fn fetch_current_row(
+        &self,
+        table: &str,
+        arguments: &Value,
+        context: &ExecutionContext,
+    ) -> Result<Option<Value>, String> {
+        let pool = match &self.pool {
+            Some(p) => p,
+            None => return Err("Database connection not configured".to_string()),
+        };
+
+        let pk_columns = self.get_primary_key_columns(table);
+        if pk_columns.is_empty() {
+            return Err(format!("No primary key defined for table '{}'", table));
+        }
+
+        // Extract PK values from arguments
+        let mut pk_conditions: Vec<String> = Vec::new();
+        for pk_col in &pk_columns {
+            match arguments.get(pk_col) {
+                Some(v) => {
+                    if let Some(n) = v.as_i64() {
+                        pk_conditions.push(format!("{} = {}", pk_col, n));
+                    } else if let Some(s) = v.as_str() {
+                        pk_conditions.push(format!("{} = '{}'", pk_col, s.replace("'", "''")));
+                    } else {
+                        return Err(format!("Unsupported primary key type for column '{}'", pk_col));
+                    }
+                }
+                None => return Err(format!("Missing primary key field: {}", pk_col)),
+            }
+        }
+
+        // Add tenant condition if applicable
+        let tenant_column = self.tenant_column_for_table(table);
+        let tenant_condition = tenant_column.as_ref().map(|tc| {
+            if context.tenant_id.parse::<i64>().is_ok() {
+                format!("{} = {}", tc, context.tenant_id)
+            } else {
+                format!("{} = '{}'", tc, context.tenant_id.replace("'", "''"))
+            }
+        });
+
+        let query = if let Some(tc) = tenant_condition {
+            format!(
+                "SELECT * FROM {} WHERE {} AND {}",
+                table,
+                pk_conditions.join(" AND "),
+                tc
+            )
+        } else {
+            format!(
+                "SELECT * FROM {} WHERE {}",
+                table,
+                pk_conditions.join(" AND ")
+            )
+        };
+
+        tracing::debug!("Fetching current row for validation: {}", query);
+
+        match sqlx::query(&query).fetch_optional(pool).await {
+            Ok(Some(row)) => {
+                let data = row_to_json(&row, &[]);
+                Ok(Some(data))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Database error: {}", e)),
+        }
+    }
+
     /// Execute a tool call.
     pub async fn execute(
         &self,
@@ -259,6 +347,27 @@ impl ToolExecutor {
         let pk_columns = self.get_primary_key_columns(table);
         let pk_column_refs: Vec<&str> = pk_columns.iter().map(|s| s.as_str()).collect();
 
+        // For UPDATE operations with old.* constraints, we need to fetch the current row first
+        let current_row: Option<Value> = if op_type == OperationType::Update {
+            // Check if role has old.* constraints that need current row
+            if self.role_has_old_constraints(table) {
+                // Fetch current row from database
+                match self.fetch_current_row(table, &arguments, context).await {
+                    Ok(Some(row)) => Some(row),
+                    Ok(None) => {
+                        return ExecutionResult::error("Record not found or access denied");
+                    }
+                    Err(e) => {
+                        return ExecutionResult::error(format!("Failed to fetch current row for validation: {}", e));
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Build the validation request
         let validation_request = ValidationRequest {
             operation: op_type,
@@ -266,7 +375,7 @@ impl ToolExecutor {
             arguments: &arguments,
             tenant_id: &context.tenant_id,
             role_name: &context.role,
-            current_row: None, // Will be populated in update if we fetch the row
+            current_row: current_row.as_ref(),
             primary_key_columns: Some(pk_column_refs.clone()),
         };
 
