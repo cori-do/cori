@@ -64,15 +64,18 @@ biscuit:
 # MCP SERVER (Model Context Protocol)
 # =============================================================================
 # Expose database actions as typed tools for AI agents.
+# Transport can be overridden with CLI flags: --http or --stdio
 
 mcp:
   enabled: true
-  transport: stdio  # For Claude Desktop and local agents
+  transport: http  # Default for multi-tenant (token per request)
   
-  # For HTTP transport (remote agents, API integrations):
-  # transport: http
-  # host: 127.0.0.1
-  # port: 3000
+  # HTTP port (only used when transport is http)
+  # http_port: 3000
+  
+  # For stdio transport (Claude Desktop and local agents):
+  # transport: stdio
+  # Note: stdio mode requires a token via --token flag or CORI_TOKEN env var
 
 # =============================================================================
 # ADMIN DASHBOARD

@@ -338,6 +338,78 @@ pub enum SchemaParseError {
     InvalidValue { field: String, message: String },
 }
 
+/// Convert a SchemaDefinition from cori-core to DatabaseSchema for tool generation.
+///
+/// This is the canonical conversion function used by CLI, dashboard, and MCP server
+/// to ensure consistent tool generation across all entry points.
+pub fn from_schema_definition(schema: &cori_core::config::SchemaDefinition) -> DatabaseSchema {
+    let mut db_schema = DatabaseSchema::new();
+
+    for table in &schema.tables {
+        let columns: Vec<ColumnSchema> = table
+            .columns
+            .iter()
+            .map(|c| {
+                // Use native_type for data_type, fallback to column_type's Display
+                let data_type = c.native_type
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", c.column_type).to_lowercase());
+                
+                // Convert default value to string if present
+                let default = c.default.as_ref().map(|v| {
+                    if let Some(s) = v.as_str() {
+                        s.to_string()
+                    } else {
+                        v.to_string()
+                    }
+                });
+
+                ColumnSchema {
+                    name: c.name.clone(),
+                    data_type,
+                    nullable: c.nullable,
+                    is_primary_key: table.primary_key.contains(&c.name),
+                    default,
+                    description: None,
+                }
+            })
+            .collect();
+
+        let foreign_keys: Vec<ForeignKey> = table
+            .foreign_keys
+            .iter()
+            .map(|fk| {
+                let fk_columns: Vec<ForeignKeyColumn> = fk
+                    .columns
+                    .iter()
+                    .zip(fk.references.columns.iter())
+                    .map(|(col, ref_col)| ForeignKeyColumn {
+                        column: col.clone(),
+                        foreign_schema: fk.references.schema.clone(),
+                        foreign_table: fk.references.table.clone(),
+                        foreign_column: ref_col.clone(),
+                    })
+                    .collect();
+
+                ForeignKey {
+                    name: fk.name.clone().unwrap_or_default(),
+                    columns: fk_columns,
+                }
+            })
+            .collect();
+
+        db_schema.add_table(TableSchema {
+            name: table.name.clone(),
+            schema: Some(table.schema.clone()),
+            columns,
+            primary_key: table.primary_key.clone(),
+            foreign_keys,
+        });
+    }
+
+    db_schema
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

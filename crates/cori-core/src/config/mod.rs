@@ -484,6 +484,11 @@ impl CoriConfig {
         self.roles.get(name)
     }
 
+    /// Get all roles.
+    pub fn roles(&self) -> &HashMap<String, RoleDefinition> {
+        &self.roles
+    }
+
     /// Get the rules definition.
     pub fn get_rules(&self) -> Option<&RulesDefinition> {
         self.rules.as_ref()

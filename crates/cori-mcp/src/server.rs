@@ -9,7 +9,6 @@ use crate::executor::{ExecutionContext, ExecutionResult, ToolExecutor};
 use crate::http_transport::HttpServer;
 use crate::protocol::*;
 use crate::schema::DatabaseSchema;
-use crate::tool_generator::ToolGenerator;
 use crate::tools::ToolRegistry;
 use cori_audit::AuditLogger;
 use cori_biscuit::PublicKey;
@@ -18,6 +17,7 @@ use cori_core::config::rules_definition::RulesDefinition;
 use cori_core::RoleDefinition;
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -27,7 +27,13 @@ pub struct McpServer {
     config: McpConfig,
     tools: ToolRegistry,
     role: Option<RoleDefinition>,
-    schema: Option<DatabaseSchema>,
+    /// All available roles (HTTP mode).
+    roles: HashMap<String, RoleDefinition>,
+    /// Pre-generated tools for each role (HTTP mode).
+    /// Tools are generated once at startup for efficiency.
+    role_tools: HashMap<String, ToolRegistry>,
+    /// Database schema (required for tool generation).
+    schema: DatabaseSchema,
     approval_manager: Arc<ApprovalManager>,
     tenant_id: Option<String>,
     executor: Option<ToolExecutor>,
@@ -46,7 +52,9 @@ impl McpServer {
             config,
             tools: ToolRegistry::new(),
             role: None,
-            schema: None,
+            roles: HashMap::new(),
+            role_tools: HashMap::new(),
+            schema: DatabaseSchema::new(),
             approval_manager: Arc::new(ApprovalManager::default()),
             tenant_id: None,
             executor: None,
@@ -55,6 +63,36 @@ impl McpServer {
             public_key: None,
             audit_logger: None,
         }
+    }
+
+    /// Set all available roles and pre-generate tools for each (HTTP mode).
+    /// 
+    /// Tools are generated once at startup for efficiency. Each role gets
+    /// its own ToolRegistry with the appropriate tools based on permissions.
+    /// Must be called after `with_schema` for correct tool generation.
+    pub fn with_roles(mut self, roles: HashMap<String, RoleDefinition>) -> Self {
+        // Pre-generate tools for each role using shared tool_generation module
+        for (role_name, role_config) in &roles {
+            // Use the shared tool generation logic (same as CLI and dashboard)
+            let tools = crate::tool_generation::generate_tools_with_db_schema(
+                &self.schema,
+                role_config,
+            );
+            
+            let mut registry = ToolRegistry::new();
+            for tool in tools {
+                registry.register(tool);
+            }
+            tracing::info!(
+                role = %role_name,
+                tool_count = registry.list().len(),
+                "Pre-generated tools for role"
+            );
+            self.role_tools.insert(role_name.clone(), registry);
+        }
+        
+        self.roles = roles;
+        self
     }
 
     /// Set the audit logger.
@@ -97,7 +135,7 @@ impl McpServer {
 
     /// Set the database schema for tool generation.
     pub fn with_schema(mut self, schema: DatabaseSchema) -> Self {
-        self.schema = Some(schema.clone());
+        self.schema = schema.clone();
         // Update executor if it exists
         if let Some(role) = &self.role {
             self.executor = Some(self.build_executor(role).with_schema(schema));
@@ -138,9 +176,7 @@ impl McpServer {
         if let Some(pool) = &self.pool {
             executor = executor.with_pool(pool.clone());
         }
-        if let Some(schema) = &self.schema {
-            executor = executor.with_schema(schema.clone());
-        }
+        executor = executor.with_schema(self.schema.clone());
         if let Some(logger) = &self.audit_logger {
             tracing::info!("Adding audit logger to executor");
             executor = executor.with_audit_logger(logger.clone());
@@ -161,11 +197,14 @@ impl McpServer {
     }
 
     /// Generate tools from role definition and schema.
+    /// Uses shared tool_generation module for consistency with CLI and dashboard.
     pub fn generate_tools(&mut self) {
         if let Some(role) = &self.role {
-            let schema = self.schema.clone().unwrap_or_default();
-            let generator = ToolGenerator::new(role.clone(), schema);
-            let tools = generator.generate_all();
+            // Use shared tool generation logic
+            let tools = crate::tool_generation::generate_tools_with_db_schema(
+                &self.schema,
+                role,
+            );
 
             for tool in tools {
                 self.tools.register(tool);
@@ -226,8 +265,10 @@ impl McpServer {
             mpsc::channel::<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>(100);
 
         // Clone self for the request handler task
-        let tools = self.tools.clone();
-        let role = self.role.clone();
+        let default_tools = self.tools.clone();
+        let default_role = self.role.clone();
+        let roles = self.roles.clone();
+        let role_tools = self.role_tools.clone();
         let default_tenant_id = self.tenant_id.clone();
         let approval_manager = self.approval_manager.clone();
         let config = self.config.clone();
@@ -258,8 +299,6 @@ impl McpServer {
                 
                 // Create a temporary server instance to handle the request
                 let mut temp_server = McpServer::new(config.clone());
-                temp_server.tools = tools.clone();
-                temp_server.role = role.clone();
                 temp_server.tenant_id = effective_tenant_id;
                 temp_server.approval_manager = approval_manager.clone();
                 temp_server.pool = pool.clone();
@@ -267,8 +306,37 @@ impl McpServer {
                 temp_server.schema = schema.clone();
                 temp_server.audit_logger = audit_logger.clone();
 
-                if let Some(r) = &temp_server.role {
-                    temp_server.executor = Some(temp_server.build_executor(r));
+                // Use pre-generated tools based on the token's role
+                if let Some(role_name) = &context.role {
+                    if let Some(tools) = role_tools.get(role_name) {
+                        temp_server.tools = tools.clone();
+                        if let Some(role_config) = roles.get(role_name) {
+                            temp_server.role = Some(role_config.clone());
+                            temp_server.executor = Some(temp_server.build_executor(role_config));
+                        }
+                        tracing::debug!(
+                            role = %role_name,
+                            tool_count = temp_server.tools.list().len(),
+                            "Using pre-generated tools for role"
+                        );
+                    } else {
+                        tracing::warn!(
+                            role = %role_name,
+                            "Role from token not found in server configuration, using defaults"
+                        );
+                        temp_server.tools = default_tools.clone();
+                        temp_server.role = default_role.clone();
+                        if let Some(r) = &temp_server.role {
+                            temp_server.executor = Some(temp_server.build_executor(r));
+                        }
+                    }
+                } else {
+                    // No role in context (auth disabled or fallback)
+                    temp_server.tools = default_tools.clone();
+                    temp_server.role = default_role.clone();
+                    if let Some(r) = &temp_server.role {
+                        temp_server.executor = Some(temp_server.build_executor(r));
+                    }
                 }
 
                 if let Some(response) = temp_server.handle_request(request).await {

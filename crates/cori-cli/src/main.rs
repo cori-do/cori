@@ -60,18 +60,19 @@ enum Command {
 
     /// Start Cori (Dashboard + MCP server).
     ///
-    /// By default, starts the Dashboard on :8080 and MCP HTTP server on :3000.
-    /// Use --stdio for Claude Desktop and local agents (requires token).
+    /// By default, uses the transport setting from cori.yaml (mcp.transport).
+    /// If not configured, defaults to HTTP mode on :3000.
+    /// Dashboard runs on :8080 by default. Use --stdio for Claude Desktop.
     Run {
         /// Path to configuration file.
         #[arg(long, short, default_value = "cori.yaml")]
         config: PathBuf,
 
-        /// Use HTTP transport (default). Multi-tenant: each request carries its own token.
+        /// Use HTTP transport (overrides config). Multi-tenant: each request carries its own token.
         #[arg(long, conflicts_with = "stdio")]
         http: bool,
 
-        /// Use stdio transport. Single-tenant: requires --token or CORI_TOKEN env.
+        /// Use stdio transport (overrides config). Single-tenant: requires --token or CORI_TOKEN env.
         #[arg(long, conflicts_with = "http")]
         stdio: bool,
 
@@ -191,6 +192,10 @@ enum TokenCommand {
 enum ToolsCommand {
     /// List tools for a role or token (offline, no server needed).
     List {
+        /// Path to configuration file (YAML).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+
         /// Role name to generate tools for.
         #[arg(long, conflicts_with = "token")]
         role: Option<String>,
@@ -199,14 +204,6 @@ enum ToolsCommand {
         #[arg(long, short, conflicts_with = "role")]
         token: Option<PathBuf>,
 
-        /// Public key file for token verification (required with --token).
-        #[arg(long)]
-        key: Option<PathBuf>,
-
-        /// Roles directory.
-        #[arg(long, default_value = "roles")]
-        roles_dir: PathBuf,
-
         /// Show detailed tool schemas.
         #[arg(long)]
         verbose: bool,
@@ -214,16 +211,16 @@ enum ToolsCommand {
 
     /// Show detailed schema for a specific tool.
     Describe {
+        /// Path to configuration file (YAML).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+
         /// Tool name.
         tool: String,
 
         /// Role name.
         #[arg(long)]
         role: String,
-
-        /// Roles directory.
-        #[arg(long, default_value = "roles")]
-        roles_dir: PathBuf,
     },
 }
 
@@ -330,20 +327,19 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Tools { cmd } => match cmd {
             ToolsCommand::List {
+                config,
                 role,
                 token,
-                key,
-                roles_dir,
                 verbose,
             } => {
-                commands::tools::list(role, token, key, roles_dir, verbose)?;
+                commands::tools::list(config, role, token, verbose)?;
             }
             ToolsCommand::Describe {
+                config,
                 tool,
                 role,
-                roles_dir,
             } => {
-                commands::tools::describe(tool, role, roles_dir)?;
+                commands::tools::describe(config, tool, role)?;
             }
         },
 
