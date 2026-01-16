@@ -37,6 +37,10 @@ pub struct RunConfig {
     #[serde(default)]
     pub audit: AuditConfigFile,
 
+    /// Approvals configuration.
+    #[serde(default)]
+    pub approvals: ApprovalsConfigFile,
+
     /// MCP server configuration.
     #[serde(default)]
     pub mcp: McpConfigFile,
@@ -44,6 +48,17 @@ pub struct RunConfig {
     /// Dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfigFile,
+
+    /// Directory containing role definition files (each .yaml file = one role).
+    #[serde(default)]
+    pub roles_dir: Option<PathBuf>,
+
+    /// List of individual role definition files.
+    #[serde(default)]
+    pub role_files: Vec<PathBuf>,
+
+    // NOTE: Inline roles are not supported - use role files in roles_dir instead.
+    // This follows the canonical model where roles are defined in separate YAML files.
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +102,38 @@ pub struct AuditConfigFile {
     pub log_queries: bool,
     #[serde(default)]
     pub log_results: bool,
+}
+
+/// Approvals configuration from config file.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalsConfigFile {
+    /// Whether approvals are enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Directory for approval storage files.
+    #[serde(default = "default_approvals_directory")]
+    pub directory: String,
+    /// Default TTL for approval requests in hours.
+    #[serde(default = "default_ttl_hours")]
+    pub ttl_hours: u64,
+}
+
+impl Default for ApprovalsConfigFile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: default_approvals_directory(),
+            ttl_hours: default_ttl_hours(),
+        }
+    }
+}
+
+fn default_approvals_directory() -> String {
+    "approvals".to_string()
+}
+
+fn default_ttl_hours() -> u64 {
+    24
 }
 
 /// MCP server configuration from config file.
@@ -135,6 +182,9 @@ impl Default for DashboardConfigFile {
         }
     }
 }
+
+// NOTE: Role definitions use cori_core::RoleDefinition directly.
+// No duplicate config types here - follow the canonical model in cori-core.
 
 fn default_upstream_port() -> u16 {
     5432
@@ -309,7 +359,31 @@ pub async fn run(
     };
 
     // Create shared approval manager for MCP and dashboard
-    let approval_manager = Arc::new(ApprovalManager::default());
+    let approval_manager = if run_config.approvals.enabled {
+        // Resolve approvals directory relative to config directory
+        let approvals_dir = config_dir.join(&run_config.approvals.directory);
+        let ttl = chrono::Duration::hours(run_config.approvals.ttl_hours as i64);
+        
+        match ApprovalManager::with_file_storage(&approvals_dir, ttl) {
+            Ok(manager) => {
+                tracing::info!(
+                    directory = %approvals_dir.display(),
+                    ttl_hours = run_config.approvals.ttl_hours,
+                    "Created file-based approval manager"
+                );
+                Arc::new(manager)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to create file-based approval manager, falling back to in-memory"
+                );
+                Arc::new(ApprovalManager::default())
+            }
+        }
+    } else {
+        Arc::new(ApprovalManager::default())
+    };
 
     // Load schema for MCP tool generation using CoriConfig (required)
     // This ensures we use the same from_schema_definition path as CLI tools command

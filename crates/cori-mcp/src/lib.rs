@@ -70,6 +70,7 @@
 //! ```
 
 pub mod approval;
+pub mod approval_storage;
 pub mod error;
 pub mod executor;
 pub mod http_transport;
@@ -85,6 +86,7 @@ pub use sqlx::PgPool;
 
 // Re-export main types
 pub use approval::{ApprovalError, ApprovalManager, ApprovalRequest, ApprovalStatus};
+pub use approval_storage::{ApprovalFileStorage, ApprovalStorageError};
 pub use error::McpError;
 pub use executor::{ExecutionContext, ExecutionResult, ToolExecutor};
 pub use protocol::{

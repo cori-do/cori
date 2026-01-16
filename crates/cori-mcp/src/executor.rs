@@ -315,6 +315,44 @@ impl ToolExecutor {
         }
     }
 
+    /// Fetch current row values by ID for snapshot validation.
+    /// Used when creating approval requests for updates/deletes.
+    async fn fetch_row_snapshot(
+        &self,
+        table: &str,
+        pk_value: i64,
+        tenant_id: &str,
+    ) -> Option<Value> {
+        let pool = self.pool.as_ref()?;
+        let pk_column = self.get_primary_key_column(table);
+        let tenant_column = self.tenant_column_for_table(table);
+
+        let query = if let Some(tc) = &tenant_column {
+            // With tenant scoping
+            if tenant_id.parse::<i64>().is_ok() {
+                format!(
+                    "SELECT * FROM {} WHERE {} = {} AND {} = {}",
+                    table, pk_column, pk_value, tc, tenant_id
+                )
+            } else {
+                format!(
+                    "SELECT * FROM {} WHERE {} = {} AND {} = '{}'",
+                    table, pk_column, pk_value, tc, tenant_id.replace("'", "''")
+                )
+            }
+        } else {
+            format!(
+                "SELECT * FROM {} WHERE {} = {}",
+                table, pk_column, pk_value
+            )
+        };
+
+        match sqlx::query(&query).fetch_optional(pool).await {
+            Ok(Some(row)) => Some(row_to_json(&row, &[])),
+            _ => None,
+        }
+    }
+
     /// Execute a tool call.
     pub async fn execute(
         &self,
@@ -399,15 +437,63 @@ impl ToolExecutor {
         // 2. Check if approval is required (role-level requires_approval)
         if let Some(approval_fields) = validator.requires_approval(&validation_request) {
             if !options.dry_run {
-                let request = self.approval_manager.create_request(
-                    &tool.name,
-                    arguments.clone(),
-                    approval_fields,
-                    &context.tenant_id,
-                    &context.role,
-                );
+                // Determine if this is an update/delete operation that needs a snapshot
+                let request = match &operation {
+                    ToolOperation::Update { table } | ToolOperation::Delete { table } => {
+                        // For updates/deletes, snapshot current values for validation
+                        let pk_value = arguments.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
 
-                            // Log approval request
+                        if pk_value > 0 {
+                            // Fetch current row values
+                            let snapshot =
+                                self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
+
+                            if let Some(original_values) = snapshot {
+                                // Create request with snapshot
+                                self.approval_manager.create_request_with_snapshot(
+                                    &tool.name,
+                                    arguments.clone(),
+                                    approval_fields,
+                                    &context.tenant_id,
+                                    &context.role,
+                                    table,
+                                    json!(pk_value),
+                                    original_values,
+                                )
+                            } else {
+                                // Record not found, create regular request
+                                self.approval_manager.create_request(
+                                    &tool.name,
+                                    arguments.clone(),
+                                    approval_fields,
+                                    &context.tenant_id,
+                                    &context.role,
+                                )
+                            }
+                        } else {
+                            // No valid ID, create regular request
+                            self.approval_manager.create_request(
+                                &tool.name,
+                                arguments.clone(),
+                                approval_fields,
+                                &context.tenant_id,
+                                &context.role,
+                            )
+                        }
+                    }
+                    _ => {
+                        // For other operations (create, etc.), no snapshot needed
+                        self.approval_manager.create_request(
+                            &tool.name,
+                            arguments.clone(),
+                            approval_fields,
+                            &context.tenant_id,
+                            &context.role,
+                        )
+                    }
+                };
+
+                // Log approval request
             if let Some(logger) = &self.audit_logger {
                 let _ = logger
                     .log_approval_requested(
@@ -487,6 +573,89 @@ impl ToolExecutor {
         }
 
         result
+    }
+
+    /// Execute an approved request after validating that data hasn't changed.
+    ///
+    /// This method should be called by the dashboard after an approval is granted.
+    /// It validates that the original snapshot matches current DB values before executing.
+    pub async fn execute_approved(
+        &self,
+        approval: &crate::approval::ApprovalRequest,
+        context: &ExecutionContext,
+    ) -> ExecutionResult {
+        // Validate snapshot if present (for updates/deletes)
+        if let (Some(table), Some(pk), Some(original_values)) = (
+            &approval.target_table,
+            &approval.target_pk,
+            &approval.original_values,
+        ) {
+            let pk_value = pk.as_i64().unwrap_or(0);
+            if pk_value > 0 {
+                // Fetch current values
+                let current_values = self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
+                
+                match current_values {
+                    Some(current) => {
+                        // Compare with original snapshot
+                        if &current != original_values {
+                            return ExecutionResult::error(format!(
+                                "Data has changed since approval was requested. Original: {}, Current: {}. Please create a new approval request.",
+                                original_values, current
+                            ));
+                        }
+                    }
+                    None => {
+                        return ExecutionResult::error(
+                            "Record not found or access denied. The record may have been deleted.",
+                        );
+                    }
+                }
+            }
+        }
+
+        // Find the tool definition for this request
+        // We need to generate a temporary tool definition for execution
+        let tool = ToolDefinition {
+            name: approval.tool_name.clone(),
+            description: Some(format!("Executing approved request: {}", approval.id)),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+            }),
+            annotations: None,
+        };
+
+        // Execute without dry-run and without re-checking approval
+        let options = CallToolOptions {
+            dry_run: false,
+            ..Default::default()
+        };
+
+        // Parse operation and execute directly (bypass approval check)
+        let operation = self.parse_tool_operation(&tool.name);
+        let arguments = approval.arguments.clone();
+
+        match operation {
+            ToolOperation::Get { table } => {
+                self.execute_get(&table, &arguments, &options, context).await
+            }
+            ToolOperation::List { table } => {
+                self.execute_list(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Create { table } => {
+                self.execute_create(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Update { table } => {
+                self.execute_update(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Delete { table } => {
+                self.execute_delete(&table, &arguments, &options, context).await
+            }
+            ToolOperation::Custom { name } => {
+                self.execute_custom(&name, &arguments, &options, context).await
+            }
+        }
     }
 
     /// Validate arguments against tool constraints.
@@ -1185,7 +1354,26 @@ impl ToolExecutor {
                     "message": "Record updated successfully"
                 }), &query)
             }
-            Ok(None) => ExecutionResult::error("Record not found or access denied"),
+            Ok(None) => {
+                // Provide more specific error message
+                let pk_description = pk_values
+                    .iter()
+                    .map(|(col, val)| format!("{} = {}", col, val))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                if tenant_column.is_some() {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists for tenant '{}'. \
+                        The record may not exist or may belong to a different tenant.",
+                        table, pk_description, context.tenant_id
+                    ))
+                } else {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists.",
+                        table, pk_description
+                    ))
+                }
+            }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }
@@ -1291,7 +1479,25 @@ impl ToolExecutor {
                 "deleted": deleted_keys
             }), &query)
             }
-            Ok(None) => ExecutionResult::error("Record not found or access denied"),
+            Ok(None) => {
+                let pk_description = pk_values
+                    .iter()
+                    .map(|(col, val)| format!("{} = {}", col, val))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                if tenant_column.is_some() {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists for tenant '{}'. \
+                        The record may not exist or may belong to a different tenant.",
+                        table, pk_description, context.tenant_id
+                    ))
+                } else {
+                    ExecutionResult::error(format!(
+                        "Record not found: no {} with {} exists.",
+                        table, pk_description
+                    ))
+                }
+            }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }

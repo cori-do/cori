@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 pub struct McpServer {
     config: McpConfig,
     tools: ToolRegistry,
+    /// Single role for stdio transport (set via CORI_TOKEN env var or with_role())
     role: Option<RoleDefinition>,
     /// All available roles (HTTP mode).
     roles: HashMap<String, RoleDefinition>,
@@ -107,7 +108,7 @@ impl McpServer {
         self
     }
 
-    /// Set the role definition for dynamic tool generation.
+    /// Set the role definition for dynamic tool generation (stdio transport).
     pub fn with_role(mut self, role: RoleDefinition) -> Self {
         self.executor = Some(self.build_executor(&role));
         self.role = Some(role);
@@ -216,6 +217,40 @@ impl McpServer {
                 "Generated tools from role definition"
             );
         }
+
+        // Always register system tools
+        self.register_system_tools();
+    }
+
+    /// Register system tools that are always available.
+    fn register_system_tools(&mut self) {
+        // getApprovalResult - for polling approval status/results
+        let approval_tool = ToolDefinition {
+            name: "getApprovalResult".to_string(),
+            description: Some(
+                "Get the status and result of an approval request. Use this to poll for approval \
+                 status after receiving a pending_approval response. Returns the approval status \
+                 (pending, approved, denied, expired, not_found) and execution result if approved."
+                    .to_string(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "approval_id": {
+                        "type": "string",
+                        "description": "The approval ID returned from the original request"
+                    }
+                },
+                "required": ["approval_id"]
+            }),
+            annotations: Some(ToolAnnotations {
+                read_only: Some(true),
+                requires_approval: None,
+                approval_fields: None,
+                dry_run_supported: Some(false),
+            }),
+        };
+        self.tools.register(approval_tool);
     }
 
     /// Start the MCP server.
@@ -289,7 +324,7 @@ impl McpServer {
                 
                 // Use tenant from request context (per-request from token), 
                 // falling back to server default (for stdio mode or development)
-                let effective_tenant_id = context.tenant_id
+                let effective_tenant_id = context.tenant_id.clone()
                     .or_else(|| default_tenant_id.clone());
                 
                 tracing::debug!(
@@ -456,6 +491,11 @@ impl McpServer {
             },
             None => return JsonRpcResponse::error(id, -32602, "Missing params"),
         };
+
+        // Handle system tools first
+        if params.name == "getApprovalResult" {
+            return self.handle_get_approval_result(id, params.arguments);
+        }
 
         // Check if tool exists
         let tool = match self.tools.get(&params.name) {
@@ -626,6 +666,110 @@ impl McpServer {
             },
             None => JsonRpcResponse::error(id, -32602, "Missing approvalId"),
         }
+    }
+
+    /// Handle getApprovalResult tool call - returns approval status and result.
+    ///
+    /// Response structure:
+    /// - pending: { status: "pending", approval_id, expires_at }
+    /// - approved: { status: "approved", approval_id, result, approved_by, approved_at }
+    /// - denied: { status: "denied", approval_id, reason, denied_by, denied_at }
+    /// - expired: { status: "expired", approval_id, expired_at }
+    /// - not_found: { status: "not_found", approval_id }
+    fn handle_get_approval_result(&self, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+        let approval_id = arguments
+            .get("approval_id")
+            .and_then(|v| v.as_str());
+
+        let approval_id = match approval_id {
+            Some(aid) => aid,
+            None => {
+                return self.tool_result_response(id, json!({
+                    "status": "error",
+                    "message": "Missing required parameter: approval_id"
+                }));
+            }
+        };
+
+        match self.approval_manager.get(approval_id) {
+            Some(approval) => {
+                use crate::approval::ApprovalStatus;
+                
+                let response = match approval.status {
+                    ApprovalStatus::Pending => {
+                        if approval.is_expired() {
+                            json!({
+                                "status": "expired",
+                                "approval_id": approval.id,
+                                "expired_at": approval.expires_at
+                            })
+                        } else {
+                            json!({
+                                "status": "pending",
+                                "approval_id": approval.id,
+                                "tool_name": approval.tool_name,
+                                "expires_at": approval.expires_at,
+                                "created_at": approval.created_at
+                            })
+                        }
+                    }
+                    ApprovalStatus::Approved => {
+                        json!({
+                            "status": "approved",
+                            "approval_id": approval.id,
+                            "result": approval.execution_result,
+                            "approved_by": approval.decided_by,
+                            "approved_at": approval.decided_at
+                        })
+                    }
+                    ApprovalStatus::Rejected => {
+                        json!({
+                            "status": "denied",
+                            "approval_id": approval.id,
+                            "reason": approval.reason,
+                            "denied_by": approval.decided_by,
+                            "denied_at": approval.decided_at
+                        })
+                    }
+                    ApprovalStatus::Expired => {
+                        json!({
+                            "status": "expired",
+                            "approval_id": approval.id,
+                            "expired_at": approval.expires_at
+                        })
+                    }
+                    ApprovalStatus::Cancelled => {
+                        json!({
+                            "status": "cancelled",
+                            "approval_id": approval.id,
+                            "cancelled_at": approval.decided_at
+                        })
+                    }
+                };
+
+                self.tool_result_response(id, response)
+            }
+            None => {
+                self.tool_result_response(id, json!({
+                    "status": "not_found",
+                    "approval_id": approval_id
+                }))
+            }
+        }
+    }
+
+    /// Convert a JSON value to an MCP tool result response.
+    fn tool_result_response(&self, id: Option<Value>, result: Value) -> JsonRpcResponse {
+        let rendered = serde_json::to_string_pretty(&result)
+            .unwrap_or_else(|_| result.to_string());
+        let response = json!({
+            "content": [{
+                "type": "text",
+                "text": rendered
+            }],
+            "isError": false
+        });
+        JsonRpcResponse::success(id, response)
     }
 
     fn handle_shutdown(&self, id: Option<Value>) -> JsonRpcResponse {

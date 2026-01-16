@@ -5,6 +5,7 @@ use cori_audit::{AuditEvent, AuditEventType};
 use cori_core::config::role_definition::RoleDefinition;
 use cori_core::CoriConfig;
 use cori_mcp::{ApprovalRequest, ApprovalStatus};
+use serde_json::Value;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -819,6 +820,8 @@ fn approval_card(approval: &ApprovalRequest, show_actions: bool) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;");
 
+    let diff_table = approval_diff_table(approval);
+
     format!(
         r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <div class="flex items-start justify-between mb-4">
@@ -843,6 +846,8 @@ fn approval_card(approval: &ApprovalRequest, show_actions: bool) -> String {
                     {approval_fields}
                 </div>
             </div>
+
+            {diff_table}
             
             <div x-data="{{ showArgs: false }}">
                 <button @click="showArgs = !showArgs" class="text-sm text-primary-600 hover:text-primary-700 mb-2">
@@ -866,6 +871,7 @@ fn approval_card(approval: &ApprovalRequest, show_actions: bool) -> String {
         approval_fields = approval.approval_fields.iter()
             .map(|f| format!(r#"<span class="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-2 py-1 rounded">{}</span>"#, f))
             .collect::<String>(),
+        diff_table = diff_table,
         args = args_json,
         decided_info = if approval.decided_at.is_some() {
             let reason_html = approval.reason.as_ref()
@@ -882,6 +888,105 @@ fn approval_card(approval: &ApprovalRequest, show_actions: bool) -> String {
         } else { String::new() },
         actions = actions,
     )
+}
+
+fn approval_diff_table(approval: &ApprovalRequest) -> String {
+    let args_obj = approval.arguments.as_object();
+    let before_obj = approval.original_values.as_ref().and_then(|v| v.as_object());
+
+    if args_obj.is_none() && before_obj.is_none() {
+        return String::new();
+    }
+
+    let mut before_map = before_obj.cloned().unwrap_or_default();
+    let mut after_map = before_map.clone();
+
+    let is_delete = approval.tool_name.to_lowercase().starts_with("delete");
+    if is_delete {
+        for (key, _) in before_map.iter() {
+            after_map.insert(key.clone(), Value::Null);
+        }
+    } else if let Some(args) = args_obj {
+        for (key, value) in args {
+            if key == "id" {
+                continue;
+            }
+            after_map.insert(key.clone(), value.clone());
+        }
+    }
+
+    if before_map.is_empty() && after_map.is_empty() {
+        return String::new();
+    }
+
+    let mut keys: Vec<String> = before_map
+        .keys()
+        .chain(after_map.keys())
+        .cloned()
+        .collect();
+    keys.sort();
+    keys.dedup();
+
+    let rows: String = keys
+        .into_iter()
+        .map(|key| {
+            let before_value = before_map.get(&key);
+            let after_value = after_map.get(&key);
+            let changed = before_value != after_value;
+            let row_class = if changed {
+                "bg-yellow-50 dark:bg-yellow-900/20"
+            } else {
+                ""
+            };
+
+            format!(
+                r#"<tr class="border-t border-gray-200 dark:border-gray-700 {row_class}">
+                    <td class="px-3 py-2 text-gray-700 dark:text-gray-300 font-mono">{field}</td>
+                    <td class="px-3 py-2 text-gray-600 dark:text-gray-400">{before}</td>
+                    <td class="px-3 py-2 text-gray-900 dark:text-gray-100 font-medium">{after}</td>
+                </tr>"#,
+                row_class = row_class,
+                field = escape_html(&key),
+                before = value_to_string(before_value),
+                after = value_to_string(after_value),
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<div class="mb-4">
+            <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Before / After</h4>
+            <div class="overflow-x-auto">
+                <table class="min-w-full text-sm border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                    <thead class="bg-gray-50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300">
+                        <tr>
+                            <th class="px-3 py-2 text-left font-medium">Field</th>
+                            <th class="px-3 py-2 text-left font-medium">Before</th>
+                            <th class="px-3 py-2 text-left font-medium">After</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </div>
+        </div>"#,
+        rows = rows
+    )
+}
+
+fn value_to_string(value: Option<&Value>) -> String {
+    let text = match value {
+        None => "—".to_string(),
+        Some(Value::Null) => "null".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+    };
+    escape_html(&text)
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // =============================================================================

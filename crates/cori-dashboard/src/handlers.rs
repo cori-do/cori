@@ -580,10 +580,123 @@ pub mod api {
         let manager = state.approval_manager()
             .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
         
-        manager.approve(&id, form.decided_by.as_deref().unwrap_or("dashboard"), form.reason)
+        // Get the approval request details before approving
+        let approval = manager.get(&id)
+            .ok_or((StatusCode::NOT_FOUND, "Approval not found".to_string()))?;
+        
+        let approver = form.decided_by.as_deref().unwrap_or("dashboard");
+        manager.approve(&id, approver, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
         
-        Ok(Html(r#"<script>showToast('Approved successfully'); window.location.reload();</script>"#.to_string()))
+        // Log the approval event
+        if let Some(logger) = state.audit_logger() {
+            let _ = logger.log_approved(
+                &approval.role,
+                &approval.tenant_id,
+                &approval.tool_name,
+                &id,
+                approver,
+            ).await;
+        }
+        
+        // Execute the approved action
+        let execution_result = execute_approved_action(&state, &approval).await;
+        
+        // Store the execution result
+        if let Some(result_json) = execution_result {
+            if let Err(e) = manager.update_with_result(&id, result_json.clone()) {
+                tracing::warn!(error = %e, "Failed to store execution result for approval {}", id);
+            }
+            
+            // Log the execution result
+            if let Some(logger) = state.audit_logger() {
+                let success = result_json.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                if success {
+                    // Log successful tool execution
+                    let _ = logger.log_tool_call(
+                        &approval.role,
+                        &approval.tenant_id,
+                        &format!("{} (approved:{})", approval.tool_name, id),
+                        None,
+                        false,
+                    ).await;
+                } else {
+                    let error = result_json.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
+                    // Log failed tool execution
+                    let _ = logger.log_query_failed(
+                        &approval.role,
+                        &approval.tenant_id,
+                        &format!("{} (approved:{})", approval.tool_name, id),
+                        None,
+                        error,
+                    ).await;
+                }
+            }
+        }
+        
+        Ok(Html(r#"<script>showToast('Approved and executed successfully'); window.location.reload();</script>"#.to_string()))
+    }
+
+    /// Execute an approved action using the ToolExecutor.
+    async fn execute_approved_action(
+        state: &AppState,
+        approval: &cori_mcp::ApprovalRequest,
+    ) -> Option<serde_json::Value> {
+        // Get the role definition for the approval's role
+        let role = state.get_role(&approval.role)?;
+        
+        // Get database URL
+        let database_url = state.database_url()?;
+        
+        // Get the approval manager
+        let approval_manager = state.approval_manager()?.clone();
+        
+        // Create the executor
+        let executor = cori_mcp::ToolExecutor::new(role.clone(), approval_manager);
+        
+        // Connect to database
+        let executor = match executor.with_database_url(database_url).await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to connect to database for approved action execution");
+                return Some(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to connect to database: {}", e)
+                }));
+            }
+        };
+        
+        // Add rules if available
+        let executor = if let Some(rules) = state.get_rules() {
+            executor.with_rules(rules)
+        } else {
+            executor
+        };
+        
+        // Add audit logger if available
+        let executor = if let Some(logger) = state.audit_logger() {
+            executor.with_audit_logger(logger.clone())
+        } else {
+            executor
+        };
+        
+        // Create execution context
+        let context = cori_mcp::ExecutionContext {
+            tenant_id: approval.tenant_id.clone(),
+            role: approval.role.clone(),
+            connection_id: Some(format!("dashboard-approval-{}", approval.id)),
+        };
+        
+        // Execute the approved action
+        let result = executor.execute_approved(approval, &context).await;
+        
+        // Convert to JSON
+        Some(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({
+            "success": result.success,
+            "error": result.error
+        })))
     }
 
     pub async fn approval_reject(
@@ -594,8 +707,25 @@ pub mod api {
         let manager = state.approval_manager()
             .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
         
-        manager.reject(&id, form.decided_by.as_deref().unwrap_or("dashboard"), form.reason)
+        // Get the approval request details before rejecting
+        let approval = manager.get(&id)
+            .ok_or((StatusCode::NOT_FOUND, "Approval not found".to_string()))?;
+        
+        let rejector = form.decided_by.as_deref().unwrap_or("dashboard");
+        manager.reject(&id, rejector, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        
+        // Log the denial event
+        if let Some(logger) = state.audit_logger() {
+            let _ = logger.log_denied(
+                &approval.role,
+                &approval.tenant_id,
+                &approval.tool_name,
+                &id,
+                rejector,
+                form.reason.as_deref(),
+            ).await;
+        }
         
         Ok(Html(r#"<script>showToast('Rejected'); window.location.reload();</script>"#.to_string()))
     }
