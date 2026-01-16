@@ -675,6 +675,9 @@ pub mod api {
             executor
         };
         
+        // Add schema (required for primary key lookup)
+        let executor = executor.with_schema(state.get_db_schema());
+        
         // Add audit logger if available
         let executor = if let Some(logger) = state.audit_logger() {
             executor.with_audit_logger(logger.clone())

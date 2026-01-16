@@ -143,23 +143,28 @@ impl AppState {
         self.inner.config.write().unwrap().rules = Some(rules);
     }
 
+    /// Get the database schema.
+    /// 
+    /// Priority: 1) SchemaDefinition from config, 2) SchemaInfo from cache
+    pub fn get_db_schema(&self) -> cori_mcp::DatabaseSchema {
+        let config = self.inner.config.read().unwrap();
+        if let Some(schema) = config.get_schema() {
+            // Use shared conversion function from cori-mcp
+            cori_mcp::schema::from_schema_definition(schema)
+        } else if let Some(schema_info) = self.schema_cache() {
+            // Fallback to cached schema from introspection
+            crate::schema_converter::convert_to_db_schema(&schema_info)
+        } else {
+            cori_mcp::DatabaseSchema::new()
+        }
+    }
+
     /// Generate MCP tools for a role using the shared tool_generation module.
     /// 
     /// This uses the same logic as CLI and MCP server to ensure consistency.
     /// Priority: 1) SchemaDefinition from config, 2) SchemaInfo from cache
     pub fn generate_tools_for_role(&self, role: &RoleDefinition) -> Vec<cori_mcp::ToolDefinition> {
-        let db_schema = {
-            let config = self.inner.config.read().unwrap();
-            if let Some(schema) = config.get_schema() {
-                // Use shared conversion function from cori-mcp
-                cori_mcp::schema::from_schema_definition(schema)
-            } else if let Some(schema_info) = self.schema_cache() {
-                // Fallback to cached schema from introspection
-                crate::schema_converter::convert_to_db_schema(&schema_info)
-            } else {
-                cori_mcp::DatabaseSchema::new()
-            }
-        };
+        let db_schema = self.get_db_schema();
 
         // Use shared tool generation logic
         cori_mcp::tool_generation::generate_tools_with_db_schema(&db_schema, role)

@@ -324,7 +324,7 @@ impl ToolExecutor {
         tenant_id: &str,
     ) -> Option<Value> {
         let pool = self.pool.as_ref()?;
-        let pk_column = self.get_primary_key_column(table);
+        let pk_column = self.get_primary_key_columns(table).into_iter().next()?;
         let tenant_column = self.tenant_column_for_table(table);
 
         let query = if let Some(tc) = &tenant_column {
@@ -441,7 +441,13 @@ impl ToolExecutor {
                 let request = match &operation {
                     ToolOperation::Update { table } | ToolOperation::Delete { table } => {
                         // For updates/deletes, snapshot current values for validation
-                        let pk_value = arguments.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                        // Get the actual primary key column name from schema
+                        let pk_columns = self.get_primary_key_columns(table);
+                        let pk_value = pk_columns
+                            .first()
+                            .and_then(|pk_col| arguments.get(pk_col))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
 
                         if pk_value > 0 {
                             // Fetch current row values
