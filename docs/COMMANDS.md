@@ -66,10 +66,11 @@ my-cori-project/
 │   └── *.yaml              # Auto-generated role definitions
 ├── groups/
 │   └── *.yaml              # Sample approval groups
-└── schema/
-    ├── schema.yaml         # Auto-generated database schema (DO NOT EDIT)
-    ├── rules.yaml          # Tenancy, soft-delete, validation rules
-    └── types.yaml          # Reusable semantic types
+├── schema/
+│   ├── schema.yaml         # Auto-generated database schema (DO NOT EDIT)
+│   ├── rules.yaml          # Tenancy, soft-delete, validation rules
+│   └── types.yaml          # Reusable semantic types
+└── tokens/                 # Generated tokens (gitignored)
 ```
 
 ### What Init Detects

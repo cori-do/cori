@@ -182,20 +182,20 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     println!();
     println!("📂 Project structure:");
     println!("   {}/", project);
-    println!("   ├── cori.yaml           # Main configuration");
-    println!("   ├── schema/             # Database schema files");
-    println!("   │   ├── schema.yaml     # Auto-generated DB schema (DO NOT EDIT)");
+    println!("   ├── cori.yaml           # Main configuration file");
+    println!("   ├── .gitignore          # Ignores keys and sensitive files");
+    println!("   ├── README.md           # Project-specific getting started guide");
+    println!("   ├── keys/");
+    println!("   │   ├── private.key     # Ed25519 private key (keep secure!)");
+    println!("   │   └── public.key      # Ed25519 public key");
+    println!("   ├── roles/");
+    println!("   │   └── *.yaml          # Auto-generated role definitions");
+    println!("   ├── groups/");
+    println!("   │   └── *.yaml          # Sample approval groups");
+    println!("   ├── schema/");
+    println!("   │   ├── schema.yaml     # Auto-generated database schema (DO NOT EDIT)");
     println!("   │   ├── rules.yaml      # Tenancy, soft-delete, validation rules");
     println!("   │   └── types.yaml      # Reusable semantic types");
-    println!("   ├── roles/              # Role definitions (one file per role)");
-    println!("   │   ├── admin_agent.yaml");
-    println!("   │   ├── readonly_agent.yaml");
-    println!("   │   └── support_agent.yaml");
-    println!("   ├── groups/             # Approval groups");
-    println!("   │   └── support_managers.yaml");
-    println!("   ├── keys/               # Biscuit keypair (keep private.key secret!)");
-    println!("   │   ├── private.key");
-    println!("   │   └── public.key");
     println!("   └── tokens/             # Generated tokens (gitignored)");
     println!();
     println!("🚦 Next steps:");
@@ -258,8 +258,9 @@ fn create_project_structure(project_dir: &PathBuf) -> Result<()> {
 keys/private.key
 
 # Generated tokens
-tokens/*.token
-tokens/*.biscuit
+tokens/
+*.token
+*.biscuit
 
 # Environment files with secrets
 .env
@@ -1143,7 +1144,7 @@ audit:
   retention_days: 90
 
 # =============================================================================
-# OBSERVABILITY (optional)
+# OBSERVABILITY (optional - not yet implemented)
 # =============================================================================
 
 # observability:
@@ -1328,15 +1329,25 @@ fn generate_support_role(tables: &[&TableInfo]) -> String {
                     .any(|p| t.name.to_lowercase().contains(p));
 
                 if is_ticket && t.columns.iter().any(|c| c.name == "status") {
-                    // Ticket table with status - allow updating status
+                    // Ticket table with status - allow creating and updating
                     format!(
                         r#"  {}:
     readable: [{}]
+    creatable:
+      subject:
+        required: true
+        guidance: "Use a clear, concise subject that summarizes the customer's issue"
+      priority:
+        default: low
+        restrict_to: [low, medium, high]
+        guidance: "Set to 'high' only for production-blocking issues"
     updatable:
       status:
         only_when:
-          new.status: [open, in_progress, pending, resolved, closed]
-        guidance: "Update ticket status based on resolution progress"
+          - {{ old.status: open, new.status: [in_progress] }}
+          - {{ old.status: in_progress, new.status: [open, resolved] }}
+          - {{ old.status: resolved, new.status: [closed] }}
+        guidance: "Follow the ticket lifecycle: open → in_progress → resolved → closed"
       priority:
         requires_approval: true
         guidance: "Priority changes require manager approval"
@@ -1375,6 +1386,7 @@ description: "AI agent for customer support operations"
 approvals:
   group: support_managers
   notify_on_pending: true
+  message: "Support action requires manager approval"
 
 tables:
 {}
