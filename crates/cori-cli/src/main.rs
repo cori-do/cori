@@ -126,7 +126,11 @@ enum KeysCommand {
 enum TokenCommand {
     /// Mint a new role token (or agent token if --tenant is specified).
     Mint {
-        /// Path to private key file. Falls back to BISCUIT_PRIVATE_KEY env var if not provided.
+        /// Path to configuration file (for key resolution).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+
+        /// Path to private key file (overrides cori.yaml). Falls back to BISCUIT_PRIVATE_KEY env var.
         #[arg(long, env = "BISCUIT_PRIVATE_KEY")]
         key: Option<String>,
 
@@ -153,7 +157,11 @@ enum TokenCommand {
 
     /// Attenuate a role token with tenant restriction and expiration.
     Attenuate {
-        /// Path to private key file. Falls back to BISCUIT_PRIVATE_KEY env var if not provided.
+        /// Path to configuration file (for key resolution).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+
+        /// Path to private key file (overrides cori.yaml). Falls back to BISCUIT_PRIVATE_KEY env var.
         #[arg(long, env = "BISCUIT_PRIVATE_KEY")]
         key: Option<String>,
 
@@ -176,15 +184,23 @@ enum TokenCommand {
 
     /// Inspect a token's contents (optionally verify signature).
     ///
-    /// Without --key: shows token contents with "signature not verified" warning.
-    /// With --key: verifies signature and shows validity status.
+    /// Without --verify: shows token contents with "signature not verified" warning.
+    /// With --verify: verifies signature using key from cori.yaml or --key.
     Inspect {
         /// Token string or path to token file.
         token: String,
 
-        /// Path to public key file for signature verification.
+        /// Path to configuration file (for key resolution).
+        #[arg(long, short, default_value = "cori.yaml")]
+        config: PathBuf,
+
+        /// Path to public key file (overrides cori.yaml). Falls back to BISCUIT_PUBLIC_KEY env var.
         #[arg(long, env = "BISCUIT_PUBLIC_KEY")]
         key: Option<String>,
+
+        /// Verify the token signature using the public key from config or --key.
+        #[arg(long)]
+        verify: bool,
     },
 }
 
@@ -279,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Token { cmd } => match cmd {
             TokenCommand::Mint {
+                config,
                 key,
                 role,
                 tenant,
@@ -286,19 +303,20 @@ async fn main() -> anyhow::Result<()> {
                 tables,
                 output,
             } => {
-                commands::token::mint(key, role, tenant, expires, tables, output)?;
+                commands::token::mint(config, key, role, tenant, expires, tables, output)?;
             }
             TokenCommand::Attenuate {
+                config,
                 key,
                 base,
                 tenant,
                 expires,
                 output,
             } => {
-                commands::token::attenuate(key, base, tenant, expires, output)?;
+                commands::token::attenuate(config, key, base, tenant, expires, output)?;
             }
-            TokenCommand::Inspect { token, key } => {
-                commands::token::inspect(token, key)?;
+            TokenCommand::Inspect { token, config, key, verify } => {
+                commands::token::inspect(config, token, key, verify)?;
             }
         },
 
