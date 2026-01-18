@@ -190,7 +190,6 @@ impl ValidationError {
 
     // =========================================================================
     // RULES VALIDATION ERRORS
-    // RULES VALIDATION ERRORS
     // =========================================================================
 
     /// Create a tenant required error.

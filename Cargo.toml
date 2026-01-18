@@ -67,5 +67,3 @@ rand = "0.9"
 # Static assets embedding
 rust-embed = "8"
 mime_guess = "2"
-
-# Strict JSON schema validation can be added later (jsonschema crate).

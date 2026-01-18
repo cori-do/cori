@@ -19,7 +19,7 @@ pub mod biscuit;
 pub mod dashboard;
 pub mod group_definition;
 pub mod mcp;
-pub mod proxy;
+pub mod upstream;
 pub mod role_definition;
 pub mod rules_definition;
 pub mod schema_definition;
@@ -35,7 +35,7 @@ pub use biscuit::BiscuitConfig;
 pub use dashboard::{AuthConfig, AuthType, BasicAuthUser, DashboardConfig, OidcConfig};
 pub use group_definition::GroupDefinition;
 pub use mcp::{McpConfig, Transport};
-pub use proxy::{ConnectionPoolConfig, SslMode, UpstreamConfig};
+pub use upstream::{ConnectionPoolConfig, SslMode, UpstreamConfig};
 pub use role_definition::{
     AllColumns, ApprovalConfig, ApprovalRequirement, ColumnCondition, ColumnList,
     ComparisonCondition, CreatableColumnConstraints, CreatableColumns, DeletableConstraints,

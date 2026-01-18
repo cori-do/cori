@@ -132,7 +132,7 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     // Note: Tables not listed in roles are implicitly blocked
     // No separate sensitive_tables analysis needed
 
-    // Generate schema files (per AGENTS.md Section 11)
+    // Generate schema files 
     println!("📄 Generating schema files...");
     let schema_dir = project_dir.join("schema");
 
@@ -236,7 +236,7 @@ async fn check_database_connectivity(database_url: &str) -> Result<()> {
 
 /// Create the project directory structure.
 /// 
-/// Creates the following structure per AGENTS.md:
+/// Creates the following structure:
 /// - schema/           # Database schema files
 /// - roles/            # Role definitions (one file per role)
 /// - groups/           # Approval groups

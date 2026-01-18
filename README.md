@@ -56,7 +56,8 @@ AI Agent → MCP → Cori → Your Postgres
 | **🤖 MCP Server Built-In** | AI agents discover typed tools, not raw SQL. |
 | **👁️ Full Audit Trail** | Every action logged with who, what, when, and outcome. |
 | **🔍 Virtual Schema** | Agents only see tables/columns they're allowed to access. |
-| **✅ Human-in-the-Loop** | Flag sensitive operations for approval before execution. |
+| **✅ Human-in-the-Loop** | Flag sensitive operations for approval before execution via dashboard. |
+| **📏 Policy Validation** | Declarative constraints (`only_when`, `restrict_to`, `required`) enforced at runtime. |
 
 ---
 
@@ -65,7 +66,7 @@ AI Agent → MCP → Cori → Your Postgres
 ### Install
 
 ```sh
-cargo install --path crates/cori-cli
+curl -fsSL https://cli.cori.do/install.sh | bash
 ```
 
 ### 1. Initialize from Your Database
@@ -138,6 +139,7 @@ Each tool is:
 - **Scoped to the tenant** in the token (no data leaks)
 - **Type-checked** with JSON Schema inputs
 - **Permission-aware** (only actions the role allows)
+- **Constraint-validated** (state machines, required fields enforced)
 - **Audited** (every call logged)
 
 Test what tools are available for a token:
@@ -153,11 +155,34 @@ cori tools list --token agent.token --key keys/public.key
 Cori records **every tool call, SQL query, and approval decision** in both human-readable and structured formats.
 
 - **Console output** (when `audit.stdout` is enabled) prints lines like `[2026-01-10T22:54:10Z] QUERY_EXECUTED role=support_agent tenant=acme_corp action=listCustomers sql="SELECT ..."` and flags approvals (`ApprovalRequested`, `Approved`, `Denied`).
-- **JSON log file** is written to `logs/audit.log` inside your project directory. Each line is a compact JSON object with fields such as `event_type`, `role`, `tenant_id`, `action`, `sql`, `approval_id`, and `duration_ms`, making it easy to ship to log processors or parse locally.
+- **JSON log file** is written to `logs/audit.log` inside your project directory. Each line is a compact JSON object with fields such as `event_type`, `role`, `tenant_id`, `action`, `sql`, `approval_id`, `parent_event_id`, and `duration_ms`, making it easy to ship to log processors or parse locally.
 
-The dashboard automatically loads `logs/audit.log` on startup, shows total counts, sortable columns, and paginated lists for fast forensic review.
+The dashboard at `:8080` automatically loads audit logs, with filtering by event type, sortable columns, and pagination for forensic review.
 
-Configure `audit.directory`, `audit.stdout`, and `audit.retention_days` in `cori.yaml` to change where logs live, whether dual output is enabled, and how long entries are kept.
+Configure `audit.directory`, `audit.stdout`, and `audit.retention_days` in `cori.yaml`.
+
+---
+
+## ✅ Human-in-the-Loop Approvals
+
+When a role has `requires_approval: true` on a column, updates go through the approval workflow:
+
+1. Agent calls the tool (e.g., `updateTicket` with `priority` change)
+2. Cori returns `"status": "pending_approval"` with an `approval_id`
+3. Admin reviews in the Dashboard → **Approvals** tab
+4. On approval, the operation executes; on rejection, it fails
+5. Full audit trail links the approval decision to the original request
+
+```yaml
+# In roles/support_agent.yaml
+tables:
+  tickets:
+    updatable:
+      priority:
+        requires_approval: true  # Goes to dashboard for review
+```
+
+Approval groups are defined in `groups/*.yaml` and referenced in role definitions.
 
 ---
 
@@ -168,41 +193,48 @@ Configure `audit.directory`, `audit.stdout`, and `audit.retention_days` in `cori
 Tell Cori how your multi-tenant data is structured:
 
 ```yaml
-# tenancy.yaml
-tenant_id:
-  type: uuid
+# schema/rules.yaml
+version: "1.0.0"
 
 tables:
   customers:
-    tenant_column: organization_id
+    tenant: organization_id       # Direct tenant column
   orders:
-    tenant_column: customer_org_id
+    tenant:
+      via: customer_id            # Inherited via FK
+      references: customers
   products:
-    global: true  # Shared across all tenants
+    global: true                  # Shared across all tenants
 ```
 
 ### Define Roles
 
-Specify what each role can do:
+Specify what each role can do with declarative constraints:
 
 ```yaml
 # roles/support_agent.yaml
 name: support_agent
 description: "AI agent for customer support"
 
+approvals:
+  group: support_managers         # Approval group for requires_approval
+
 tables:
   customers:
-    operations: [read]
     readable: [id, name, email, plan]
+    # No updatable = read-only
     
   tickets:
-    operations: [read, update]
     readable: [id, subject, status, priority]
-    editable:
+    updatable:
       status:
-        allowed_values: [open, in_progress, resolved]
+        only_when:                # State machine constraints
+          - old.status: open
+            new.status: [in_progress, resolved]
+          - old.status: in_progress
+            new.status: [open, resolved]
       priority:
-        requires_approval: true  # Human must approve
+        requires_approval: true   # Human must approve via dashboard
 
 default_page_size: 100
 ```
@@ -276,13 +308,13 @@ cori run
 # MCP endpoint at http://localhost:3000
 
 # Call tools via HTTP
-curl -X POST http://localhost:3000/tools/listCustomers \
+curl -X POST http://localhost:3000/mcp \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"filters": {"status": "active"}}'
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "listCustomers", "arguments": {}}, "id": 1}'
 ```
 
-Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — automatically generated from your schema and role permissions.
+Agents get tools like `getCustomer`, `listTickets`, `updateTicket` — automatically generated from your schema and role permissions.
 
 **No raw SQL. Just safe, typed actions.**
 
@@ -297,7 +329,9 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 │         MCP Server                  │      Admin Dashboard      │
 │  (stdio or http on :3000)           │      (http on :8080)      │
 ├─────────────────────────────────────┴───────────────────────────┤
-│  Tool Generator → Permission Check → Tenant Inject → Audit      │
+│  Tool Generator → Policy Validator → Tenant Inject → Audit      │
+│                         ↓                                       │
+│              Constraints · Approvals · Permissions              │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Upstream Postgres                            │
 └─────────────────────────────────────────────────────────────────┘
@@ -322,14 +356,17 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 
 ## 📊 Current Status
 
-> **Alpha Release** — Core MCP server and token system work. Building toward production hardening.
+> **Alpha Release** — Core MCP server, token system, policy validation, and approvals work. Building toward production hardening.
 
 | Component | Status |
 |-----------|--------|
 | Biscuit token auth | ✅ Working |
 | MCP tool generation | ✅ Working |
 | Tenant isolation | ✅ Working |
-| Admin dashboard | 🚧 In progress |
+| Policy validation | ✅ Working |
+| Human-in-the-loop approvals | ✅ Working |
+| Audit logging | ✅ Working |
+| Admin dashboard | ✅ Working |
 | Connection pooling | 📋 Planned |
 | Production hardening | 📋 Planned |
 
@@ -339,6 +376,22 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicketStatus` — aut
 ## 📖 Documentation
 
 - **[examples/demo/](examples/demo/)** — Working demo with Docker Compose
+- **[docs/COMMANDS.md](docs/COMMANDS.md)** — CLI command reference
+- **[schemas/](schemas/)** — JSON schemas for configuration files
+
+---
+
+## 🔨 Building from Source
+
+If you prefer to build Cori from source:
+
+```sh
+git clone https://github.com/cori-do/cori.git
+cd cori
+cargo install --path crates/cori-cli
+```
+
+Requires Rust (stable). See [rust-lang.org](https://www.rust-lang.org/tools/install) for installation.
 
 ---
 
