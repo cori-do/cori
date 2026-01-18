@@ -5,7 +5,7 @@ use crate::error::BiscuitError;
 use crate::keys::KeyPair;
 use biscuit_auth::builder::AuthorizerBuilder;
 use biscuit_auth::macros::{check, fact};
-use biscuit_auth::{builder::BlockBuilder, Biscuit, PublicKey};
+use biscuit_auth::{Biscuit, PublicKey, builder::BlockBuilder};
 use chrono::{Duration, Utc};
 
 /// Builder for creating Biscuit tokens.
@@ -225,9 +225,10 @@ impl TokenVerifier {
     ) -> Result<String, BiscuitError> {
         // Use the query method with a rule string
         let rule_str = format!("data($x) <- {}($x)", name);
-        let rule: biscuit_auth::builder::Rule = rule_str
-            .parse()
-            .map_err(|e: biscuit_auth::error::Token| BiscuitError::VerificationFailed(e.to_string()))?;
+        let rule: biscuit_auth::builder::Rule =
+            rule_str.parse().map_err(|e: biscuit_auth::error::Token| {
+                BiscuitError::VerificationFailed(e.to_string())
+            })?;
 
         let results: Vec<(String,)> = authorizer
             .query(rule)

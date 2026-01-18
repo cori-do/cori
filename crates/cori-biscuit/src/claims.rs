@@ -169,8 +169,10 @@ mod tests {
 
     #[test]
     fn test_role_claims_creation() {
-        let claims = RoleClaims::new("support_agent")
-            .add_readable_table("customers", vec!["id".into(), "name".into(), "email".into()]);
+        let claims = RoleClaims::new("support_agent").add_readable_table(
+            "customers",
+            vec!["id".into(), "name".into(), "email".into()],
+        );
 
         assert_eq!(claims.role, "support_agent");
         assert!(claims.can_access_table("customers"));
@@ -178,4 +180,3 @@ mod tests {
         assert!(!claims.can_read_column("customers", "password"));
     }
 }
-

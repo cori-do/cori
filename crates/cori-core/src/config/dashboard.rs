@@ -144,5 +144,9 @@ fn default_port() -> u16 {
 }
 
 fn default_scopes() -> Vec<String> {
-    vec!["openid".to_string(), "profile".to_string(), "email".to_string()]
+    vec![
+        "openid".to_string(),
+        "profile".to_string(),
+        "email".to_string(),
+    ]
 }

@@ -18,7 +18,7 @@
 //! ```
 
 use crate::protocol::ToolDefinition;
-use crate::schema::{from_schema_definition, DatabaseSchema};
+use crate::schema::{DatabaseSchema, from_schema_definition};
 use crate::tool_generator::ToolGenerator;
 use cori_core::config::{CoriConfig, RoleDefinition, SchemaDefinition};
 
@@ -50,9 +50,7 @@ pub fn generate_tools_for_role(
         .get_role(role_name)
         .ok_or_else(|| ToolGenerationError::RoleNotFound(role_name.to_string()))?;
 
-    let schema = config
-        .get_schema()
-        .ok_or(ToolGenerationError::NoSchema)?;
+    let schema = config.get_schema().ok_or(ToolGenerationError::NoSchema)?;
 
     Ok(generate_tools(schema, role))
 }
@@ -84,9 +82,7 @@ pub fn generate_tools_with_db_schema(
 pub fn generate_tools_for_all_roles(
     config: &CoriConfig,
 ) -> Result<std::collections::HashMap<String, Vec<ToolDefinition>>, ToolGenerationError> {
-    let schema = config
-        .get_schema()
-        .ok_or(ToolGenerationError::NoSchema)?;
+    let schema = config.get_schema().ok_or(ToolGenerationError::NoSchema)?;
 
     let db_schema = from_schema_definition(schema);
 
@@ -102,7 +98,7 @@ pub fn generate_tools_for_all_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cori_core::config::schema_definition::{DatabaseInfo, DatabaseEngine};
+    use cori_core::config::schema_definition::{DatabaseEngine, DatabaseInfo};
 
     #[test]
     fn test_generate_tools_empty_schema() {

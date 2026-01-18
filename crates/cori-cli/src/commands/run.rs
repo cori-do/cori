@@ -7,15 +7,13 @@
 
 use anyhow::{Context, Result};
 use cori_audit::AuditLogger;
-use cori_biscuit::{keys::load_public_key_file, PublicKey, TokenVerifier};
+use cori_biscuit::{PublicKey, TokenVerifier, keys::load_public_key_file};
 use cori_core::config::role_definition::RoleDefinition;
 use cori_core::config::rules_definition::RulesDefinition;
-use cori_core::config::{
-    AuditConfig, DashboardConfig, McpConfig, Transport, UpstreamConfig,
-};
+use cori_core::config::{AuditConfig, DashboardConfig, McpConfig, Transport, UpstreamConfig};
 use cori_dashboard::DashboardServer;
-use cori_mcp::approval::ApprovalManager;
 use cori_mcp::McpServer;
+use cori_mcp::approval::ApprovalManager;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
@@ -48,17 +46,6 @@ pub struct RunConfig {
     /// Dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfigFile,
-
-    /// Directory containing role definition files (each .yaml file = one role).
-    #[serde(default)]
-    pub roles_dir: Option<PathBuf>,
-
-    /// List of individual role definition files.
-    #[serde(default)]
-    pub role_files: Vec<PathBuf>,
-
-    // NOTE: Inline roles are not supported - use role files in roles_dir instead.
-    // This follows the canonical model where roles are defined in separate YAML files.
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,12 +222,15 @@ pub async fn run(
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     // Support both YAML and TOML
-    let run_config: RunConfig =
-        if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
-            toml::from_str(&config_str)?
-        } else {
-            serde_yaml::from_str(&config_str)?
-        };
+    let run_config: RunConfig = if config_path
+        .extension()
+        .map(|e| e == "toml")
+        .unwrap_or(false)
+    {
+        toml::from_str(&config_str)?
+    } else {
+        serde_yaml::from_str(&config_str)?
+    };
 
     // Determine transport mode:
     // 1. CLI flags (--http or --stdio) override config if explicitly provided
@@ -291,7 +281,7 @@ pub async fn run(
     // This ensures consistent role definition parsing with creatable/updatable
     let cori_config = cori_core::config::CoriConfig::load_with_context(&config_path)
         .with_context(|| format!("Failed to load CoriConfig from {:?}", config_path))?;
-    
+
     // Get roles directly from CoriConfig (already properly parsed as RoleDefinition)
     let core_roles: HashMap<String, RoleDefinition> = cori_config.roles().clone();
     for (role_name, role) in &core_roles {
@@ -303,7 +293,10 @@ pub async fn run(
     }
 
     // Resolve Biscuit public key for MCP server authentication
-    let mcp_public_key: Option<PublicKey> = match resolve_public_key(&run_config.biscuit, &config_dir) {
+    let mcp_public_key: Option<PublicKey> = match resolve_public_key(
+        &run_config.biscuit,
+        &config_dir,
+    ) {
         Ok(pk) => {
             info!("Loaded Biscuit public key for MCP authentication");
             Some(pk)
@@ -311,7 +304,10 @@ pub async fn run(
         Err(e) => {
             if use_stdio {
                 // Stdio mode requires public key for token verification
-                anyhow::bail!("Stdio mode requires a public key for token verification: {}", e);
+                anyhow::bail!(
+                    "Stdio mode requires a public key for token verification: {}",
+                    e
+                );
             }
             warn!(
                 error = %e,
@@ -332,10 +328,13 @@ pub async fn run(
             if dir_path.is_absolute() {
                 run_config.audit.directory.clone()
             } else {
-                config_dir.join(&run_config.audit.directory).to_string_lossy().to_string()
+                config_dir
+                    .join(&run_config.audit.directory)
+                    .to_string_lossy()
+                    .to_string()
             }
         };
-        
+
         let audit_config = AuditConfig {
             enabled: run_config.audit.enabled,
             directory: audit_dir.clone(),
@@ -345,14 +344,14 @@ pub async fn run(
             log_results: run_config.audit.log_results,
             ..Default::default()
         };
-        
+
         tracing::info!(
             enabled = audit_config.enabled,
             stdout = audit_config.stdout,
             directory = %audit_config.directory,
             "Creating audit logger"
         );
-        
+
         Some(Arc::new(AuditLogger::new(audit_config)?))
     } else {
         None
@@ -363,7 +362,7 @@ pub async fn run(
         // Resolve approvals directory relative to config directory
         let approvals_dir = config_dir.join(&run_config.approvals.directory);
         let ttl = chrono::Duration::hours(run_config.approvals.ttl_hours as i64);
-        
+
         match ApprovalManager::with_file_storage(&approvals_dir, ttl) {
             Ok(manager) => {
                 tracing::info!(
@@ -388,8 +387,9 @@ pub async fn run(
     // Load schema for MCP tool generation using CoriConfig (required)
     // This ensures we use the same from_schema_definition path as CLI tools command
     let schema = {
-        let schema_def = cori_config.get_schema()
-            .ok_or_else(|| anyhow::anyhow!("No schema found. Run 'cori db sync' to generate schema/schema.yaml"))?;
+        let schema_def = cori_config.get_schema().ok_or_else(|| {
+            anyhow::anyhow!("No schema found. Run 'cori db sync' to generate schema/schema.yaml")
+        })?;
         cori_mcp::schema::from_schema_definition(schema_def)
     };
     info!("Loaded schema from schema/schema.yaml");
@@ -462,9 +462,8 @@ async fn run_http_mode(
     dashboard_enabled: bool,
     dashboard_port: u16,
 ) -> Result<()> {
-
     let mut handles = Vec::new();
-    
+
     // ============================================
     // START ALL SERVICES CONCURRENTLY
     // ============================================
@@ -573,10 +572,7 @@ async fn run_http_mode(
         );
 
         let handle = tokio::spawn(async move {
-            info!(
-                port = dashboard.listen_port(),
-                "Starting admin dashboard"
-            );
+            info!(port = dashboard.listen_port(), "Starting admin dashboard");
             if let Err(e) = dashboard.run().await {
                 tracing::error!(error = %e, "Dashboard error");
             }
@@ -616,7 +612,8 @@ async fn run_stdio_mode(
 
     // Verify token and extract role/tenant
     let verifier = TokenVerifier::new(public_key);
-    let verified = verifier.verify(&token)
+    let verified = verifier
+        .verify(&token)
         .context("Token verification failed")?;
 
     info!(role = %verified.role, tenant = ?verified.tenant, "Token verified");
@@ -780,8 +777,9 @@ fn build_database_url(upstream: &UpstreamConfigFile) -> Result<String> {
     // Build from individual components
     let host = upstream.host.as_deref().unwrap_or("localhost");
     let port = upstream.port;
-    let database = upstream.database.as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var"))?;
+    let database = upstream.database.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var")
+    })?;
     let username = upstream.username.as_deref().unwrap_or("postgres");
     let password = upstream.password.as_deref().unwrap_or("");
 
@@ -836,11 +834,16 @@ fn resolve_public_key(config: &BiscuitConfig, config_dir: &Path) -> Result<Publi
         }
     }
 
-    anyhow::bail!("No Biscuit public key configured. Set biscuit.public_key_file or biscuit.public_key_env")
+    anyhow::bail!(
+        "No Biscuit public key configured. Set biscuit.public_key_file or biscuit.public_key_env"
+    )
 }
 
 /// Resolve keypair from config for the dashboard.
-fn resolve_keypair(config: &BiscuitConfig, config_dir: &Path) -> Result<cori_biscuit::keys::KeyPair> {
+fn resolve_keypair(
+    config: &BiscuitConfig,
+    config_dir: &Path,
+) -> Result<cori_biscuit::keys::KeyPair> {
     // Try private key file first
     if let Some(private_key_file) = &config.private_key_file {
         let path = if private_key_file.is_absolute() {
@@ -867,7 +870,9 @@ fn resolve_keypair(config: &BiscuitConfig, config_dir: &Path) -> Result<cori_bis
             .with_context(|| format!("Failed to load private key from {:?}", default_path));
     }
 
-    anyhow::bail!("No Biscuit private key found. Set biscuit.private_key_file or place key in keys/private.key")
+    anyhow::bail!(
+        "No Biscuit private key found. Set biscuit.private_key_file or place key in keys/private.key"
+    )
 }
 
 /// Build a CoriConfig for the dashboard state.

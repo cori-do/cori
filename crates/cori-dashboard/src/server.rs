@@ -1,13 +1,13 @@
 //! Dashboard server implementation.
 
-use cori_core::config::CoriConfig;
-use cori_core::DashboardConfig;
-use cori_biscuit::keys::KeyPair;
-use cori_audit::AuditLogger;
-use cori_mcp::approval::ApprovalManager;
 use crate::error::DashboardError;
 use crate::routes;
 use crate::state::AppState;
+use cori_audit::AuditLogger;
+use cori_biscuit::keys::KeyPair;
+use cori_core::DashboardConfig;
+use cori_core::config::CoriConfig;
+use cori_mcp::approval::ApprovalManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -20,7 +20,10 @@ pub struct DashboardServer {
 impl DashboardServer {
     /// Create a new dashboard server with the given configuration.
     pub fn new(config: DashboardConfig) -> Self {
-        Self { config, state: None }
+        Self {
+            config,
+            state: None,
+        }
     }
 
     /// Create a new dashboard server with full application state.
@@ -86,7 +89,7 @@ impl DashboardServer {
     pub fn listen_port(&self) -> u16 {
         self.config.get_port()
     }
-    
+
     /// Get a reference to the application state if available.
     pub fn state(&self) -> Option<&AppState> {
         self.state.as_ref()
@@ -104,4 +107,3 @@ mod tests {
         assert_eq!(server.listen_port(), 8080);
     }
 }
-

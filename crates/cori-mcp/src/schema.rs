@@ -213,7 +213,9 @@ pub struct ForeignKeyColumn {
 }
 
 /// Parse database schema from introspection JSON.
-pub fn parse_schema_from_json(json: &serde_json::Value) -> Result<DatabaseSchema, SchemaParseError> {
+pub fn parse_schema_from_json(
+    json: &serde_json::Value,
+) -> Result<DatabaseSchema, SchemaParseError> {
     let mut schema = DatabaseSchema::new();
 
     let tables = json["tables"]
@@ -245,17 +247,19 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
             let col_name = col_json["name"]
                 .as_str()
                 .ok_or_else(|| SchemaParseError::MissingField("column.name".to_string()))?;
-            
+
             // Support both "data_type" (snapshot.json) and "type"/"native_type" (schema.yaml)
             let data_type = col_json["data_type"]
                 .as_str()
                 .or_else(|| col_json["native_type"].as_str())
                 .or_else(|| col_json["type"].as_str())
-                .ok_or_else(|| SchemaParseError::MissingField("column.data_type or column.type".to_string()))?;
+                .ok_or_else(|| {
+                    SchemaParseError::MissingField("column.data_type or column.type".to_string())
+                })?;
 
             let mut column = ColumnSchema::new(col_name, data_type);
             column.nullable = col_json["nullable"].as_bool().unwrap_or(true);
-            
+
             // Default value can be string, number, boolean, or null
             column.default = if col_json["default"].is_null() {
                 None
@@ -297,12 +301,9 @@ fn parse_table_from_json(json: &serde_json::Value) -> Result<TableSchema, Schema
             if let Some(columns) = fk_json["columns"].as_array() {
                 let references = &fk_json["references"];
                 let foreign_schema = references["schema"].as_str().map(String::from);
-                let foreign_table = references["table"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+                let foreign_table = references["table"].as_str().unwrap_or_default().to_string();
                 let ref_columns = references["columns"].as_array();
-                
+
                 for (i, col_val) in columns.iter().enumerate() {
                     let column = col_val.as_str().unwrap_or_default().to_string();
                     let foreign_column = ref_columns
@@ -352,10 +353,11 @@ pub fn from_schema_definition(schema: &cori_core::config::SchemaDefinition) -> D
             .iter()
             .map(|c| {
                 // Use native_type for data_type, fallback to column_type's Display
-                let data_type = c.native_type
+                let data_type = c
+                    .native_type
                     .clone()
                     .unwrap_or_else(|| format!("{:?}", c.column_type).to_lowercase());
-                
+
                 // Convert default value to string if present
                 let default = c.default.as_ref().map(|v| {
                     if let Some(s) = v.as_str() {
@@ -449,7 +451,10 @@ mod tests {
         assert_eq!(users.primary_key, vec!["id"]);
         assert!(users.get_column("id").unwrap().is_primary_key);
         // Verify native_type is used as data_type
-        assert_eq!(users.get_column("email").unwrap().data_type, "character varying");
+        assert_eq!(
+            users.get_column("email").unwrap().data_type,
+            "character varying"
+        );
     }
 
     #[test]
@@ -559,27 +564,27 @@ mod tests {
         });
 
         let schema = parse_schema_from_json(&json).unwrap();
-        
+
         // Verify customers table
         let customers = schema.get_table("customers").unwrap();
         assert_eq!(customers.name, "customers");
         assert_eq!(customers.columns.len(), 3);
         assert_eq!(customers.primary_key, vec!["id"]);
-        
+
         // Verify column uses native_type
         let id_col = customers.get_column("id").unwrap();
         assert_eq!(id_col.data_type, "uuid");
         assert!(id_col.is_primary_key);
-        
+
         let name_col = customers.get_column("name").unwrap();
         assert_eq!(name_col.data_type, "character varying");
         assert!(!name_col.nullable);
-        
+
         // Verify orders table with foreign key
         let orders = schema.get_table("orders").unwrap();
         assert_eq!(orders.name, "orders");
         assert_eq!(orders.foreign_keys.len(), 1);
-        
+
         let fk = &orders.foreign_keys[0];
         assert_eq!(fk.name, "orders_customer_fk");
         assert_eq!(fk.columns.len(), 1);

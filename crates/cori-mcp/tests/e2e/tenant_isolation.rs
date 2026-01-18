@@ -8,8 +8,10 @@
 //! - Empty tenant handling
 
 use super::common::*;
-use cori_core::config::role_definition::{CreatableColumns, DeletablePermission, ReadableConfig, TablePermissions, UpdatableColumns};
-use cori_core::config::rules_definition::{TenantConfig};
+use cori_core::config::role_definition::{
+    CreatableColumns, DeletablePermission, ReadableConfig, TablePermissions, UpdatableColumns,
+};
+use cori_core::config::rules_definition::TenantConfig;
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
 
@@ -97,13 +99,23 @@ pub async fn test_cross_tenant_list_isolated(ctx: &TestContext) {
 
     // Verify all returned customers belong to their respective tenants
     for c in customers1 {
-        assert_eq!(c["organization_id"], 1, "Tenant 1 customer should have org_id=1");
+        assert_eq!(
+            c["organization_id"], 1,
+            "Tenant 1 customer should have org_id=1"
+        );
     }
     for c in customers2 {
-        assert_eq!(c["organization_id"], 2, "Tenant 2 customer should have org_id=2");
+        assert_eq!(
+            c["organization_id"], 2,
+            "Tenant 2 customer should have org_id=2"
+        );
     }
 
-    println!("     ✓ Cross-tenant LIST results are isolated ({} vs {} customers)", ids1.len(), ids2.len());
+    println!(
+        "     ✓ Cross-tenant LIST results are isolated ({} vs {} customers)",
+        ids1.len(),
+        ids2.len()
+    );
 }
 
 // =============================================================================
@@ -229,19 +241,37 @@ pub async fn test_three_tenants_completely_isolated(ctx: &TestContext) {
         .filter_map(|c| c["customer_id"].as_i64())
         .collect();
 
-    assert!(ids1.is_disjoint(&ids2), "Tenant 1 and 2 should have no overlap");
-    assert!(ids1.is_disjoint(&ids3), "Tenant 1 and 3 should have no overlap");
-    assert!(ids2.is_disjoint(&ids3), "Tenant 2 and 3 should have no overlap");
+    assert!(
+        ids1.is_disjoint(&ids2),
+        "Tenant 1 and 2 should have no overlap"
+    );
+    assert!(
+        ids1.is_disjoint(&ids3),
+        "Tenant 1 and 3 should have no overlap"
+    );
+    assert!(
+        ids2.is_disjoint(&ids3),
+        "Tenant 2 and 3 should have no overlap"
+    );
 
     // Verify all returned customers have correct tenant
     for c in customers1 {
-        assert_eq!(c["organization_id"], 1, "Tenant 1 customer should have org_id=1");
+        assert_eq!(
+            c["organization_id"], 1,
+            "Tenant 1 customer should have org_id=1"
+        );
     }
     for c in customers2 {
-        assert_eq!(c["organization_id"], 2, "Tenant 2 customer should have org_id=2");
+        assert_eq!(
+            c["organization_id"], 2,
+            "Tenant 2 customer should have org_id=2"
+        );
     }
     for c in customers3 {
-        assert_eq!(c["organization_id"], 3, "Tenant 3 customer should have org_id=3");
+        assert_eq!(
+            c["organization_id"], 3,
+            "Tenant 3 customer should have org_id=3"
+        );
     }
 
     println!("     ✓ All 3 tenants completely isolated (5+6+3=14 customers, no overlap)");
@@ -327,10 +357,7 @@ pub async fn test_global_table_accessible_from_any_tenant(ctx: &TestContext) {
     role.tables.insert(
         "organizations".to_string(),
         TablePermissions {
-            readable: ReadableConfig::List(vec![
-                "organization_id".to_string(),
-                "name".to_string(),
-            ]),
+            readable: ReadableConfig::List(vec!["organization_id".to_string(), "name".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -375,14 +402,32 @@ pub async fn test_global_table_accessible_from_any_tenant(ctx: &TestContext) {
     assert_success(&result3, "Tenant 3 should access global table");
 
     // All should return the same data
-    let data1 = extract_json(&result1).unwrap()["data"].as_array().unwrap().len();
-    let data2 = extract_json(&result2).unwrap()["data"].as_array().unwrap().len();
-    let data3 = extract_json(&result3).unwrap()["data"].as_array().unwrap().len();
+    let data1 = extract_json(&result1).unwrap()["data"]
+        .as_array()
+        .unwrap()
+        .len();
+    let data2 = extract_json(&result2).unwrap()["data"]
+        .as_array()
+        .unwrap()
+        .len();
+    let data3 = extract_json(&result3).unwrap()["data"]
+        .as_array()
+        .unwrap()
+        .len();
 
-    assert_eq!(data1, data2, "Global table should return same data for all tenants");
-    assert_eq!(data2, data3, "Global table should return same data for all tenants");
+    assert_eq!(
+        data1, data2,
+        "Global table should return same data for all tenants"
+    );
+    assert_eq!(
+        data2, data3,
+        "Global table should return same data for all tenants"
+    );
 
-    println!("     ✓ Global table accessible from any tenant ({} records each)", data1);
+    println!(
+        "     ✓ Global table accessible from any tenant ({} records each)",
+        data1
+    );
 }
 
 // =============================================================================
@@ -395,7 +440,10 @@ pub async fn test_tenant_scoped_table_has_config(_ctx: &TestContext) {
     // Verify rules have tenant configuration
     let rules = create_default_rules();
 
-    let customer_rules = rules.tables.get("customers").expect("customers should be in rules");
+    let customer_rules = rules
+        .tables
+        .get("customers")
+        .expect("customers should be in rules");
     assert!(
         customer_rules.tenant.is_some(),
         "customers should have tenant configuration"
@@ -403,7 +451,10 @@ pub async fn test_tenant_scoped_table_has_config(_ctx: &TestContext) {
 
     match &customer_rules.tenant {
         Some(TenantConfig::Direct(col)) => {
-            assert_eq!(col, "organization_id", "Tenant column should be organization_id");
+            assert_eq!(
+                col, "organization_id",
+                "Tenant column should be organization_id"
+            );
         }
         _ => panic!("Expected direct tenant config"),
     }
@@ -463,9 +514,9 @@ pub async fn test_inherited_tenant_via_fk(ctx: &TestContext) {
 
     // In the demo schema, order_items inherits tenant from orders via order_id
     // This test verifies the concept even if using direct tenant column
-    
+
     let rules = create_default_rules();
-    
+
     // Verify we can query order_items for a specific tenant
     let executor = ctx.executor_with(create_support_agent_role(), rules);
     let tool = list_tool("OrderItem");
@@ -492,7 +543,10 @@ pub async fn test_inherited_tenant_via_fk(ctx: &TestContext) {
         );
     }
 
-    println!("     ✓ Order items correctly filtered by tenant ({} items)", data.len());
+    println!(
+        "     ✓ Order items correctly filtered by tenant ({} items)",
+        data.len()
+    );
 }
 
 // =============================================================================

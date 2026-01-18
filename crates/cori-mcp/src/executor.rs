@@ -12,11 +12,11 @@ use crate::approval::{ApprovalManager, ApprovalPendingResponse};
 use crate::protocol::{CallToolOptions, DryRunResult, ToolContent, ToolDefinition};
 use crate::schema::DatabaseSchema;
 use cori_audit::AuditLogger;
-use cori_policy::{OperationType, ToolValidator, ValidationRequest};
-use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
 use cori_core::RoleDefinition;
+use cori_core::config::rules_definition::{RulesDefinition, TenantConfig};
+use cori_policy::{OperationType, ToolValidator, ValidationRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
@@ -305,7 +305,10 @@ impl ToolExecutor {
                     } else if let Some(s) = v.as_str() {
                         pk_conditions.push(format!("{} = '{}'", pk_col, s.replace("'", "''")));
                     } else {
-                        return Err(format!("Unsupported primary key type for column '{}'", pk_col));
+                        return Err(format!(
+                            "Unsupported primary key type for column '{}'",
+                            pk_col
+                        ));
                     }
                 }
                 None => return Err(format!("Missing primary key field: {}", pk_col)),
@@ -371,14 +374,15 @@ impl ToolExecutor {
             } else {
                 format!(
                     "SELECT * FROM {} WHERE {} = {} AND {} = '{}'",
-                    table, pk_column, pk_value, tc, tenant_id.replace("'", "''")
+                    table,
+                    pk_column,
+                    pk_value,
+                    tc,
+                    tenant_id.replace("'", "''")
                 )
             }
         } else {
-            format!(
-                "SELECT * FROM {} WHERE {} = {}",
-                table, pk_column, pk_value
-            )
+            format!("SELECT * FROM {} WHERE {} = {}", table, pk_column, pk_value)
         };
 
         match sqlx::query(&query).fetch_optional(pool).await {
@@ -401,7 +405,7 @@ impl ToolExecutor {
         let correlation_id = uuid::Uuid::new_v4().to_string();
 
         // Track event IDs for hierarchical linking
-        let mut approval_requested_event_id: Option<uuid::Uuid> = None;
+        let approval_requested_event_id: Option<uuid::Uuid> = None;
 
         // 0. Parse tool name to determine operation and table
         let operation = self.parse_tool_operation(&tool.name);
@@ -436,7 +440,10 @@ impl ToolExecutor {
                         return ExecutionResult::error("Record not found or access denied");
                     }
                     Err(e) => {
-                        return ExecutionResult::error(format!("Failed to fetch current row for validation: {}", e));
+                        return ExecutionResult::error(format!(
+                            "Failed to fetch current row for validation: {}",
+                            e
+                        ));
                     }
                 }
             } else {
@@ -497,8 +504,9 @@ impl ToolExecutor {
 
                         if pk_value > 0 {
                             // Fetch current row values
-                            let snapshot =
-                                self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
+                            let snapshot = self
+                                .fetch_row_snapshot(table, pk_value, &context.tenant_id)
+                                .await;
 
                             if let Some(original_values) = snapshot {
                                 // Create request with snapshot
@@ -546,26 +554,31 @@ impl ToolExecutor {
                 };
 
                 // Log approval request with full context (arguments and original state)
-            if let Some(logger) = &self.audit_logger {
-                if let Ok(event_id) = logger
-                    .log_approval_requested_with_context(
-                        &context.role,
-                        &context.tenant_id,
-                        &tool.name,
-                        &request.id,
-                        request.arguments.clone(),
-                        request.original_values.clone(),
-                        Some(&correlation_id),
-                    )
-                    .await {
-                    approval_requested_event_id = Some(event_id);
-                    
-                    // Update the approval request with audit IDs for hierarchical linking
-                    if let Err(e) = self.approval_manager.update_audit_ids(&request.id, event_id, correlation_id.clone()) {
-                        tracing::warn!(error = %e, "Failed to update approval request with audit IDs");
+                if let Some(logger) = &self.audit_logger {
+                    if let Ok(event_id) = logger
+                        .log_approval_requested_with_context(
+                            &context.role,
+                            &context.tenant_id,
+                            &tool.name,
+                            &request.id,
+                            request.arguments.clone(),
+                            request.original_values.clone(),
+                            Some(&correlation_id),
+                        )
+                        .await
+                    {
+                        // approval_requested_event_id = Some(event_id);
+
+                        // Update the approval request with audit IDs for hierarchical linking
+                        if let Err(e) = self.approval_manager.update_audit_ids(
+                            &request.id,
+                            event_id,
+                            correlation_id.clone(),
+                        ) {
+                            tracing::warn!(error = %e, "Failed to update approval request with audit IDs");
+                        }
                     }
                 }
-            }
                 return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
             }
             // In dry-run mode, continue to show what would happen
@@ -582,7 +595,8 @@ impl ToolExecutor {
                 self.execute_get(&table, &arguments, options, context).await
             }
             ToolOperation::List { table } => {
-                self.execute_list(&table, &arguments, options, context).await
+                self.execute_list(&table, &arguments, options, context)
+                    .await
             }
             ToolOperation::Create { table } => {
                 self.execute_create(&table, &arguments, options, context)
@@ -617,7 +631,7 @@ impl ToolExecutor {
                     .unwrap_or(0);
 
                 let sql = result.executed_sql.as_deref().unwrap_or("");
-                
+
                 // Check if this is a mutation with before/after state
                 if result.before_state.is_some() || result.after_state.is_some() {
                     // Log mutation with diff
@@ -687,8 +701,10 @@ impl ToolExecutor {
             let pk_value = pk.as_i64().unwrap_or(0);
             if pk_value > 0 {
                 // Fetch current values
-                let current_values = self.fetch_row_snapshot(table, pk_value, &context.tenant_id).await;
-                
+                let current_values = self
+                    .fetch_row_snapshot(table, pk_value, &context.tenant_id)
+                    .await;
+
                 match current_values {
                     Some(current) => {
                         // Compare with original snapshot
@@ -732,22 +748,28 @@ impl ToolExecutor {
 
         match operation {
             ToolOperation::Get { table } => {
-                self.execute_get(&table, &arguments, &options, context).await
+                self.execute_get(&table, &arguments, &options, context)
+                    .await
             }
             ToolOperation::List { table } => {
-                self.execute_list(&table, &arguments, &options, context).await
+                self.execute_list(&table, &arguments, &options, context)
+                    .await
             }
             ToolOperation::Create { table } => {
-                self.execute_create(&table, &arguments, &options, context).await
+                self.execute_create(&table, &arguments, &options, context)
+                    .await
             }
             ToolOperation::Update { table } => {
-                self.execute_update(&table, &arguments, &options, context).await
+                self.execute_update(&table, &arguments, &options, context)
+                    .await
             }
             ToolOperation::Delete { table } => {
-                self.execute_delete(&table, &arguments, &options, context).await
+                self.execute_delete(&table, &arguments, &options, context)
+                    .await
             }
             ToolOperation::Custom { name } => {
-                self.execute_custom(&name, &arguments, &options, context).await
+                self.execute_custom(&name, &arguments, &options, context)
+                    .await
             }
         }
     }
@@ -895,10 +917,10 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        
+
         // Get primary key columns from schema (supports composite keys)
         let pk_columns = self.get_primary_key_columns(table);
-        
+
         // Cannot execute GET without a primary key
         if pk_columns.is_empty() {
             return ExecutionResult::error(format!(
@@ -906,7 +928,7 @@ impl ToolExecutor {
                 table
             ));
         }
-        
+
         let tenant_column = self.tenant_column_for_table(table);
 
         // Extract all PK values from arguments
@@ -917,16 +939,28 @@ impl ToolExecutor {
                     let val = v.as_i64().unwrap_or(0);
                     pk_values.push((pk_col, val));
                 }
-                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+                None => {
+                    return ExecutionResult::error(format!(
+                        "Missing required primary key field: {}",
+                        pk_col
+                    ));
+                }
             }
         }
 
         if options.dry_run {
-            let pk_conditions: Vec<String> = pk_columns.iter().enumerate()
+            let pk_conditions: Vec<String> = pk_columns
+                .iter()
+                .enumerate()
                 .map(|(i, col)| format!("{} = ${}", col, i + 1))
                 .collect();
             let where_clause = if let Some(tc) = &tenant_column {
-                format!(" WHERE {} AND {} = ${}", pk_conditions.join(" AND "), tc, pk_columns.len() + 1)
+                format!(
+                    " WHERE {} AND {} = ${}",
+                    pk_conditions.join(" AND "),
+                    tc,
+                    pk_columns.len() + 1
+                )
             } else {
                 format!(" WHERE {}", pk_conditions.join(" AND "))
             };
@@ -960,7 +994,8 @@ impl ToolExecutor {
         };
 
         // Build primary key conditions
-        let pk_conditions: Vec<String> = pk_values.iter()
+        let pk_conditions: Vec<String> = pk_values
+            .iter()
             .map(|(col, val)| format!("{} = {}", col, val))
             .collect();
 
@@ -976,12 +1011,17 @@ impl ToolExecutor {
         let query = if let Some(tc) = tenant_condition {
             format!(
                 "SELECT {} FROM {} WHERE {} AND {}",
-                column_list, table, pk_conditions.join(" AND "), tc
+                column_list,
+                table,
+                pk_conditions.join(" AND "),
+                tc
             )
         } else {
             format!(
                 "SELECT {} FROM {} WHERE {}",
-                column_list, table, pk_conditions.join(" AND ")
+                column_list,
+                table,
+                pk_conditions.join(" AND ")
             )
         };
 
@@ -994,10 +1034,13 @@ impl ToolExecutor {
                 let data = row_to_json(&row, &columns);
                 ExecutionResult::success_with_sql(data, &query)
             }
-            Ok(None) => ExecutionResult::success_with_sql(json!({
-                "data": null,
-                "message": "Record not found"
-            }), &query),
+            Ok(None) => ExecutionResult::success_with_sql(
+                json!({
+                    "data": null,
+                    "message": "Record not found"
+                }),
+                &query,
+            ),
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
     }
@@ -1116,12 +1159,15 @@ impl ToolExecutor {
         match result {
             Ok(rows) => {
                 let data: Vec<Value> = rows.iter().map(|r| row_to_json(r, &columns)).collect();
-                ExecutionResult::success_with_sql(json!({
-                    "data": data,
-                    "count": data.len(),
-                    "limit": effective_limit,
-                    "offset": offset
-                }), &query)
+                ExecutionResult::success_with_sql(
+                    json!({
+                        "data": data,
+                        "count": data.len(),
+                        "limit": effective_limit,
+                        "offset": offset
+                    }),
+                    &query,
+                )
             }
             Err(e) => ExecutionResult::error(format!("Database error: {}", e)),
         }
@@ -1288,10 +1334,10 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        
+
         // Get primary key columns from schema (supports composite keys)
         let pk_columns = self.get_primary_key_columns(table);
-        
+
         // Cannot execute UPDATE without a primary key
         if pk_columns.is_empty() {
             return ExecutionResult::error(format!(
@@ -1299,7 +1345,7 @@ impl ToolExecutor {
                 table
             ));
         }
-        
+
         let tenant_column = self.tenant_column_for_table(table);
 
         // Extract all PK values from arguments
@@ -1310,7 +1356,12 @@ impl ToolExecutor {
                     let val = v.as_i64().unwrap_or(0);
                     pk_values.push((pk_col, val));
                 }
-                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+                None => {
+                    return ExecutionResult::error(format!(
+                        "Missing required primary key field: {}",
+                        pk_col
+                    ));
+                }
             }
         }
 
@@ -1414,7 +1465,8 @@ impl ToolExecutor {
         }
 
         // Build primary key conditions
-        let pk_conditions: Vec<String> = pk_values.iter()
+        let pk_conditions: Vec<String> = pk_values
+            .iter()
             .map(|(col, val)| format!("{} = {}", col, val))
             .collect();
 
@@ -1429,7 +1481,8 @@ impl ToolExecutor {
 
         // Capture before state for audit (using first PK value)
         let before_state = if let Some((_, pk_val)) = pk_values.first() {
-            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id)
+                .await
         } else {
             None
         };
@@ -1501,10 +1554,10 @@ impl ToolExecutor {
         if let Err(e) = self.validate_tenant_for_table(table, &context.tenant_id) {
             return ExecutionResult::error(e);
         }
-        
+
         // Get primary key columns from schema (supports composite keys)
         let pk_columns = self.get_primary_key_columns(table);
-        
+
         // Cannot execute DELETE without a primary key
         if pk_columns.is_empty() {
             return ExecutionResult::error(format!(
@@ -1512,7 +1565,7 @@ impl ToolExecutor {
                 table
             ));
         }
-        
+
         let tenant_column = self.tenant_column_for_table(table);
 
         // Extract all PK values from arguments
@@ -1523,7 +1576,12 @@ impl ToolExecutor {
                     let val = v.as_i64().unwrap_or(0);
                     pk_values.push((pk_col, val));
                 }
-                None => return ExecutionResult::error(format!("Missing required primary key field: {}", pk_col)),
+                None => {
+                    return ExecutionResult::error(format!(
+                        "Missing required primary key field: {}",
+                        pk_col
+                    ));
+                }
             }
         }
 
@@ -1551,7 +1609,8 @@ impl ToolExecutor {
         };
 
         // Build primary key conditions
-        let pk_conditions: Vec<String> = pk_values.iter()
+        let pk_conditions: Vec<String> = pk_values
+            .iter()
             .map(|(col, val)| format!("{} = {}", col, val))
             .collect();
 
@@ -1566,7 +1625,8 @@ impl ToolExecutor {
 
         // Capture before state for audit (using first PK value)
         let before_state = if let Some((_, pk_val)) = pk_values.first() {
-            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id).await
+            self.fetch_row_snapshot(table, *pk_val, &context.tenant_id)
+                .await
         } else {
             None
         };
@@ -1577,19 +1637,23 @@ impl ToolExecutor {
         let query = if let Some(tc) = tenant_condition {
             format!(
                 "DELETE FROM {} WHERE {} AND {} RETURNING {}",
-                table, pk_conditions.join(" AND "), tc, returning_cols
+                table,
+                pk_conditions.join(" AND "),
+                tc,
+                returning_cols
             )
         } else {
             format!(
                 "DELETE FROM {} WHERE {} RETURNING {}",
-                table, pk_conditions.join(" AND "), returning_cols
+                table,
+                pk_conditions.join(" AND "),
+                returning_cols
             )
         };
 
         tracing::debug!("Executing DELETE query: {}", query);
 
-        match sqlx::query(&query).fetch_optional(pool).await
-        {
+        match sqlx::query(&query).fetch_optional(pool).await {
             Ok(Some(row)) => {
                 // Build response with all PK values
                 let deleted_keys = row_to_json(&row, &pk_columns);
@@ -1699,7 +1763,7 @@ fn row_to_json(row: &sqlx::postgres::PgRow, columns: &[String]) -> Value {
 
         // Try to extract the value as different types
         // Order matters: try more specific types first
-        let value: Value = 
+        let value: Value =
             // Integer types
             if let Ok(v) = row.try_get::<i64, _>(name) {
                 json!(v)
@@ -1707,7 +1771,7 @@ fn row_to_json(row: &sqlx::postgres::PgRow, columns: &[String]) -> Value {
                 json!(v)
             } else if let Ok(v) = row.try_get::<i16, _>(name) {
                 json!(v)
-            } 
+            }
             // Floating point
             else if let Ok(v) = row.try_get::<f64, _>(name) {
                 json!(v)

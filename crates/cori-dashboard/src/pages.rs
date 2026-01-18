@@ -2,9 +2,9 @@
 
 use crate::state::{ColumnInfo, SchemaInfo};
 use crate::templates::{badge, card, empty_state, input, layout, stats_card, tabs};
+use cori_core::CoriConfig;
 use cori_core::config::role_definition::RoleDefinition;
 use cori_core::config::rules_definition::RulesDefinition;
-use cori_core::CoriConfig;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -22,12 +22,24 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
         </div>"##,
         roles_stat = stats_card("Roles", &role_count.to_string(), "user-shield", "blue"),
         tables_stat = stats_card("Tables", &table_count.to_string(), "database", "green"),
-        approvals_stat = stats_card("Pending Approvals", &pending_approvals.to_string(), "clock", "yellow"),
-        mcp_stat = stats_card("MCP Port", &config.mcp.get_port().to_string(), "server", "purple"),
+        approvals_stat = stats_card(
+            "Pending Approvals",
+            &pending_approvals.to_string(),
+            "clock",
+            "yellow"
+        ),
+        mcp_stat = stats_card(
+            "MCP Port",
+            &config.mcp.get_port().to_string(),
+            "server",
+            "purple"
+        ),
     );
 
-    let quick_actions = card("Quick Actions", &format!(
-        r##"<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    let quick_actions = card(
+        "Quick Actions",
+        &format!(
+            r##"<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <a href="/roles/new" class="flex items-center gap-4 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                 <div class="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
                     <i class="fas fa-plus text-blue-500"></i>
@@ -65,10 +77,13 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                 </div>
             </a>
         </div>"##
-    ));
+        ),
+    );
 
-    let connection_info = card("Connection Info", &format!(
-        r##"<div class="space-y-4">
+    let connection_info = card(
+        "Connection Info",
+        &format!(
+            r##"<div class="space-y-4">
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">MCP HTTP</span>
                 <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">localhost:{mcp_port}</code>
@@ -86,12 +101,13 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                 <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">{upstream_host}:{upstream_port}</code>
             </div>
         </div>"##,
-        mcp_port = config.mcp.get_port(),
-        dashboard_port = config.dashboard.get_port(),
-        mcp_transport = format!("{:?}", config.mcp.transport).to_lowercase(),
-        upstream_host = config.upstream.host,
-        upstream_port = config.upstream.port,
-    ));
+            mcp_port = config.mcp.get_port(),
+            dashboard_port = config.dashboard.get_port(),
+            mcp_transport = format!("{:?}", config.mcp.transport).to_lowercase(),
+            upstream_host = config.upstream.host,
+            upstream_port = config.upstream.port,
+        ),
+    );
 
     let content = format!(
         r##"<div class="mb-8">
@@ -100,9 +116,9 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                 The MCP server that enables safe, tenant-isolated database access for AI agents.
             </p>
         </div>
-        
+
         {stats}
-        
+
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {quick_actions}
             {connection_info}
@@ -126,19 +142,19 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                     .and_then(|tr| tr.get_direct_tenant_column())
                     .or(t.detected_tenant_column.as_deref())
                     .unwrap_or("-");
-                
+
                 // Check if table is global
                 let is_global = rules
                     .and_then(|r| r.get_table_rules(&t.name))
                     .map(|tr| tr.global.unwrap_or(false))
                     .unwrap_or(false);
-                
+
                 let status_badge = if is_global {
                     badge("Global", "blue")
                 } else {
                     badge("Tenant-Scoped", "green")
                 };
-                
+
                 format!(
                     r##"<div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden mb-4" x-data="{{ open: false }}">
                         <button @click="open = !open" class="w-full flex items-center justify-between p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
@@ -214,23 +230,23 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                         <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Schema Browser</h1>
                         <p class="text-gray-600 dark:text-gray-400">Last refreshed: {refreshed_at}</p>
                     </div>
-                    <button hx-post="/api/schema/refresh" hx-swap="none" 
+                    <button hx-post="/api/schema/refresh" hx-swap="none"
                             class="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-medium transition-colors">
                         <i class="fas fa-sync-alt htmx-indicator animate-spin"></i>
                         <span>Refresh Schema</span>
                     </button>
                 </div>
-                
+
                 <div class="mb-4">
-                    <input type="text" placeholder="Search tables..." 
+                    <input type="text" placeholder="Search tables..."
                            class="w-full md:w-64 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
                            x-data x-on:input="filterTables($event.target.value)">
                 </div>
-                
+
                 <div id="table-list">
                     {table_list}
                 </div>
-                
+
                 <script>
                     function filterTables(query) {{
                         const tables = document.querySelectorAll('#table-list > div');
@@ -242,7 +258,7 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                 </script>"##,
                 refreshed_at = schema.refreshed_at.format("%Y-%m-%d %H:%M:%S UTC"),
             )
-        },
+        }
         None => {
             format!(
                 r##"<div class="text-center py-12">
@@ -265,13 +281,25 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
 fn column_row(col: &ColumnInfo, primary_key: &[String], tenant_column: &str) -> String {
     let is_pk = primary_key.contains(&col.name);
     let is_tenant = col.name == tenant_column;
-    
+
     let badges = format!(
         "{}{}",
-        if is_pk { format!(r#"<span class="ml-2 text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-1.5 py-0.5 rounded">PK</span>"#) } else { String::new() },
-        if is_tenant { format!(r#"<span class="ml-2 text-xs bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 px-1.5 py-0.5 rounded">Tenant</span>"#) } else { String::new() },
+        if is_pk {
+            format!(
+                r#"<span class="ml-2 text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-1.5 py-0.5 rounded">PK</span>"#
+            )
+        } else {
+            String::new()
+        },
+        if is_tenant {
+            format!(
+                r#"<span class="ml-2 text-xs bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 px-1.5 py-0.5 rounded">Tenant</span>"#
+            )
+        } else {
+            String::new()
+        },
     );
-    
+
     format!(
         r#"<tr class="border-t border-gray-100 dark:border-gray-800">
             <td class="py-2 font-mono text-gray-900 dark:text-white">{name}{badges}</td>
@@ -306,7 +334,7 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                 !t.creatable.is_empty() || !t.updatable.is_empty()
             });
             let has_approval = role.table_requires_approval(name);
-            
+
             format!(
                 r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
                     <div class="flex items-start justify-between mb-4">
@@ -324,7 +352,7 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                             </button>
                         </div>
                     </div>
-                    
+
                     <div class="flex flex-wrap gap-2 mb-4">
                         <span class="inline-flex items-center gap-1 text-sm text-gray-600 dark:text-gray-400">
                             <i class="fas fa-table text-xs"></i> {table_count} tables
@@ -332,11 +360,11 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                         {write_badge}
                         {approval_badge}
                     </div>
-                    
+
                     <div class="flex flex-wrap gap-1 mb-4">
                         {table_badges}
                     </div>
-                    
+
                     <div class="flex gap-2 pt-4 border-t border-gray-100 dark:border-gray-700">
                         <a href="/roles/{name}" class="flex-1 text-center py-2 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
                             View Details
@@ -363,10 +391,10 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                     let badges: String = role.tables.keys().take(5).map(|t| {
                         format!(r#"<span class="text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 px-2 py-1 rounded">{}</span>"#, t)
                     }).collect();
-                    let overflow = if table_count > 5 { 
-                        format!(r#"<span class="text-xs text-gray-500">+{}</span>"#, table_count - 5) 
-                    } else { 
-                        String::new() 
+                    let overflow = if table_count > 5 {
+                        format!(r#"<span class="text-xs text-gray-500">+{}</span>"#, table_count - 5)
+                    } else {
+                        String::new()
                     };
                     badges + &overflow
                 },
@@ -381,7 +409,7 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                     <span>New Role</span>
                 </a>
             </div>
-            
+
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {role_cards}
             </div>"##
@@ -395,26 +423,38 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
 // Role Editor Page
 // =============================================================================
 
-pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInfo>, is_new: bool) -> String {
+pub fn role_editor_page(
+    role: Option<&RoleDefinition>,
+    schema: Option<&SchemaInfo>,
+    is_new: bool,
+) -> String {
     let name = role.map(|r| r.name.as_str()).unwrap_or("");
     let description = role.and_then(|r| r.description.as_deref()).unwrap_or("");
-    
-    let title = if is_new { "Create New Role" } else { &format!("Edit Role: {}", name) };
-    let submit_url = if is_new { "/api/roles".to_string() } else { format!("/api/roles/{}", name) };
+
+    let title = if is_new {
+        "Create New Role"
+    } else {
+        &format!("Edit Role: {}", name)
+    };
+    let submit_url = if is_new {
+        "/api/roles".to_string()
+    } else {
+        format!("/api/roles/{}", name)
+    };
     let method = if is_new { "hx-post" } else { "hx-put" };
-    
+
     let tables_section = if let Some(schema) = schema {
         let table_options: String = schema.tables.iter().map(|t| {
             let full_name = format!("{}.{}", t.schema, t.name);
             let is_selected = role.map(|r| r.tables.contains_key(&t.name)).unwrap_or(false);
             let perms = role.and_then(|r| r.tables.get(&t.name));
-            
+
             // Derive checked state from permissions
             let read_checked = perms.map(|p| !p.readable.is_empty()).unwrap_or(false);
             let create_checked = perms.map(|p| !p.creatable.is_empty()).unwrap_or(false);
             let update_checked = perms.map(|p| !p.updatable.is_empty()).unwrap_or(false);
             let delete_checked = perms.map(|p| p.deletable.is_allowed()).unwrap_or(false);
-            
+
             format!(
                 r##"<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 mb-4" x-data="{{ enabled: {enabled}, showColumns: false }}">
                     <div class="flex items-center justify-between mb-3">
@@ -428,7 +468,7 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
                             <span x-text="showColumns ? 'Hide columns' : 'Configure columns'"></span>
                         </button>
                     </div>
-                    
+
                     <div x-show="enabled && showColumns" x-collapse class="mt-4 space-y-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Operations</label>
@@ -455,14 +495,14 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
                                 </label>
                             </div>
                         </div>
-                        
+
                         <div>
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Readable Columns</label>
                             <div class="flex flex-wrap gap-2">
                                 {readable_columns}
                             </div>
                         </div>
-                        
+
                         <div>
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Writable Columns</label>
                             <div class="flex flex-wrap gap-2">
@@ -510,7 +550,7 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
                 }).collect::<String>(),
             )
         }).collect();
-        
+
         table_options
     } else {
         r#"<p class="text-gray-500 dark:text-gray-400">Load schema to configure table permissions.</p>"#.to_string()
@@ -523,22 +563,22 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
             </a>
             <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{title}</h1>
         </div>
-        
+
         <form {method}="{submit_url}" hx-swap="none" class="space-y-6">
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
                 <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Basic Information</h2>
-                
+
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {name_input}
                     {description_input}
                 </div>
             </div>
-            
+
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
                 <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Table Permissions</h2>
                 {tables_section}
             </div>
-            
+
             <div class="flex justify-end gap-4">
                 <a href="/roles" class="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
                     Cancel
@@ -552,9 +592,19 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
         method = method,
         submit_url = submit_url,
         name_input = input("name", "Role Name", "text", name, "e.g., support_agent"),
-        description_input = input("description", "Description", "text", description, "What this role is for"),
+        description_input = input(
+            "description",
+            "Description",
+            "text",
+            description,
+            "What this role is for"
+        ),
         tables_section = tables_section,
-        submit_text = if is_new { "Create Role" } else { "Save Changes" },
+        submit_text = if is_new {
+            "Create Role"
+        } else {
+            "Save Changes"
+        },
     );
 
     layout(title, &content)
@@ -565,8 +615,8 @@ pub fn role_editor_page(role: Option<&RoleDefinition>, schema: Option<&SchemaInf
 // =============================================================================
 
 pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::Value]>) -> String {
-    use cori_core::config::role_definition::{ReadableConfig, CreatableColumns, UpdatableColumns};
-    
+    use cori_core::config::role_definition::{CreatableColumns, ReadableConfig, UpdatableColumns};
+
     let tables_content: String = role.tables.iter().map(|(name, perms)| {
         let mut ops = Vec::new();
         if !perms.readable.is_empty() { ops.push("read"); }
@@ -574,7 +624,7 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
         if !perms.updatable.is_empty() { ops.push("update"); }
         if perms.deletable.is_allowed() { ops.push("delete"); }
         let ops_str = ops.join(", ");
-        
+
         let readable = match &perms.readable {
             ReadableConfig::All(_) => "*".to_string(),
             ReadableConfig::List(cols) => cols.join(", "),
@@ -586,10 +636,10 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 }
             }
         };
-        
+
         // Combine creatable and updatable for display
         let mut editable_parts: Vec<String> = Vec::new();
-        
+
         if let CreatableColumns::Map(cols) = &perms.creatable {
             for (col, constraints) in cols {
                 let mut badges = String::new();
@@ -602,7 +652,7 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 editable_parts.push(format!(r#"<span class="mr-2">{} (create){}</span>"#, col, badges));
             }
         }
-        
+
         if let UpdatableColumns::Map(cols) = &perms.updatable {
             for (col, constraints) in cols {
                 let mut badges = String::new();
@@ -618,7 +668,7 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 editable_parts.push(format!(r#"<span class="mr-2">{} (update){}</span>"#, col, badges));
             }
         }
-        
+
         let editable = editable_parts.join("");
 
         format!(
@@ -653,11 +703,11 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 let annotations = tool.get("annotations").cloned().unwrap_or(serde_json::json!({}));
                 let read_only = annotations.get("readOnly").and_then(|v| v.as_bool()).unwrap_or(false);
                 let requires_approval = annotations.get("requiresApproval").and_then(|v| v.as_bool()).unwrap_or(false);
-                
+
                 let schema_json = tool.get("inputSchema")
                     .map(|s| serde_json::to_string_pretty(s).unwrap_or_default())
                     .unwrap_or_default();
-                
+
                 format!(
                     r##"<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 mb-3" x-data="{{ showSchema: false }}">
                         <div class="flex items-center justify-between">
@@ -682,7 +732,7 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                     schema = schema_json.replace('<', "&lt;").replace('>', "&gt;"),
                 )
             }).collect();
-            
+
             format!(
                 r##"<div class="space-y-3">
                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
@@ -715,20 +765,27 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                 </div>
             </div>
         </div>
-        
+
         {tabs}"##,
         name = role.name,
         description = role.description.as_deref().unwrap_or("No description"),
-        tabs = tabs("role-tabs", &[
-            ("permissions", "Permissions", &format!(
-                r##"<div class="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
+        tabs = tabs(
+            "role-tabs",
+            &[
+                (
+                    "permissions",
+                    "Permissions",
+                    &format!(
+                        r##"<div class="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
                     <h3 class="text-lg font-semibold mb-4">Tables</h3>
                     <div class="space-y-3">{tables_content}</div>
                 </div>"##,
-                tables_content = tables_content,
-            )),
-            ("mcp", "MCP Tools Preview", &mcp_preview),
-        ]),
+                        tables_content = tables_content,
+                    )
+                ),
+                ("mcp", "MCP Tools Preview", &mcp_preview),
+            ]
+        ),
     );
 
     layout(&format!("Role: {}", role.name), &content)

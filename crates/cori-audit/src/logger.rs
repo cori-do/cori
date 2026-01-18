@@ -149,10 +149,11 @@ impl AuditLogger {
         parent_event_id: Option<uuid::Uuid>,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
-            .sql(sql)
-            .row_count(row_count)
-            .duration_ms(duration_ms);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+                .sql(sql)
+                .row_count(row_count)
+                .duration_ms(duration_ms);
 
         if let Some(parent_id) = parent_event_id {
             builder = builder.parent_event_id(parent_id);
@@ -183,11 +184,12 @@ impl AuditLogger {
         parent_event_id: Option<uuid::Uuid>,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
-            .sql(sql)
-            .row_count(row_count)
-            .duration_ms(duration_ms)
-            .arguments(arguments);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+                .sql(sql)
+                .row_count(row_count)
+                .duration_ms(duration_ms)
+                .arguments(arguments);
 
         if let Some(before) = before_state {
             builder = builder.before_state(before);
@@ -223,8 +225,8 @@ impl AuditLogger {
         parent_event_id: Option<uuid::Uuid>,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(AuditEventType::QueryFailed, role, tenant_id, action)
-            .error(error);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::QueryFailed, role, tenant_id, action).error(error);
 
         if let Some(sql) = sql {
             builder = builder.sql(sql);
@@ -253,13 +255,9 @@ impl AuditLogger {
         approval_id: &str,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(
-            AuditEventType::ApprovalRequested,
-            role,
-            tenant_id,
-            action,
-        )
-        .approval_id(approval_id);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::ApprovalRequested, role, tenant_id, action)
+                .approval_id(approval_id);
 
         if let Some(corr_id) = correlation_id {
             builder = builder.correlation_id(corr_id);
@@ -283,14 +281,10 @@ impl AuditLogger {
         original_values: Option<serde_json::Value>,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(
-            AuditEventType::ApprovalRequested,
-            role,
-            tenant_id,
-            action,
-        )
-        .approval_id(approval_id)
-        .arguments(arguments);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::ApprovalRequested, role, tenant_id, action)
+                .approval_id(approval_id)
+                .arguments(arguments);
 
         if let Some(orig) = original_values {
             builder = builder.before_state(orig);
@@ -350,12 +344,13 @@ impl AuditLogger {
         parent_event_id: Option<uuid::Uuid>,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
-            .approval_id(approval_id)
-            .sql(sql)
-            .row_count(row_count)
-            .duration_ms(duration_ms)
-            .arguments(arguments);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::QueryExecuted, role, tenant_id, action)
+                .approval_id(approval_id)
+                .sql(sql)
+                .row_count(row_count)
+                .duration_ms(duration_ms)
+                .arguments(arguments);
 
         if let Some(before) = before_state {
             builder = builder.before_state(before);
@@ -421,13 +416,9 @@ impl AuditLogger {
         reason: &str,
         correlation_id: Option<&str>,
     ) -> Result<uuid::Uuid, AuditError> {
-        let mut builder = AuditEvent::builder(
-            AuditEventType::AuthorizationDenied,
-            role,
-            tenant_id,
-            action,
-        )
-        .error(reason);
+        let mut builder =
+            AuditEvent::builder(AuditEventType::AuthorizationDenied, role, tenant_id, action)
+                .error(reason);
 
         if let Some(corr_id) = correlation_id {
             builder = builder.correlation_id(corr_id);
@@ -498,12 +489,18 @@ impl AuditLogger {
     }
 
     /// Get immediate children of an event.
-    pub async fn get_children(&self, parent_event_id: uuid::Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+    pub async fn get_children(
+        &self,
+        parent_event_id: uuid::Uuid,
+    ) -> Result<Vec<AuditEvent>, AuditError> {
         self.storage.get_children(parent_event_id).await
     }
 
     /// Get full event tree (event and all descendants).
-    pub async fn get_event_tree(&self, event_id: uuid::Uuid) -> Result<Vec<AuditEvent>, AuditError> {
+    pub async fn get_event_tree(
+        &self,
+        event_id: uuid::Uuid,
+    ) -> Result<Vec<AuditEvent>, AuditError> {
         self.storage.get_event_tree(event_id).await
     }
 }

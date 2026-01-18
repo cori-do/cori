@@ -4,4 +4,3 @@
 //! primarily schema introspection for the `cori db sync` command.
 
 pub mod introspect;
-

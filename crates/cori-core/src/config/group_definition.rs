@@ -72,7 +72,13 @@ impl GroupDefinition {
             ));
         }
 
-        if !self.name.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) {
+        if !self
+            .name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase())
+            .unwrap_or(false)
+        {
             return Err(format!(
                 "Group name '{}' must start with a lowercase letter",
                 self.name

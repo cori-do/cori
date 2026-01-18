@@ -22,12 +22,21 @@ pub async fn test_tenant_direct_column(_ctx: &TestContext) {
     let rules = create_default_rules();
 
     // customers table has direct tenant column
-    let customers = rules.tables.get("customers").expect("customers should exist");
-    let tenant_config = customers.tenant.as_ref().expect("Should have tenant config");
+    let customers = rules
+        .tables
+        .get("customers")
+        .expect("customers should exist");
+    let tenant_config = customers
+        .tenant
+        .as_ref()
+        .expect("Should have tenant config");
 
     match tenant_config {
         TenantConfig::Direct(col) => {
-            assert_eq!(col, "organization_id", "Tenant column should be organization_id");
+            assert_eq!(
+                col, "organization_id",
+                "Tenant column should be organization_id"
+            );
         }
         _ => panic!("Expected direct column tenant config"),
     }
@@ -94,8 +103,14 @@ pub async fn test_tenant_inherited_via_fk(_ctx: &TestContext) {
 
     match tenant_config {
         TenantConfig::Inherited(inherited) => {
-            assert_eq!(inherited.via, "customer_id", "Should inherit via customer_id");
-            assert_eq!(inherited.references, "customers", "Should reference customers table");
+            assert_eq!(
+                inherited.via, "customer_id",
+                "Should inherit via customer_id"
+            );
+            assert_eq!(
+                inherited.references, "customers",
+                "Should reference customers table"
+            );
         }
         _ => panic!("Expected inherited tenant config"),
     }
@@ -171,7 +186,10 @@ pub async fn test_global_table_config(_ctx: &TestContext) {
     let rules = create_default_rules();
 
     // currencies table should be global
-    let currencies = rules.tables.get("currencies").expect("currencies should exist");
+    let currencies = rules
+        .tables
+        .get("currencies")
+        .expect("currencies should exist");
     assert!(
         currencies.global.unwrap_or(false),
         "currencies should be global"
@@ -208,11 +226,17 @@ pub async fn test_table_rules_is_tenant_scoped(_ctx: &TestContext) {
 
     // customers should be tenant scoped
     let customers = rules.tables.get("customers").unwrap();
-    assert!(customers.is_tenant_scoped(), "customers should be tenant scoped");
+    assert!(
+        customers.is_tenant_scoped(),
+        "customers should be tenant scoped"
+    );
 
     // currencies should not be tenant scoped
     let currencies = rules.tables.get("currencies").unwrap();
-    assert!(!currencies.is_tenant_scoped(), "currencies should not be tenant scoped");
+    assert!(
+        !currencies.is_tenant_scoped(),
+        "currencies should not be tenant scoped"
+    );
 
     println!("     ✓ is_tenant_scoped helper works correctly");
 }
@@ -516,7 +540,9 @@ tables:
     let rules = RulesDefinition::from_yaml(yaml).expect("Should parse YAML");
 
     let orders = rules.tables.get("orders").unwrap();
-    let inherited = orders.get_inherited_tenant().expect("Should have inherited tenant");
+    let inherited = orders
+        .get_inherited_tenant()
+        .expect("Should have inherited tenant");
     assert_eq!(inherited.via, "customer_id");
     assert_eq!(inherited.references, "customers");
 

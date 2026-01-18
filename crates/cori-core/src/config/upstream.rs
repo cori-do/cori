@@ -193,8 +193,7 @@ impl UpstreamConfig {
 
     /// Check if this configuration uses environment variables.
     pub fn uses_env_credentials(&self) -> bool {
-        self.database_url_env.is_some()
-            || self.password_env.is_some()
+        self.database_url_env.is_some() || self.password_env.is_some()
     }
 
     /// Get the configured SSL mode.
@@ -259,7 +258,9 @@ mod tests {
     #[test]
     fn test_connection_string_direct_url() {
         let config = UpstreamConfig {
-            database_url: Some("postgresql://admin:secret@db.example.com:5432/production".to_string()),
+            database_url: Some(
+                "postgresql://admin:secret@db.example.com:5432/production".to_string(),
+            ),
             ..Default::default()
         };
         assert_eq!(

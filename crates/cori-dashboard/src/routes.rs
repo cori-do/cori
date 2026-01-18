@@ -3,8 +3,8 @@
 use crate::handlers;
 use crate::state::AppState;
 use axum::{
-    routing::{delete, get, post, put},
     Router,
+    routing::{delete, get, post, put},
 };
 
 /// Create the dashboard router without state (for backward compatibility).
@@ -43,7 +43,10 @@ fn api_routes() -> Router<AppState> {
         .route("/roles/{name}", get(handlers::api::role_get))
         .route("/roles/{name}", put(handlers::api::role_update))
         .route("/roles/{name}", delete(handlers::api::role_delete))
-        .route("/roles/{name}/mcp-preview", get(handlers::api::role_mcp_preview))
+        .route(
+            "/roles/{name}/mcp-preview",
+            get(handlers::api::role_mcp_preview),
+        )
         // Tokens API
         .route("/tokens/mint-role", post(handlers::api::token_mint_role))
         .route("/tokens/mint-agent", post(handlers::api::token_mint_agent))
@@ -53,16 +56,30 @@ fn api_routes() -> Router<AppState> {
         .route("/audit", get(handlers::api::audit_list))
         .route("/audit/{id}", get(handlers::api::audit_get))
         .route("/audit/{id}/tree", get(handlers::api::audit_get_tree))
-        .route("/audit/{id}/children", get(handlers::api::audit_get_children))
-        .route("/audit/{id}/children-rows", get(handlers::api::audit_get_children_rows))
+        .route(
+            "/audit/{id}/children",
+            get(handlers::api::audit_get_children),
+        )
+        .route(
+            "/audit/{id}/children-rows",
+            get(handlers::api::audit_get_children_rows),
+        )
         // Approvals API
         .route("/approvals", get(handlers::api::approvals_list))
         .route("/approvals/{id}", get(handlers::api::approval_get))
-        .route("/approvals/{id}/approve", post(handlers::api::approval_approve))
-        .route("/approvals/{id}/reject", post(handlers::api::approval_reject))
+        .route(
+            "/approvals/{id}/approve",
+            post(handlers::api::approval_approve),
+        )
+        .route(
+            "/approvals/{id}/reject",
+            post(handlers::api::approval_reject),
+        )
         // Settings API
         .route("/settings", get(handlers::api::settings_get))
-        .route("/settings/guardrails", put(handlers::api::settings_update_guardrails))
+        .route(
+            "/settings/guardrails",
+            put(handlers::api::settings_update_guardrails),
+        )
         .route("/settings/audit", put(handlers::api::settings_update_audit))
 }
-

@@ -109,7 +109,9 @@ pub async fn test_update_with_value_restriction_valid(ctx: &TestContext) {
         _ => panic!("Expected updatable map"),
     };
 
-    let status_constraints = updatable_map.get("status").expect("status should be updatable");
+    let status_constraints = updatable_map
+        .get("status")
+        .expect("status should be updatable");
 
     // Get the new value restriction from only_when
     let allowed = status_constraints
@@ -411,7 +413,10 @@ pub async fn test_increment_only_pattern(_ctx: &TestContext) {
                     ..Default::default()
                 }),
             )]))),
-            guidance: Some("Add received stock quantities - use separate adjustment tool for corrections".to_string()),
+            guidance: Some(
+                "Add received stock quantities - use separate adjustment tool for corrections"
+                    .to_string(),
+            ),
             ..Default::default()
         },
     )]);
@@ -709,12 +714,18 @@ pub async fn test_can_update_helper(_ctx: &TestContext) {
 
     let role = create_support_agent_role();
 
-    assert!(role.can_update("tickets"), "Should be able to update tickets");
+    assert!(
+        role.can_update("tickets"),
+        "Should be able to update tickets"
+    );
     assert!(
         !role.can_update("customers"),
         "Should not be able to update customers"
     );
-    assert!(!role.can_update("orders"), "Should not be able to update orders");
+    assert!(
+        !role.can_update("orders"),
+        "Should not be able to update orders"
+    );
 
     println!("     ✓ can_update helper works correctly");
 }
@@ -786,7 +797,10 @@ pub async fn test_combined_old_and_new_conditions(_ctx: &TestContext) {
     let constraints = updatable.get("status").unwrap();
     match constraints.only_when.as_ref().unwrap() {
         OnlyWhen::Single(conditions) => {
-            assert!(conditions.contains_key("old.status"), "should have old.status");
+            assert!(
+                conditions.contains_key("old.status"),
+                "should have old.status"
+            );
             assert!(
                 conditions.contains_key("new.status"),
                 "should have new.status"

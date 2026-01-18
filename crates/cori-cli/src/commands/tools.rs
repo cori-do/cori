@@ -7,7 +7,7 @@
 //! Uses shared tool_generation module for consistency with MCP server and dashboard.
 
 use anyhow::{Context, Result};
-use cori_biscuit::{keys::load_public_key_file, TokenVerifier};
+use cori_biscuit::{TokenVerifier, keys::load_public_key_file};
 use cori_core::config::CoriConfig;
 use std::path::PathBuf;
 
@@ -22,7 +22,12 @@ fn generate_tools_for_role(
 }
 
 /// List tools available for a role or token.
-pub fn list(config_path: PathBuf, role: Option<String>, token: Option<PathBuf>, verbose: bool) -> Result<()> {
+pub fn list(
+    config_path: PathBuf,
+    role: Option<String>,
+    token: Option<PathBuf>,
+    verbose: bool,
+) -> Result<()> {
     // Load configuration with all context (roles, schema, etc.)
     let config = CoriConfig::load_with_context(&config_path)
         .with_context(|| format!("Failed to load configuration from {:?}", config_path))?;
@@ -163,7 +168,8 @@ fn load_public_key_from_config(
     anyhow::bail!(
         "No public key found. Configure biscuit.public_key_file in cori.yaml or place key in keys/public.key"
     )
-}/// Show detailed schema for a specific tool.
+}
+/// Show detailed schema for a specific tool.
 pub fn describe(config_path: PathBuf, tool_name: String, role: String) -> Result<()> {
     // Load configuration with all context
     let config = CoriConfig::load_with_context(&config_path)

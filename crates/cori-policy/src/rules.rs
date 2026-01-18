@@ -82,7 +82,9 @@ impl<'a> RulesValidator<'a> {
                 match regex::Regex::new(pattern) {
                     Ok(re) => {
                         if !re.is_match(s) {
-                            return Err(ValidationError::pattern_validation_failed(column, pattern));
+                            return Err(ValidationError::pattern_validation_failed(
+                                column, pattern,
+                            ));
                         }
                     }
                     Err(_) => {

@@ -1,8 +1,8 @@
 //! Schema conversion utilities.
 
-use crate::state::{SchemaInfo, TableInfo, ColumnInfo, ForeignKeyInfo};
-use cori_mcp::schema::{DatabaseSchema, TableSchema, ColumnSchema, ForeignKey, ForeignKeyColumn};
+use crate::state::{ColumnInfo, ForeignKeyInfo, SchemaInfo, TableInfo};
 use chrono::Utc;
+use cori_mcp::schema::{ColumnSchema, DatabaseSchema, ForeignKey, ForeignKeyColumn, TableSchema};
 
 /// Convert JSON schema from introspection to SchemaInfo.
 ///
@@ -13,98 +13,131 @@ use chrono::Utc;
 /// - `tables`: Array of table definitions with `type` and `native_type` columns
 /// - `tables[].foreign_keys`: Array with `columns` and `references.columns` arrays
 pub fn json_to_schema_info(json: &serde_json::Value) -> anyhow::Result<SchemaInfo> {
-    let tables_json = json.get("tables")
+    let tables_json = json
+        .get("tables")
         .and_then(|t| t.as_array())
         .ok_or_else(|| anyhow::anyhow!("Missing 'tables' array in schema JSON"))?;
-    
+
     let mut tables = Vec::new();
     let empty_vec = vec![];
-    
+
     for table_json in tables_json {
-        let schema = table_json.get("schema")
+        let schema = table_json
+            .get("schema")
             .and_then(|s| s.as_str())
             .unwrap_or("public")
             .to_string();
-        
-        let name = table_json.get("name")
+
+        let name = table_json
+            .get("name")
             .and_then(|n| n.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing table name"))?
             .to_string();
-        
-        let columns_json = table_json.get("columns")
+
+        let columns_json = table_json
+            .get("columns")
             .and_then(|c| c.as_array())
             .unwrap_or(&empty_vec);
-        
-        let columns: Vec<ColumnInfo> = columns_json.iter().map(|c| {
-            // Use native_type for data_type (for display), fallback to type
-            let data_type = c.get("native_type")
-                .and_then(|t| t.as_str())
-                .or_else(|| c.get("type").and_then(|t| t.as_str()))
-                .unwrap_or("")
-                .to_string();
-            
-            // Default value can be string, number, boolean, or null
-            let default = c.get("default").and_then(|d| {
-                if d.is_null() {
-                    None
-                } else if let Some(s) = d.as_str() {
-                    Some(s.to_string())
-                } else {
-                    // For numbers/booleans, convert to string
-                    Some(d.to_string())
-                }
-            });
-            
-            ColumnInfo {
-                name: c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                data_type,
-                nullable: c.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true),
-                default,
-            }
-        }).collect();
-        
-        let primary_key: Vec<String> = table_json.get("primary_key")
-            .and_then(|pk| pk.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_default();
-        
-        // Foreign keys from introspect_schema_json now follow SchemaDefinition.schema.json:
-        // { "name": "fk_name", "columns": ["col1"], "references": { "table": "...", "schema": "...", "columns": ["col1"] } }
-        let foreign_keys: Vec<ForeignKeyInfo> = table_json.get("foreign_keys")
-            .and_then(|fks| fks.as_array())
-            .map(|arr| arr.iter().filter_map(|fk| {
-                let name = fk.get("name").and_then(|n| n.as_str())?.to_string();
-                
-                // New format: columns is an array of strings
-                let columns: Vec<String> = fk.get("columns")
-                    .and_then(|c| c.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                    .unwrap_or_default();
-                
-                // New format: references is an object with table and columns array
-                let references = fk.get("references")?;
-                let references_table = references.get("table")
+
+        let columns: Vec<ColumnInfo> = columns_json
+            .iter()
+            .map(|c| {
+                // Use native_type for data_type (for display), fallback to type
+                let data_type = c
+                    .get("native_type")
                     .and_then(|t| t.as_str())
+                    .or_else(|| c.get("type").and_then(|t| t.as_str()))
                     .unwrap_or("")
                     .to_string();
-                
-                let references_columns: Vec<String> = references.get("columns")
-                    .and_then(|c| c.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                    .unwrap_or_default();
-                
-                Some(ForeignKeyInfo {
-                    name,
-                    columns,
-                    references_table,
-                    references_columns,
-                })
-            }).collect())
+
+                // Default value can be string, number, boolean, or null
+                let default = c.get("default").and_then(|d| {
+                    if d.is_null() {
+                        None
+                    } else if let Some(s) = d.as_str() {
+                        Some(s.to_string())
+                    } else {
+                        // For numbers/booleans, convert to string
+                        Some(d.to_string())
+                    }
+                });
+
+                ColumnInfo {
+                    name: c
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    data_type,
+                    nullable: c.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true),
+                    default,
+                }
+            })
+            .collect();
+
+        let primary_key: Vec<String> = table_json
+            .get("primary_key")
+            .and_then(|pk| pk.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
-        
+
+        // Foreign keys from introspect_schema_json now follow SchemaDefinition.schema.json:
+        // { "name": "fk_name", "columns": ["col1"], "references": { "table": "...", "schema": "...", "columns": ["col1"] } }
+        let foreign_keys: Vec<ForeignKeyInfo> = table_json
+            .get("foreign_keys")
+            .and_then(|fks| fks.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|fk| {
+                        let name = fk.get("name").and_then(|n| n.as_str())?.to_string();
+
+                        // New format: columns is an array of strings
+                        let columns: Vec<String> = fk
+                            .get("columns")
+                            .and_then(|c| c.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        // New format: references is an object with table and columns array
+                        let references = fk.get("references")?;
+                        let references_table = references
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let references_columns: Vec<String> = references
+                            .get("columns")
+                            .and_then(|c| c.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        Some(ForeignKeyInfo {
+                            name,
+                            columns,
+                            references_table,
+                            references_columns,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Detect tenant column based on common naming conventions
         let detected_tenant_column = detect_tenant_column(&columns);
-        
+
         tables.push(TableInfo {
             schema,
             name,
@@ -114,7 +147,7 @@ pub fn json_to_schema_info(json: &serde_json::Value) -> anyhow::Result<SchemaInf
             detected_tenant_column,
         });
     }
-    
+
     Ok(SchemaInfo {
         tables,
         refreshed_at: Utc::now(),
@@ -133,7 +166,7 @@ fn detect_tenant_column(columns: &[ColumnInfo]) -> Option<String> {
         "company_id",
         "workspace_id",
     ];
-    
+
     for col in columns {
         let lower_name = col.name.to_lowercase();
         for pattern in TENANT_COLUMN_NAMES {
@@ -142,48 +175,64 @@ fn detect_tenant_column(columns: &[ColumnInfo]) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
 /// Convert SchemaInfo to DatabaseSchema for MCP tool generation.
 pub fn convert_to_db_schema(schema: &SchemaInfo) -> DatabaseSchema {
-    let tables = schema.tables.iter().map(|t| {
-        let columns = t.columns.iter().map(|c| {
-            ColumnSchema {
-                name: c.name.clone(),
-                data_type: c.data_type.clone(),
-                nullable: c.nullable,
-                is_primary_key: t.primary_key.contains(&c.name),
-                default: c.default.clone(),
-                description: None,
-            }
-        }).collect();
-        
-        let foreign_keys = t.foreign_keys.iter().map(|fk| {
-            let fk_columns: Vec<ForeignKeyColumn> = fk.columns.iter().zip(fk.references_columns.iter())
-                .map(|(col, ref_col)| ForeignKeyColumn {
-                    column: col.clone(),
-                    foreign_schema: None,
-                    foreign_table: fk.references_table.clone(),
-                    foreign_column: ref_col.clone(),
+    let tables = schema
+        .tables
+        .iter()
+        .map(|t| {
+            let columns = t
+                .columns
+                .iter()
+                .map(|c| ColumnSchema {
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    nullable: c.nullable,
+                    is_primary_key: t.primary_key.contains(&c.name),
+                    default: c.default.clone(),
+                    description: None,
                 })
                 .collect();
-            
-            ForeignKey {
-                name: fk.name.clone(),
-                columns: fk_columns,
-            }
-        }).collect();
-        
-        (t.name.clone(), TableSchema {
-            name: t.name.clone(),
-            schema: Some(t.schema.clone()),
-            columns,
-            primary_key: t.primary_key.clone(),
-            foreign_keys,
+
+            let foreign_keys = t
+                .foreign_keys
+                .iter()
+                .map(|fk| {
+                    let fk_columns: Vec<ForeignKeyColumn> = fk
+                        .columns
+                        .iter()
+                        .zip(fk.references_columns.iter())
+                        .map(|(col, ref_col)| ForeignKeyColumn {
+                            column: col.clone(),
+                            foreign_schema: None,
+                            foreign_table: fk.references_table.clone(),
+                            foreign_column: ref_col.clone(),
+                        })
+                        .collect();
+
+                    ForeignKey {
+                        name: fk.name.clone(),
+                        columns: fk_columns,
+                    }
+                })
+                .collect();
+
+            (
+                t.name.clone(),
+                TableSchema {
+                    name: t.name.clone(),
+                    schema: Some(t.schema.clone()),
+                    columns,
+                    primary_key: t.primary_key.clone(),
+                    foreign_keys,
+                },
+            )
         })
-    }).collect();
-    
+        .collect();
+
     DatabaseSchema { tables }
 }

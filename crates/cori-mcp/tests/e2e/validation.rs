@@ -9,9 +9,9 @@
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ColumnCondition, CreatableColumnConstraints, CreatableColumns,
-    DeletablePermission, OnlyWhen, ReadableConfig, ReadableConfigFull, RoleDefinition,
-    TablePermissions, UpdatableColumnConstraints, UpdatableColumns,
+    ColumnCondition, CreatableColumnConstraints, CreatableColumns, DeletablePermission, OnlyWhen,
+    ReadableConfig, ReadableConfigFull, RoleDefinition, TablePermissions,
+    UpdatableColumnConstraints, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -126,7 +126,6 @@ pub async fn test_get_requires_readable_columns(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -174,7 +173,6 @@ pub async fn test_create_not_allowed_without_creatable_columns(ctx: &TestContext
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -216,7 +214,10 @@ pub async fn test_create_column_not_in_creatable_list(ctx: &TestContext) {
             ]),
             creatable: CreatableColumns::Map(HashMap::from([
                 ("content".to_string(), CreatableColumnConstraints::default()),
-                ("customer_id".to_string(), CreatableColumnConstraints::default()),
+                (
+                    "customer_id".to_string(),
+                    CreatableColumnConstraints::default(),
+                ),
             ])),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::default(),
@@ -228,7 +229,6 @@ pub async fn test_create_column_not_in_creatable_list(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -274,10 +274,7 @@ pub async fn test_update_not_allowed_without_updatable_columns(ctx: &TestContext
     tables.insert(
         "customers".to_string(),
         TablePermissions {
-            readable: ReadableConfig::List(vec![
-                "customer_id".to_string(),
-                "name".to_string(),
-            ]),
+            readable: ReadableConfig::List(vec!["customer_id".to_string(), "name".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::Map(HashMap::new()), // No updatable columns
             deletable: DeletablePermission::default(),
@@ -289,7 +286,6 @@ pub async fn test_update_not_allowed_without_updatable_columns(ctx: &TestContext
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -297,7 +293,10 @@ pub async fn test_update_not_allowed_without_updatable_columns(ctx: &TestContext
 
     let result = executor
         .execute(
-            &update_tool("Customer", json!({ "customer_id": { "type": "integer" }, "name": { "type": "string" } })),
+            &update_tool(
+                "Customer",
+                json!({ "customer_id": { "type": "integer" }, "name": { "type": "string" } }),
+            ),
             json!({ "customer_id": 1, "name": "new name" }),
             &CallToolOptions::default(),
             &create_context("1"),
@@ -339,7 +338,6 @@ pub async fn test_delete_not_allowed_when_deletable_false(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -396,7 +394,6 @@ pub async fn test_list_max_per_page_enforced(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -450,7 +447,6 @@ pub async fn test_list_within_max_per_page_succeeds(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -515,7 +511,6 @@ pub async fn test_create_required_field_missing_fails(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -562,11 +557,7 @@ pub async fn test_create_restrict_to_violation_fails(ctx: &TestContext) {
             creatable: CreatableColumns::Map(HashMap::from([(
                 "priority".to_string(),
                 CreatableColumnConstraints {
-                    restrict_to: Some(vec![
-                        json!("low"),
-                        json!("medium"),
-                        json!("high"),
-                    ]),
+                    restrict_to: Some(vec![json!("low"), json!("medium"), json!("high")]),
                     ..Default::default()
                 },
             )])),
@@ -580,7 +571,6 @@ pub async fn test_create_restrict_to_violation_fails(ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -648,7 +638,6 @@ pub async fn test_update_only_when_new_value_restriction_fails(ctx: &TestContext
         description: None,
         approvals: None,
         tables,
-
     };
 
     let rules = create_default_rules();
@@ -821,7 +810,6 @@ pub async fn test_global_table_does_not_require_tenant(_ctx: &TestContext) {
         description: None,
         approvals: None,
         tables,
-
     };
 
     let _rules = create_rules_with_global_table("currencies");

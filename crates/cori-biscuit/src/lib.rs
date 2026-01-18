@@ -33,5 +33,4 @@ pub use biscuit_auth::PublicKey;
 pub use claims::{AgentClaims, RoleClaims};
 pub use error::BiscuitError;
 pub use keys::KeyPair;
-pub use token::{inspect_token_unverified, TokenBuilder, TokenInfo, TokenVerifier, VerifiedToken};
-
+pub use token::{TokenBuilder, TokenInfo, TokenVerifier, VerifiedToken, inspect_token_unverified};

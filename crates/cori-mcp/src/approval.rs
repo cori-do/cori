@@ -65,7 +65,6 @@ pub struct ApprovalRequest {
     pub is_dry_run: bool,
 
     // === New fields for data validation and result storage ===
-
     /// Snapshot of current DB values at request time (for update validation).
     /// Used to ensure data hasn't changed between approval request and execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,7 +84,6 @@ pub struct ApprovalRequest {
     pub execution_result: Option<serde_json::Value>,
 
     // === Audit trail fields for hierarchical event linking ===
-
     /// Audit event ID of the approval request event.
     /// Used for hierarchical linking in audit logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,9 +335,7 @@ impl ApprovalManager {
                 }
                 None
             }
-            ApprovalStorage::File(storage) => {
-                storage.get(id).ok().flatten()
-            }
+            ApprovalStorage::File(storage) => storage.get(id).ok().flatten(),
         }
     }
 
@@ -365,9 +361,7 @@ impl ApprovalManager {
                     .cloned()
                     .collect()
             }
-            ApprovalStorage::File(storage) => {
-                storage.list_pending(tenant_id).unwrap_or_default()
-            }
+            ApprovalStorage::File(storage) => storage.list_pending(tenant_id).unwrap_or_default(),
         }
     }
 
@@ -398,9 +392,7 @@ impl ApprovalManager {
                 request.approve(by, reason);
                 Ok(request.clone())
             }
-            ApprovalStorage::File(storage) => {
-                storage.approve(id, by, reason)
-            }
+            ApprovalStorage::File(storage) => storage.approve(id, by, reason),
         }
     }
 
@@ -431,9 +423,7 @@ impl ApprovalManager {
                 request.reject(by, reason);
                 Ok(request.clone())
             }
-            ApprovalStorage::File(storage) => {
-                storage.reject(id, by, reason)
-            }
+            ApprovalStorage::File(storage) => storage.reject(id, by, reason),
         }
     }
 
@@ -454,14 +444,16 @@ impl ApprovalManager {
                 request.cancel();
                 Ok(request.clone())
             }
-            ApprovalStorage::File(storage) => {
-                storage.cancel(id)
-            }
+            ApprovalStorage::File(storage) => storage.cancel(id),
         }
     }
 
     /// Update an approved request with execution result.
-    pub fn update_with_result(&self, id: &str, result: serde_json::Value) -> Result<(), ApprovalError> {
+    pub fn update_with_result(
+        &self,
+        id: &str,
+        result: serde_json::Value,
+    ) -> Result<(), ApprovalError> {
         match &self.storage {
             ApprovalStorage::InMemory(requests) => {
                 let mut requests = requests.write().unwrap();
@@ -471,15 +463,19 @@ impl ApprovalManager {
                 request.execution_result = Some(result);
                 Ok(())
             }
-            ApprovalStorage::File(storage) => {
-                storage.update_with_result(id, result)
-                    .map_err(|_| ApprovalError::NotFound(id.to_string()))
-            }
+            ApprovalStorage::File(storage) => storage
+                .update_with_result(id, result)
+                .map_err(|_| ApprovalError::NotFound(id.to_string())),
         }
     }
 
     /// Update an approval request with audit event ID and correlation ID.
-    pub fn update_audit_ids(&self, id: &str, event_id: uuid::Uuid, correlation_id: String) -> Result<(), ApprovalError> {
+    pub fn update_audit_ids(
+        &self,
+        id: &str,
+        event_id: uuid::Uuid,
+        correlation_id: String,
+    ) -> Result<(), ApprovalError> {
         match &self.storage {
             ApprovalStorage::InMemory(requests) => {
                 let mut requests = requests.write().unwrap();
@@ -489,10 +485,9 @@ impl ApprovalManager {
                 request.set_audit_ids(event_id, correlation_id);
                 Ok(())
             }
-            ApprovalStorage::File(storage) => {
-                storage.update_audit_ids(id, event_id, correlation_id)
-                    .map_err(|_| ApprovalError::NotFound(id.to_string()))
-            }
+            ApprovalStorage::File(storage) => storage
+                .update_audit_ids(id, event_id, correlation_id)
+                .map_err(|_| ApprovalError::NotFound(id.to_string())),
         }
     }
 

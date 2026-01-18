@@ -1,15 +1,15 @@
 //! Request handlers for the dashboard.
 
+use crate::pages;
+use crate::pages_extra;
+use crate::state::AppState;
+use crate::templates;
 use axum::{
+    Form,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue},
     response::Html,
-    Form,
 };
-use crate::state::AppState;
-use crate::pages;
-use crate::pages_extra;
-use crate::templates;
 use cori_audit::logger::AuditFilter;
 
 // =============================================================================
@@ -20,10 +20,11 @@ use cori_audit::logger::AuditFilter;
 pub async fn home(State(state): State<AppState>) -> Html<String> {
     let config = state.config();
     let role_count = config.roles.len();
-    let pending_approvals = state.approval_manager()
+    let pending_approvals = state
+        .approval_manager()
         .map(|m| m.list_pending(None).len())
         .unwrap_or(0);
-    
+
     Html(pages::home_page(&config, role_count, pending_approvals))
 }
 
@@ -31,7 +32,7 @@ pub async fn home(State(state): State<AppState>) -> Html<String> {
 pub async fn schema_browser(State(state): State<AppState>) -> Html<String> {
     let schema = state.schema_cache();
     let rules = state.get_rules();
-    
+
     Html(pages::schema_browser_page(schema.as_ref(), rules.as_ref()))
 }
 
@@ -48,10 +49,7 @@ pub async fn role_new(State(state): State<AppState>) -> Html<String> {
 }
 
 /// Handler for role detail page.
-pub async fn role_detail(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Html<String> {
+pub async fn role_detail(State(state): State<AppState>, Path(name): Path<String>) -> Html<String> {
     if let Some(role) = state.get_role(&name) {
         // Generate MCP tools preview using shared logic
         let tools = state.generate_tools_for_role(&role);
@@ -59,33 +57,36 @@ pub async fn role_detail(
             .into_iter()
             .map(|t| serde_json::to_value(t).unwrap_or_default())
             .collect();
-        
+
         Html(pages::role_detail_page(&role, Some(&mcp_tools)))
     } else {
-        Html(crate::templates::layout("Role Not Found", &crate::templates::empty_state(
-            "exclamation-triangle",
+        Html(crate::templates::layout(
             "Role Not Found",
-            &format!("The role '{}' does not exist.", name),
-            Some(("Back to Roles", "/roles")),
-        )))
+            &crate::templates::empty_state(
+                "exclamation-triangle",
+                "Role Not Found",
+                &format!("The role '{}' does not exist.", name),
+                Some(("Back to Roles", "/roles")),
+            ),
+        ))
     }
 }
 
 /// Handler for role edit page.
-pub async fn role_edit(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Html<String> {
+pub async fn role_edit(State(state): State<AppState>, Path(name): Path<String>) -> Html<String> {
     let schema = state.schema_cache();
     if let Some(role) = state.get_role(&name) {
         Html(pages::role_editor_page(Some(&role), schema.as_ref(), false))
     } else {
-        Html(crate::templates::layout("Role Not Found", &crate::templates::empty_state(
-            "exclamation-triangle",
+        Html(crate::templates::layout(
             "Role Not Found",
-            &format!("The role '{}' does not exist.", name),
-            Some(("Back to Roles", "/roles")),
-        )))
+            &crate::templates::empty_state(
+                "exclamation-triangle",
+                "Role Not Found",
+                &format!("The role '{}' does not exist.", name),
+                Some(("Back to Roles", "/roles")),
+            ),
+        ))
     }
 }
 
@@ -112,15 +113,15 @@ pub async fn audit_logs(
     Query(params): Query<crate::api_types::AuditQueryParams>,
 ) -> Html<String> {
     let page_size = params.limit.unwrap_or(DEFAULT_PAGE_SIZE);
-    
+
     // Calculate offset from page number if provided
-    let offset = params.offset.or_else(|| {
-        params.page.map(|p| (p.saturating_sub(1)) * page_size)
-    });
-    
+    let offset = params
+        .offset
+        .or_else(|| params.page.map(|p| (p.saturating_sub(1)) * page_size));
+
     // Parse sort direction
     let sort_desc = params.sort_dir.as_deref() != Some("asc");
-    
+
     // Build filter for counting (no limit/offset)
     let count_filter = AuditFilter {
         tenant_id: params.tenant_id.clone(),
@@ -137,7 +138,7 @@ pub async fn audit_logs(
         correlation_id: None,
         root_only: false,
     };
-    
+
     // Build filter for query
     let query_filter = AuditFilter {
         tenant_id: params.tenant_id.clone(),
@@ -154,7 +155,7 @@ pub async fn audit_logs(
         correlation_id: None,
         root_only: false,
     };
-    
+
     let (events, total_count) = if let Some(logger) = state.audit_logger() {
         let events = logger.query(query_filter).await.unwrap_or_default();
         let total = logger.count(count_filter).await.unwrap_or(0);
@@ -162,10 +163,10 @@ pub async fn audit_logs(
     } else {
         (vec![], 0)
     };
-    
+
     let current_page = params.page.unwrap_or(1).max(1);
     let total_pages = (total_count + page_size - 1) / page_size.max(1);
-    
+
     let pagination = pages_extra::PaginationInfo {
         current_page,
         total_pages,
@@ -174,16 +175,17 @@ pub async fn audit_logs(
         has_prev: current_page > 1,
         has_next: current_page < total_pages,
     };
-    
+
     Html(pages_extra::audit_logs_page(&events, &params, &pagination))
 }
 
 /// Handler for the approvals page.
 pub async fn approvals(State(state): State<AppState>) -> Html<String> {
-    let approvals = state.approval_manager()
+    let approvals = state
+        .approval_manager()
         .map(|m| m.list_pending(None))
         .unwrap_or_default();
-    
+
     Html(pages_extra::approvals_page(&approvals))
 }
 
@@ -199,8 +201,8 @@ pub async fn settings(State(state): State<AppState>) -> Html<String> {
 
 pub mod api {
     use super::*;
-    use axum::{http::StatusCode, Json};
     use crate::api_types::*;
+    use axum::{Json, http::StatusCode};
 
     // -------------------------------------------------------------------------
     // Schema API
@@ -209,63 +211,93 @@ pub mod api {
     pub async fn schema_get(State(state): State<AppState>) -> Json<Option<SchemaResponse>> {
         let schema = state.schema_cache();
         let rules = state.get_rules();
-        Json(schema.map(|s| SchemaResponse {
-            tables: s.tables.iter().map(|t| {
-                // Get tenant column from rules
-                let configured_tc = rules.as_ref()
-                    .and_then(|r| r.get_table_rules(&t.name))
-                    .and_then(|tr| tr.get_direct_tenant_column())
-                    .map(|s| s.to_string());
-                
-                // Check if table is global
-                let is_global = rules.as_ref()
-                    .and_then(|r| r.get_table_rules(&t.name))
-                    .map(|tr| tr.global.unwrap_or(false))
-                    .unwrap_or(false);
-                
-                TableSchemaResponse {
-                    schema: t.schema.clone(),
-                    name: t.name.clone(),
-                    columns: t.columns.iter().map(|c| ColumnSchemaResponse {
-                        name: c.name.clone(),
-                        data_type: c.data_type.clone(),
-                        nullable: c.nullable,
-                        default: c.default.clone(),
-                        is_primary_key: t.primary_key.contains(&c.name),
-                        is_tenant_column: configured_tc.as_ref() == Some(&c.name) 
-                            || t.detected_tenant_column.as_ref() == Some(&c.name),
-                    }).collect(),
-                    primary_key: t.primary_key.clone(),
-                    foreign_keys: t.foreign_keys.iter().map(|fk| ForeignKeyResponse {
-                        name: fk.name.clone(),
-                        columns: fk.columns.clone(),
-                        references_table: fk.references_table.clone(),
-                        references_columns: fk.references_columns.clone(),
-                    }).collect(),
-                    detected_tenant_column: t.detected_tenant_column.clone(),
-                    configured_tenant_column: configured_tc,
-                    is_global,
-                }
-            }).collect(),
-            refreshed_at: s.refreshed_at,
+        Json(schema.map(|s| {
+            SchemaResponse {
+                tables: s
+                    .tables
+                    .iter()
+                    .map(|t| {
+                        // Get tenant column from rules
+                        let configured_tc = rules
+                            .as_ref()
+                            .and_then(|r| r.get_table_rules(&t.name))
+                            .and_then(|tr| tr.get_direct_tenant_column())
+                            .map(|s| s.to_string());
+
+                        // Check if table is global
+                        let is_global = rules
+                            .as_ref()
+                            .and_then(|r| r.get_table_rules(&t.name))
+                            .map(|tr| tr.global.unwrap_or(false))
+                            .unwrap_or(false);
+
+                        TableSchemaResponse {
+                            schema: t.schema.clone(),
+                            name: t.name.clone(),
+                            columns: t
+                                .columns
+                                .iter()
+                                .map(|c| ColumnSchemaResponse {
+                                    name: c.name.clone(),
+                                    data_type: c.data_type.clone(),
+                                    nullable: c.nullable,
+                                    default: c.default.clone(),
+                                    is_primary_key: t.primary_key.contains(&c.name),
+                                    is_tenant_column: configured_tc.as_ref() == Some(&c.name)
+                                        || t.detected_tenant_column.as_ref() == Some(&c.name),
+                                })
+                                .collect(),
+                            primary_key: t.primary_key.clone(),
+                            foreign_keys: t
+                                .foreign_keys
+                                .iter()
+                                .map(|fk| ForeignKeyResponse {
+                                    name: fk.name.clone(),
+                                    columns: fk.columns.clone(),
+                                    references_table: fk.references_table.clone(),
+                                    references_columns: fk.references_columns.clone(),
+                                })
+                                .collect(),
+                            detected_tenant_column: t.detected_tenant_column.clone(),
+                            configured_tenant_column: configured_tc,
+                            is_global,
+                        }
+                    })
+                    .collect(),
+                refreshed_at: s.refreshed_at,
+            }
         }))
     }
 
-    pub async fn schema_refresh(State(state): State<AppState>) -> Result<Html<String>, (StatusCode, String)> {
-        let database_url = state.database_url()
-            .ok_or((StatusCode::BAD_REQUEST, "No database URL configured".to_string()))?;
-        
+    pub async fn schema_refresh(
+        State(state): State<AppState>,
+    ) -> Result<Html<String>, (StatusCode, String)> {
+        let database_url = state.database_url().ok_or((
+            StatusCode::BAD_REQUEST,
+            "No database URL configured".to_string(),
+        ))?;
+
         // Introspect the database schema
         let schema_json = cori_adapter_pg::introspect::introspect_schema_json(database_url)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to introspect database: {}", e)))?;
-        
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to introspect database: {}", e),
+                )
+            })?;
+
         // Convert to SchemaInfo and cache it
-        let schema_info = crate::schema_converter::json_to_schema_info(&schema_json)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse schema: {}", e)))?;
-        
+        let schema_info =
+            crate::schema_converter::json_to_schema_info(&schema_json).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to parse schema: {}", e),
+                )
+            })?;
+
         state.set_schema_cache(schema_info);
-        
+
         // Return success with HX-Trigger to refresh the page
         Ok(Html(r#"<script>showToast('Schema refreshed successfully'); window.location.reload();</script>"#.to_string()))
     }
@@ -277,12 +309,15 @@ pub mod api {
     pub async fn roles_list(State(state): State<AppState>) -> Json<RoleListResponse> {
         let roles = state.get_roles();
         Json(RoleListResponse {
-            roles: roles.iter().map(|(name, role)| RoleSummary {
-                name: name.clone(),
-                description: role.description.clone(),
-                table_count: role.tables.len(),
-                has_custom_actions: false, // Custom actions removed from new model
-            }).collect(),
+            roles: roles
+                .iter()
+                .map(|(name, role)| RoleSummary {
+                    name: name.clone(),
+                    description: role.description.clone(),
+                    table_count: role.tables.len(),
+                    has_custom_actions: false, // Custom actions removed from new model
+                })
+                .collect(),
         })
     }
 
@@ -290,7 +325,8 @@ pub mod api {
         State(state): State<AppState>,
         Path(name): Path<String>,
     ) -> Result<Json<RoleResponse>, StatusCode> {
-        state.get_role(&name)
+        state
+            .get_role(&name)
             .map(|role| Json(role_to_response(&name, &role)))
             .ok_or(StatusCode::NOT_FOUND)
     }
@@ -301,7 +337,7 @@ pub mod api {
     ) -> Result<Html<String>, (StatusCode, String)> {
         let role = form_to_role_definition(&form);
         state.save_role(form.name.clone(), role);
-        
+
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" created successfully'); window.location.href='/roles/{}';</script>"#,
             form.name, form.name
@@ -316,10 +352,10 @@ pub mod api {
         if state.get_role(&name).is_none() {
             return Err((StatusCode::NOT_FOUND, "Role not found".to_string()));
         }
-        
+
         let role = form_to_role_definition(&form);
         state.save_role(name.clone(), role);
-        
+
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" updated successfully'); window.location.href='/roles/{}';</script>"#,
             name, name
@@ -331,7 +367,7 @@ pub mod api {
         Path(name): Path<String>,
     ) -> Result<Html<String>, StatusCode> {
         state.delete_role(&name).ok_or(StatusCode::NOT_FOUND)?;
-        
+
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" deleted'); window.location.href='/roles';</script>"#,
             name
@@ -343,27 +379,40 @@ pub mod api {
         Path(name): Path<String>,
     ) -> Result<Json<McpToolPreviewResponse>, StatusCode> {
         let role = state.get_role(&name).ok_or(StatusCode::NOT_FOUND)?;
-        
+
         // Use shared tool generation logic
-        let tools = state.generate_tools_for_role(&role)
+        let tools = state
+            .generate_tools_for_role(&role)
             .into_iter()
             .map(|t| McpToolResponse {
                 name: t.name,
                 description: t.description,
                 input_schema: t.input_schema,
                 annotations: McpToolAnnotationsResponse {
-                    requires_approval: t.annotations.as_ref().and_then(|a| a.requires_approval).unwrap_or(false),
-                    dry_run_supported: t.annotations.as_ref().and_then(|a| a.dry_run_supported).unwrap_or(false),
-                    read_only: t.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false),
-                    approval_fields: t.annotations.and_then(|a| a.approval_fields).unwrap_or_default(),
+                    requires_approval: t
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.requires_approval)
+                        .unwrap_or(false),
+                    dry_run_supported: t
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.dry_run_supported)
+                        .unwrap_or(false),
+                    read_only: t
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.read_only)
+                        .unwrap_or(false),
+                    approval_fields: t
+                        .annotations
+                        .and_then(|a| a.approval_fields)
+                        .unwrap_or_default(),
                 },
             })
             .collect();
-        
-        Ok(Json(McpToolPreviewResponse {
-            role: name,
-            tools,
-        }))
+
+        Ok(Json(McpToolPreviewResponse { role: name, tools }))
     }
 
     // -------------------------------------------------------------------------
@@ -374,18 +423,21 @@ pub mod api {
         State(state): State<AppState>,
         Form(form): Form<MintRoleTokenForm>,
     ) -> Result<Html<String>, (StatusCode, String)> {
-        let keypair = state.keypair()
+        let keypair = state
+            .keypair()
             .ok_or((StatusCode::BAD_REQUEST, "No keypair configured".to_string()))?;
-        
-        let role = state.get_role(&form.role)
+
+        let role = state
+            .get_role(&form.role)
             .ok_or((StatusCode::NOT_FOUND, "Role not found".to_string()))?;
-        
+
         let claims = crate::token_helpers::role_definition_to_claims(&role);
         let builder = cori_biscuit::TokenBuilder::new(keypair.clone());
-        
-        let token = builder.mint_role_token(&claims)
+
+        let token = builder
+            .mint_role_token(&claims)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        
+
         Ok(Html(pages_extra::token_result_fragment(
             &token,
             "Role",
@@ -399,26 +451,32 @@ pub mod api {
         State(state): State<AppState>,
         Form(form): Form<MintAgentTokenForm>,
     ) -> Result<Html<String>, (StatusCode, String)> {
-        let keypair = state.keypair()
+        let keypair = state
+            .keypair()
             .ok_or((StatusCode::BAD_REQUEST, "No keypair configured".to_string()))?;
-        
-        let role = state.get_role(&form.role)
+
+        let role = state
+            .get_role(&form.role)
             .ok_or((StatusCode::NOT_FOUND, "Role not found".to_string()))?;
-        
+
         let claims = crate::token_helpers::role_definition_to_claims(&role);
         let builder = cori_biscuit::TokenBuilder::new(keypair.clone());
-        
+
         // First mint role token
-        let role_token = builder.mint_role_token(&claims)
+        let role_token = builder
+            .mint_role_token(&claims)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        
+
         // Then attenuate
-        let expires = form.expires_in_hours.map(|h| chrono::Duration::hours(h as i64));
-        let token = builder.attenuate(&role_token, &form.tenant, expires, Some("dashboard"))
+        let expires = form
+            .expires_in_hours
+            .map(|h| chrono::Duration::hours(h as i64));
+        let token = builder
+            .attenuate(&role_token, &form.tenant, expires, Some("dashboard"))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        
+
         let expires_at = expires.map(|d| chrono::Utc::now() + d);
-        
+
         Ok(Html(pages_extra::token_result_fragment(
             &token,
             "Agent",
@@ -432,17 +490,21 @@ pub mod api {
         State(state): State<AppState>,
         Form(form): Form<AttenuateTokenForm>,
     ) -> Result<Html<String>, (StatusCode, String)> {
-        let keypair = state.keypair()
+        let keypair = state
+            .keypair()
             .ok_or((StatusCode::BAD_REQUEST, "No keypair configured".to_string()))?;
-        
+
         let builder = cori_biscuit::TokenBuilder::new(keypair.clone());
-        let expires = form.expires_in_hours.map(|h| chrono::Duration::hours(h as i64));
-        
-        let token = builder.attenuate(&form.base_token, &form.tenant, expires, Some("dashboard"))
+        let expires = form
+            .expires_in_hours
+            .map(|h| chrono::Duration::hours(h as i64));
+
+        let token = builder
+            .attenuate(&form.base_token, &form.tenant, expires, Some("dashboard"))
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-        
+
         let expires_at = expires.map(|d| chrono::Utc::now() + d);
-        
+
         Ok(Html(pages_extra::token_result_fragment(
             &token,
             "Agent",
@@ -459,7 +521,7 @@ pub mod api {
         // Try to inspect without verification first (to get basic info)
         let info = cori_biscuit::inspect_token_unverified(&form.token)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-        
+
         // Check if we can verify
         let valid = if let Some(keypair) = state.keypair() {
             let verifier = cori_biscuit::TokenVerifier::new(keypair.public_key());
@@ -467,7 +529,7 @@ pub mod api {
         } else {
             false
         };
-        
+
         let response = TokenInspectResponse {
             token_type: "Unknown".to_string(), // Can't determine from basic info
             role: None,
@@ -477,7 +539,7 @@ pub mod api {
             valid,
             expires_at: None,
         };
-        
+
         Ok(Html(pages_extra::token_inspect_fragment(&response)))
     }
 
@@ -491,10 +553,11 @@ pub mod api {
     ) -> Json<AuditListResponse> {
         let page_size = params.limit.unwrap_or(100);
         let sort_desc = params.sort_dir.as_deref() != Some("asc");
-        
+
         let (events, total) = if let Some(logger) = state.audit_logger() {
             // Determine if root_only based on view parameter
-            let root_only = params.view.as_deref() == Some("hierarchical") || params.root_only.unwrap_or(false);
+            let root_only =
+                params.view.as_deref() == Some("hierarchical") || params.root_only.unwrap_or(false);
 
             // Count filter (no limit/offset)
             let count_filter = cori_audit::logger::AuditFilter {
@@ -512,7 +575,7 @@ pub mod api {
                 correlation_id: params.correlation_id.clone(),
                 root_only,
             };
-            
+
             // Query filter
             let query_filter = cori_audit::logger::AuditFilter {
                 tenant_id: params.tenant_id,
@@ -529,14 +592,14 @@ pub mod api {
                 correlation_id: params.correlation_id,
                 root_only,
             };
-            
+
             let events = logger.query(query_filter).await.unwrap_or_default();
             let total = logger.count(count_filter).await.unwrap_or(0);
             (events, total)
         } else {
             (vec![], 0)
         };
-        
+
         let has_more = params.offset.unwrap_or(0) + events.len() < total;
         Json(AuditListResponse {
             events: events.into_iter().map(audit_event_to_response).collect(),
@@ -550,13 +613,13 @@ pub mod api {
         Path(id): Path<String>,
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+
         if let Some(logger) = state.audit_logger() {
             if let Ok(Some(event)) = logger.get(event_id).await {
                 return Ok(Html(pages_extra::audit_event_detail_fragment(&event)));
             }
         }
-        
+
         Err(StatusCode::NOT_FOUND)
     }
 
@@ -565,13 +628,13 @@ pub mod api {
         Path(id): Path<String>,
     ) -> Result<Json<Vec<cori_audit::AuditEvent>>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+
         if let Some(logger) = state.audit_logger() {
             if let Ok(tree) = logger.get_event_tree(event_id).await {
                 return Ok(Json(tree));
             }
         }
-        
+
         Err(StatusCode::NOT_FOUND)
     }
 
@@ -580,13 +643,16 @@ pub mod api {
         Path(id): Path<String>,
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+
         if let Some(logger) = state.audit_logger() {
             if let Ok(children) = logger.get_children(event_id).await {
                 if children.is_empty() {
-                    return Ok(Html(r#"<div class="text-sm text-gray-500 italic">No child events</div>"#.to_string()));
+                    return Ok(Html(
+                        r#"<div class="text-sm text-gray-500 italic">No child events</div>"#
+                            .to_string(),
+                    ));
                 }
-                
+
                 let children_html = children.iter().map(|child| {
                     let event_type_badge = match child.event_type {
                         cori_audit::AuditEventType::QueryExecuted => templates::badge("Executed", "green"),
@@ -598,7 +664,7 @@ pub mod api {
                         cori_audit::AuditEventType::Approved => templates::badge("Approved", "green"),
                         cori_audit::AuditEventType::Denied => templates::badge("Rejected", "red"),
                     };
-                    
+
                     format!(
                         r##"<div class="flex items-center gap-2 p-3 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-600"
                              hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
@@ -615,11 +681,11 @@ pub mod api {
                         child.occurred_at.format("%Y-%m-%d %H:%M:%S")
                     )
                 }).collect::<Vec<_>>().join("\n");
-                
+
                 return Ok(Html(children_html));
             }
         }
-        
+
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
@@ -628,13 +694,13 @@ pub mod api {
         Path(id): Path<String>,
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+
         if let Some(logger) = state.audit_logger() {
             if let Ok(children) = logger.get_children(event_id).await {
                 if children.is_empty() {
                     return Ok(Html(String::new()));
                 }
-                
+
                 let children_html = children.iter().map(|child| {
                     let event_type_badge = match child.event_type {
                         cori_audit::AuditEventType::QueryExecuted => templates::badge("Executed", "green"),
@@ -646,16 +712,16 @@ pub mod api {
                         cori_audit::AuditEventType::Approved => templates::badge("Approved", "green"),
                         cori_audit::AuditEventType::Denied => templates::badge("Rejected", "red"),
                     };
-                    
+
                     let sql_or_action = child.sql.as_deref().unwrap_or(&child.action);
                     let truncated = if sql_or_action.len() > 60 {
                         format!("{}...", &sql_or_action[..60])
                     } else {
                         sql_or_action.to_string()
                     };
-                    
+
                     format!(
-                        r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer bg-gray-50/50 dark:bg-gray-700/30 child-row" 
+                        r##"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer bg-gray-50/50 dark:bg-gray-700/30 child-row"
                             @click="sidePanelOpen = true"
                             hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
                         <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap relative pl-12">
@@ -678,11 +744,11 @@ pub mod api {
                         child.duration_ms.map(|d| format!("{}ms", d)).unwrap_or_else(|| "-".to_string()),
                     )
                 }).collect::<Vec<_>>().join("\n");
-                
+
                 return Ok(Html(children_html));
             }
         }
-        
+
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
@@ -691,14 +757,16 @@ pub mod api {
     // -------------------------------------------------------------------------
 
     pub async fn approvals_list(State(state): State<AppState>) -> Json<ApprovalListResponse> {
-        let approvals = state.approval_manager()
+        let approvals = state
+            .approval_manager()
             .map(|m| m.list_pending(None))
             .unwrap_or_default();
-        
-        let pending_count = approvals.iter()
+
+        let pending_count = approvals
+            .iter()
             .filter(|a| a.status == cori_mcp::ApprovalStatus::Pending)
             .count();
-        
+
         Json(ApprovalListResponse {
             approvals: approvals.into_iter().map(approval_to_response).collect(),
             pending_count,
@@ -709,7 +777,8 @@ pub mod api {
         State(state): State<AppState>,
         Path(id): Path<String>,
     ) -> Result<Json<ApprovalResponse>, StatusCode> {
-        state.approval_manager()
+        state
+            .approval_manager()
             .and_then(|m| m.get(&id))
             .map(|a| Json(approval_to_response(a)))
             .ok_or(StatusCode::NOT_FOUND)
@@ -720,96 +789,111 @@ pub mod api {
         Path(id): Path<String>,
         Form(form): Form<ApprovalDecisionForm>,
     ) -> Result<impl axum::response::IntoResponse, (StatusCode, String)> {
-        let manager = state.approval_manager()
-            .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
-        
+        let manager = state.approval_manager().ok_or((
+            StatusCode::BAD_REQUEST,
+            "Approval manager not configured".to_string(),
+        ))?;
+
         // Get the approval request details before approving
-        let approval = manager.get(&id)
+        let approval = manager
+            .get(&id)
             .ok_or((StatusCode::NOT_FOUND, "Approval not found".to_string()))?;
-        
+
         let approver = form.decided_by.as_deref().unwrap_or("dashboard");
-        manager.approve(&id, approver, form.reason.clone())
+        manager
+            .approve(&id, approver, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-        
+
         // Log the approval event (child of approval request event)
         let approved_event_id = if let Some(logger) = state.audit_logger() {
-            logger.log_approved(
-                &approval.role,
-                &approval.tenant_id,
-                &approval.tool_name,
-                &id,
-                approver,
-                approval.audit_event_id,
-                approval.correlation_id.as_deref(),
-            ).await.ok()
+            logger
+                .log_approved(
+                    &approval.role,
+                    &approval.tenant_id,
+                    &approval.tool_name,
+                    &id,
+                    approver,
+                    approval.audit_event_id,
+                    approval.correlation_id.as_deref(),
+                )
+                .await
+                .ok()
         } else {
             None
         };
-        
+
         // Execute the approved action
         let execution_result = execute_approved_action(&state, &approval).await;
-        
+
         // Store the execution result and log with diff
         if let Some(result) = execution_result {
             // Convert to JSON for storage
-            let result_json = serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({
-                "success": result.success,
-                "error": result.error
-            }));
-            
+            let result_json = serde_json::to_value(&result).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "success": result.success,
+                    "error": result.error
+                })
+            });
+
             if let Err(e) = manager.update_with_result(&id, result_json.clone()) {
                 tracing::warn!(error = %e, "Failed to store execution result for approval {}", id);
             }
-            
+
             // Log the execution result with diff if this was a mutation
             if let Some(logger) = state.audit_logger() {
                 if result.success {
                     let sql = result.executed_sql.as_deref().unwrap_or("");
-                    
+
                     // Check if this is a mutation with before/after state
                     if result.before_state.is_some() || result.after_state.is_some() {
                         // Log approved mutation with full diff (child of approved event)
-                        let _ = logger.log_approved_mutation_executed(
-                            &approval.role,
-                            &approval.tenant_id,
-                            &format!("{} (approved:{})", approval.tool_name, id),
-                            &id,
-                            sql,
-                            1, // row_count
-                            0, // duration_ms (not tracked here)
-                            approval.arguments.clone(),
-                            result.before_state.clone(),
-                            result.after_state.clone(),
-                            approved_event_id,
-                            approval.correlation_id.as_deref(),
-                        ).await;
+                        let _ = logger
+                            .log_approved_mutation_executed(
+                                &approval.role,
+                                &approval.tenant_id,
+                                &format!("{} (approved:{})", approval.tool_name, id),
+                                &id,
+                                sql,
+                                1, // row_count
+                                0, // duration_ms (not tracked here)
+                                approval.arguments.clone(),
+                                result.before_state.clone(),
+                                result.after_state.clone(),
+                                approved_event_id,
+                                approval.correlation_id.as_deref(),
+                            )
+                            .await;
                     } else {
                         // Log successful tool execution without diff
-                        let _ = logger.log_tool_call(
-                            &approval.role,
-                            &approval.tenant_id,
-                            &format!("{} (approved:{})", approval.tool_name, id),
-                            Some(sql),
-                            false,
-                            approval.correlation_id.as_deref(),
-                        ).await;
+                        let _ = logger
+                            .log_tool_call(
+                                &approval.role,
+                                &approval.tenant_id,
+                                &format!("{} (approved:{})", approval.tool_name, id),
+                                Some(sql),
+                                false,
+                                approval.correlation_id.as_deref(),
+                            )
+                            .await;
                     }
                 } else {
                     let error = result.error.as_deref().unwrap_or("Unknown error");
                     // Log failed tool execution
-                    let _ = logger.log_query_failed(
-                        &approval.role,
-                        &approval.tenant_id,
-                        &format!("{} (approved:{})", approval.tool_name, id),
-                        result.executed_sql.as_deref(),
-                        error,
-                        approved_event_id,
-                        approval.correlation_id.as_deref(),
-                    ).await;
+                    let _ = logger
+                        .log_query_failed(
+                            &approval.role,
+                            &approval.tenant_id,
+                            &format!("{} (approved:{})", approval.tool_name, id),
+                            result.executed_sql.as_deref(),
+                            error,
+                            approved_event_id,
+                            approval.correlation_id.as_deref(),
+                        )
+                        .await;
                 }
             }
         }
-        
+
         let mut headers = HeaderMap::new();
         headers.insert("HX-Refresh", HeaderValue::from_static("true"));
 
@@ -823,51 +907,52 @@ pub mod api {
     ) -> Option<cori_mcp::ExecutionResult> {
         // Get the role definition for the approval's role
         let role = state.get_role(&approval.role)?;
-        
+
         // Get database URL
         let database_url = state.database_url()?;
-        
+
         // Get the approval manager
         let approval_manager = state.approval_manager()?.clone();
-        
+
         // Create the executor
         let executor = cori_mcp::ToolExecutor::new(role.clone(), approval_manager);
-        
+
         // Connect to database
         let executor = match executor.with_database_url(database_url).await {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to connect to database for approved action execution");
-                return Some(cori_mcp::ExecutionResult::error(
-                    format!("Failed to connect to database: {}", e)
-                ));
+                return Some(cori_mcp::ExecutionResult::error(format!(
+                    "Failed to connect to database: {}",
+                    e
+                )));
             }
         };
-        
+
         // Add rules if available
         let executor = if let Some(rules) = state.get_rules() {
             executor.with_rules(rules)
         } else {
             executor
         };
-        
+
         // Add schema (required for primary key lookup)
         let executor = executor.with_schema(state.get_db_schema());
-        
+
         // Add audit logger if available
         let executor = if let Some(logger) = state.audit_logger() {
             executor.with_audit_logger(logger.clone())
         } else {
             executor
         };
-        
+
         // Create execution context
         let context = cori_mcp::ExecutionContext {
             tenant_id: approval.tenant_id.clone(),
             role: approval.role.clone(),
             connection_id: Some(format!("dashboard-approval-{}", approval.id)),
         };
-        
+
         // Execute the approved action and return the full result
         Some(executor.execute_approved(approval, &context).await)
     }
@@ -877,31 +962,37 @@ pub mod api {
         Path(id): Path<String>,
         Form(form): Form<ApprovalDecisionForm>,
     ) -> Result<impl axum::response::IntoResponse, (StatusCode, String)> {
-        let manager = state.approval_manager()
-            .ok_or((StatusCode::BAD_REQUEST, "Approval manager not configured".to_string()))?;
-        
+        let manager = state.approval_manager().ok_or((
+            StatusCode::BAD_REQUEST,
+            "Approval manager not configured".to_string(),
+        ))?;
+
         // Get the approval request details before rejecting
-        let approval = manager.get(&id)
+        let approval = manager
+            .get(&id)
             .ok_or((StatusCode::NOT_FOUND, "Approval not found".to_string()))?;
-        
+
         let rejector = form.decided_by.as_deref().unwrap_or("dashboard");
-        manager.reject(&id, rejector, form.reason.clone())
+        manager
+            .reject(&id, rejector, form.reason.clone())
             .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-        
+
         // Log the denial event (child of approval request event)
         if let Some(logger) = state.audit_logger() {
-            let _ = logger.log_denied(
-                &approval.role,
-                &approval.tenant_id,
-                &approval.tool_name,
-                &id,
-                rejector,
-                form.reason.as_deref(),
-                approval.audit_event_id,
-                approval.correlation_id.as_deref(),
-            ).await;
+            let _ = logger
+                .log_denied(
+                    &approval.role,
+                    &approval.tenant_id,
+                    &approval.tool_name,
+                    &id,
+                    rejector,
+                    form.reason.as_deref(),
+                    approval.audit_event_id,
+                    approval.correlation_id.as_deref(),
+                )
+                .await;
         }
-        
+
         let mut headers = HeaderMap::new();
         headers.insert("HX-Refresh", HeaderValue::from_static("true"));
 
@@ -914,14 +1005,14 @@ pub mod api {
 
     pub async fn settings_get(State(state): State<AppState>) -> Json<SettingsResponse> {
         let config = state.config();
-        
+
         Json(SettingsResponse {
             upstream: UpstreamSettingsResponse {
                 host: config.upstream.host.clone(),
                 port: config.upstream.port,
                 database: config.upstream.database.clone(),
                 user: Some(config.upstream.username.clone()),
-                ssl_mode: None, // Not in current config
+                ssl_mode: None,  // Not in current config
                 connected: true, // Would need actual check
             },
             mcp: McpSettingsResponse {
@@ -948,8 +1039,15 @@ pub mod api {
             },
             tenancy: TenancySettingsResponse {
                 table_count: config.rules.as_ref().map(|r| r.tables.len()).unwrap_or(0),
-                global_table_count: config.rules.as_ref()
-                    .map(|r| r.tables.iter().filter(|(_, tr)| tr.global.unwrap_or(false)).count())
+                global_table_count: config
+                    .rules
+                    .as_ref()
+                    .map(|r| {
+                        r.tables
+                            .iter()
+                            .filter(|(_, tr)| tr.global.unwrap_or(false))
+                            .count()
+                    })
                     .unwrap_or(0),
             },
         })
@@ -971,7 +1069,7 @@ pub mod api {
                 config.guardrails.blocked_operations = ops;
             }
         }
-        
+
         Html(r#"<script>showToast('Guardrails saved');</script>"#.to_string())
     }
 
@@ -994,7 +1092,7 @@ pub mod api {
                 config.audit.retention_days = days;
             }
         }
-        
+
         Html(r#"<script>showToast('Audit settings saved');</script>"#.to_string())
     }
 
@@ -1044,75 +1142,112 @@ pub mod api {
     // -------------------------------------------------------------------------
 
     fn role_to_response(name: &str, role: &cori_core::RoleDefinition) -> RoleResponse {
-        use cori_core::config::role_definition::{ReadableConfig, CreatableColumns, UpdatableColumns};
-        
+        use cori_core::config::role_definition::{
+            CreatableColumns, ReadableConfig, UpdatableColumns,
+        };
+
         RoleResponse {
             name: name.to_string(),
             description: role.description.clone(),
-            tables: role.tables.iter().map(|(tname, perms)| {
-                let mut ops = Vec::new();
-                if !perms.readable.is_empty() { ops.push("read".to_string()); }
-                if !perms.creatable.is_empty() { ops.push("create".to_string()); }
-                if !perms.updatable.is_empty() { ops.push("update".to_string()); }
-                if perms.deletable.is_allowed() { ops.push("delete".to_string()); }
-                
-                let (readable, readable_all) = match &perms.readable {
-                    ReadableConfig::All(_) => (vec![], true),
-                    ReadableConfig::List(cols) => (cols.clone(), false),
-                    ReadableConfig::Config(cfg) => {
-                        let cols = cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default();
-                        (cols, cfg.columns.is_all())
+            tables: role
+                .tables
+                .iter()
+                .map(|(tname, perms)| {
+                    let mut ops = Vec::new();
+                    if !perms.readable.is_empty() {
+                        ops.push("read".to_string());
                     }
-                };
-                
-                // Helper to convert Value vec to String vec
-                fn values_to_strings(values: &Option<Vec<serde_json::Value>>) -> Option<Vec<String>> {
-                    values.as_ref().map(|vals| {
-                        vals.iter()
-                            .filter_map(|v| v.as_str().map(String::from).or_else(|| Some(v.to_string())))
-                            .collect()
-                    })
-                }
-                
-                // Combine creatable and updatable for the editable response
-                let mut editable = std::collections::HashMap::new();
-                
-                if let CreatableColumns::Map(cols) = &perms.creatable {
-                    for (col, constraints) in cols {
-                        editable.insert(col.clone(), ColumnConstraintResponse {
-                            allowed_values: values_to_strings(&constraints.restrict_to),
-                            pattern: None,
-                            min: None,
-                            max: None,
-                            requires_approval: constraints.requires_approval.is_some(),
-                        });
+                    if !perms.creatable.is_empty() {
+                        ops.push("create".to_string());
                     }
-                }
-                
-                if let UpdatableColumns::Map(cols) = &perms.updatable {
-                    for (col, constraints) in cols {
-                        // Extract allowed values from only_when if it's a simple new.<col>: [values] pattern
-                        let allowed_values: Option<Vec<String>> = constraints.only_when.as_ref()
-                            .and_then(|ow| ow.get_new_value_restriction(col))
-                            .map(|v| v.iter().filter_map(|val| val.as_str().map(String::from)).collect::<Vec<_>>());
-                        
-                        editable.insert(col.clone(), ColumnConstraintResponse {
-                            allowed_values,
-                            pattern: None,
-                            min: None,
-                            max: None,
-                            requires_approval: constraints.requires_approval.is_some(),
-                        });
+                    if !perms.updatable.is_empty() {
+                        ops.push("update".to_string());
                     }
-                }
-                
-                (tname.clone(), TablePermissionResponse {
-                    operations: ops,
-                    readable,
-                    readable_all,
-                    editable,
+                    if perms.deletable.is_allowed() {
+                        ops.push("delete".to_string());
+                    }
+
+                    let (readable, readable_all) = match &perms.readable {
+                        ReadableConfig::All(_) => (vec![], true),
+                        ReadableConfig::List(cols) => (cols.clone(), false),
+                        ReadableConfig::Config(cfg) => {
+                            let cols = cfg
+                                .columns
+                                .as_list()
+                                .map(|s| s.to_vec())
+                                .unwrap_or_default();
+                            (cols, cfg.columns.is_all())
+                        }
+                    };
+
+                    // Helper to convert Value vec to String vec
+                    fn values_to_strings(
+                        values: &Option<Vec<serde_json::Value>>,
+                    ) -> Option<Vec<String>> {
+                        values.as_ref().map(|vals| {
+                            vals.iter()
+                                .filter_map(|v| {
+                                    v.as_str().map(String::from).or_else(|| Some(v.to_string()))
+                                })
+                                .collect()
+                        })
+                    }
+
+                    // Combine creatable and updatable for the editable response
+                    let mut editable = std::collections::HashMap::new();
+
+                    if let CreatableColumns::Map(cols) = &perms.creatable {
+                        for (col, constraints) in cols {
+                            editable.insert(
+                                col.clone(),
+                                ColumnConstraintResponse {
+                                    allowed_values: values_to_strings(&constraints.restrict_to),
+                                    pattern: None,
+                                    min: None,
+                                    max: None,
+                                    requires_approval: constraints.requires_approval.is_some(),
+                                },
+                            );
+                        }
+                    }
+
+                    if let UpdatableColumns::Map(cols) = &perms.updatable {
+                        for (col, constraints) in cols {
+                            // Extract allowed values from only_when if it's a simple new.<col>: [values] pattern
+                            let allowed_values: Option<Vec<String>> = constraints
+                                .only_when
+                                .as_ref()
+                                .and_then(|ow| ow.get_new_value_restriction(col))
+                                .map(|v| {
+                                    v.iter()
+                                        .filter_map(|val| val.as_str().map(String::from))
+                                        .collect::<Vec<_>>()
+                                });
+
+                            editable.insert(
+                                col.clone(),
+                                ColumnConstraintResponse {
+                                    allowed_values,
+                                    pattern: None,
+                                    min: None,
+                                    max: None,
+                                    requires_approval: constraints.requires_approval.is_some(),
+                                },
+                            );
+                        }
+                    }
+
+                    (
+                        tname.clone(),
+                        TablePermissionResponse {
+                            operations: ops,
+                            readable,
+                            readable_all,
+                            editable,
+                        },
+                    )
                 })
-            }).collect(),
+                .collect(),
             max_rows_per_query: None, // Per-table max_per_page is now in readable config
             max_affected_rows: None,
             blocked_operations: vec![],
@@ -1137,7 +1272,7 @@ pub mod api {
             tenant_id: Some(event.tenant_id),
             role: Some(event.role),
             original_query: event.sql.clone(), // Now using `sql` field
-            rewritten_query: event.sql, // No separate rewritten query anymore
+            rewritten_query: event.sql,        // No separate rewritten query anymore
             tables: event.tables,
             row_count: event.row_count,
             duration_ms: event.duration_ms,
@@ -1164,4 +1299,3 @@ pub mod api {
         }
     }
 }
-

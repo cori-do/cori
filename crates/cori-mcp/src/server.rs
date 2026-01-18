@@ -12,10 +12,10 @@ use crate::schema::DatabaseSchema;
 use crate::tools::ToolRegistry;
 use cori_audit::AuditLogger;
 use cori_biscuit::PublicKey;
+use cori_core::RoleDefinition;
 use cori_core::config::mcp::{McpConfig, Transport};
 use cori_core::config::rules_definition::RulesDefinition;
-use cori_core::RoleDefinition;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -67,7 +67,7 @@ impl McpServer {
     }
 
     /// Set all available roles and pre-generate tools for each (HTTP mode).
-    /// 
+    ///
     /// Tools are generated once at startup for efficiency. Each role gets
     /// its own ToolRegistry with the appropriate tools based on permissions.
     /// Must be called after `with_schema` for correct tool generation.
@@ -75,11 +75,9 @@ impl McpServer {
         // Pre-generate tools for each role using shared tool_generation module
         for (role_name, role_config) in &roles {
             // Use the shared tool generation logic (same as CLI and dashboard)
-            let tools = crate::tool_generation::generate_tools_with_db_schema(
-                &self.schema,
-                role_config,
-            );
-            
+            let tools =
+                crate::tool_generation::generate_tools_with_db_schema(&self.schema, role_config);
+
             let mut registry = ToolRegistry::new();
             for tool in tools {
                 registry.register(tool);
@@ -91,7 +89,7 @@ impl McpServer {
             );
             self.role_tools.insert(role_name.clone(), registry);
         }
-        
+
         self.roles = roles;
         self
     }
@@ -151,7 +149,7 @@ impl McpServer {
     }
 
     /// Set the public key for token verification.
-    /// 
+    ///
     /// This is required for HTTP transport. Without a public key,
     /// the HTTP server will reject all requests (unless auth is disabled).
     pub fn with_public_key(mut self, public_key: PublicKey) -> Self {
@@ -202,10 +200,7 @@ impl McpServer {
     pub fn generate_tools(&mut self) {
         if let Some(role) = &self.role {
             // Use shared tool generation logic
-            let tools = crate::tool_generation::generate_tools_with_db_schema(
-                &self.schema,
-                role,
-            );
+            let tools = crate::tool_generation::generate_tools_with_db_schema(&self.schema, role);
 
             for tool in tools {
                 self.tools.register(tool);
@@ -294,10 +289,12 @@ impl McpServer {
             "Starting MCP server with HTTP transport"
         );
 
-
         // Create channel for request handling (includes request context)
-        let (request_tx, mut request_rx) =
-            mpsc::channel::<(JsonRpcRequest, RequestContext, mpsc::Sender<JsonRpcResponse>)>(100);
+        let (request_tx, mut request_rx) = mpsc::channel::<(
+            JsonRpcRequest,
+            RequestContext,
+            mpsc::Sender<JsonRpcResponse>,
+        )>(100);
 
         // Clone self for the request handler task
         let default_tools = self.tools.clone();
@@ -321,17 +318,19 @@ impl McpServer {
                     context_role = ?context.role,
                     "Handling HTTP request with context"
                 );
-                
-                // Use tenant from request context (per-request from token), 
+
+                // Use tenant from request context (per-request from token),
                 // falling back to server default (for stdio mode or development)
-                let effective_tenant_id = context.tenant_id.clone()
+                let effective_tenant_id = context
+                    .tenant_id
+                    .clone()
                     .or_else(|| default_tenant_id.clone());
-                
+
                 tracing::debug!(
                     effective_tenant = ?effective_tenant_id,
                     "Resolved tenant for request"
                 );
-                
+
                 // Create a temporary server instance to handle the request
                 let mut temp_server = McpServer::new(config.clone());
                 temp_server.tenant_id = effective_tenant_id;
@@ -424,7 +423,7 @@ impl McpServer {
                 // This is a notification, not a request - do not respond
                 tracing::debug!("Received initialized notification");
                 None
-            },
+            }
             "notifications/initialized" => {
                 // Notification variant used by Claude Desktop.
                 tracing::debug!("Received notifications/initialized notification");
@@ -486,7 +485,7 @@ impl McpServer {
             Some(p) => match serde_json::from_value(p) {
                 Ok(params) => params,
                 Err(e) => {
-                    return JsonRpcResponse::error(id, -32602, format!("Invalid params: {}", e))
+                    return JsonRpcResponse::error(id, -32602, format!("Invalid params: {}", e));
                 }
             },
             None => return JsonRpcResponse::error(id, -32602, "Missing params"),
@@ -501,20 +500,27 @@ impl McpServer {
         let tool = match self.tools.get(&params.name) {
             Some(t) => t.clone(),
             None => {
-                return JsonRpcResponse::error(id, -32602, format!("Tool not found: {}", params.name))
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    format!("Tool not found: {}", params.name),
+                );
             }
         };
 
         // Execute the tool
         if let Some(executor) = &self.executor {
-            let tenant_id = self.tenant_id.clone().unwrap_or_else(|| "unknown".to_string());
-            
+            let tenant_id = self
+                .tenant_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+
             tracing::debug!(
                 tool = %params.name,
                 tenant_id = %tenant_id,
                 "Executing tool with tenant context"
             );
-            
+
             let context = ExecutionContext {
                 tenant_id,
                 role: self
@@ -567,8 +573,8 @@ impl McpServer {
             match c {
                 ToolContent::Text { text } => json!({"type": "text", "text": text}),
                 ToolContent::Json { json } => {
-                    let rendered = serde_json::to_string_pretty(json)
-                        .unwrap_or_else(|_| json.to_string());
+                    let rendered =
+                        serde_json::to_string_pretty(json).unwrap_or_else(|_| json.to_string());
                     json!({"type": "text", "text": rendered})
                 }
             }
@@ -677,24 +683,25 @@ impl McpServer {
     /// - expired: { status: "expired", approval_id, expired_at }
     /// - not_found: { status: "not_found", approval_id }
     fn handle_get_approval_result(&self, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
-        let approval_id = arguments
-            .get("approval_id")
-            .and_then(|v| v.as_str());
+        let approval_id = arguments.get("approval_id").and_then(|v| v.as_str());
 
         let approval_id = match approval_id {
             Some(aid) => aid,
             None => {
-                return self.tool_result_response(id, json!({
-                    "status": "error",
-                    "message": "Missing required parameter: approval_id"
-                }));
+                return self.tool_result_response(
+                    id,
+                    json!({
+                        "status": "error",
+                        "message": "Missing required parameter: approval_id"
+                    }),
+                );
             }
         };
 
         match self.approval_manager.get(approval_id) {
             Some(approval) => {
                 use crate::approval::ApprovalStatus;
-                
+
                 let response = match approval.status {
                     ApprovalStatus::Pending => {
                         if approval.is_expired() {
@@ -749,19 +756,19 @@ impl McpServer {
 
                 self.tool_result_response(id, response)
             }
-            None => {
-                self.tool_result_response(id, json!({
+            None => self.tool_result_response(
+                id,
+                json!({
                     "status": "not_found",
                     "approval_id": approval_id
-                }))
-            }
+                }),
+            ),
         }
     }
 
     /// Convert a JSON value to an MCP tool result response.
     fn tool_result_response(&self, id: Option<Value>, result: Value) -> JsonRpcResponse {
-        let rendered = serde_json::to_string_pretty(&result)
-            .unwrap_or_else(|_| result.to_string());
+        let rendered = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
         let response = json!({
             "content": [{
                 "type": "text",
@@ -792,7 +799,10 @@ mod tests {
             params: None,
         };
 
-        let response = server.handle_request(request).await.expect("Should return response for initialize");
+        let response = server
+            .handle_request(request)
+            .await
+            .expect("Should return response for initialize");
         assert!(response.result.is_some());
         assert!(response.error.is_none());
     }
@@ -807,7 +817,10 @@ mod tests {
             params: None,
         };
 
-        let response = server.handle_request(request).await.expect("Should return response for tools/list");
+        let response = server
+            .handle_request(request)
+            .await
+            .expect("Should return response for tools/list");
         assert!(response.result.is_some());
     }
 
@@ -824,7 +837,10 @@ mod tests {
             })),
         };
 
-        let response = server.handle_request(request).await.expect("Should return response for tools/call");
+        let response = server
+            .handle_request(request)
+            .await
+            .expect("Should return response for tools/call");
         assert!(response.error.is_some());
     }
 
@@ -839,6 +855,9 @@ mod tests {
         };
 
         let response = server.handle_request(request).await;
-        assert!(response.is_none(), "Notifications should not return a response");
+        assert!(
+            response.is_none(),
+            "Notifications should not return a response"
+        );
     }
 }

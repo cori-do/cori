@@ -20,7 +20,7 @@ use cori_core::{
     ColumnList, CreatableColumnConstraints, CreatableColumns, ReadableConfig, RoleDefinition,
     UpdatableColumnConstraints, UpdatableColumns,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Generator for creating MCP tools from role permissions and schema.
 pub struct ToolGenerator {
@@ -37,7 +37,7 @@ impl ToolGenerator {
     }
 
     /// Generate all tools for this role.
-    /// 
+    ///
     /// Panics if a table in the role is not found in the schema.
     pub fn generate_all(&self) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
@@ -46,7 +46,7 @@ impl ToolGenerator {
         for (table_name, perms) in &self.role.tables {
             let table_schema = self.schema.get_table(table_name)
                 .unwrap_or_else(|| panic!("Table '{}' in role '{}' not found in schema. Run 'cori db sync' to update schema.", table_name, self.role.name));
-            
+
             tracing::debug!(
                 table = %table_name,
                 role = %self.role.name,
@@ -56,7 +56,7 @@ impl ToolGenerator {
                 pk = ?table_schema.primary_key,
                 "Generating tools for table"
             );
-            
+
             let table_tools = self.generate_table_tools(table_name, table_schema);
             tracing::debug!(
                 table = %table_name,
@@ -79,7 +79,7 @@ impl ToolGenerator {
         // Singularize the table name before converting to PascalCase for entity name
         let singular_name = singularize(table_name);
         let entity_name = pascal_case(&singular_name);
-        
+
         // Check if table has a primary key (needed for get, update, delete operations)
         let has_primary_key = !table_schema.primary_key.is_empty();
 
@@ -129,7 +129,7 @@ impl ToolGenerator {
     ) -> ToolDefinition {
         let pk_names = table_schema.get_primary_key_names();
         let pk_columns = table_schema.get_primary_key_columns();
-        
+
         // Build properties for all PK columns
         let mut properties = serde_json::Map::new();
         for col in &pk_columns {
@@ -142,11 +142,18 @@ impl ToolGenerator {
             );
         }
 
-        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
+        let pk_desc = if pk_names.len() == 1 {
+            pk_names[0].to_string()
+        } else {
+            pk_names.join(", ")
+        };
 
         ToolDefinition {
             name: format!("get{}", entity_name),
-            description: Some(format!("Retrieve a {} by primary key ({})", table_name, pk_desc)),
+            description: Some(format!(
+                "Retrieve a {} by primary key ({})",
+                table_name, pk_desc
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": properties,
@@ -268,11 +275,18 @@ impl ToolGenerator {
             }
         }
 
-        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
+        let pk_desc = if pk_names.len() == 1 {
+            pk_names[0].to_string()
+        } else {
+            pk_names.join(", ")
+        };
 
         ToolDefinition {
             name: format!("update{}", entity_name),
-            description: Some(format!("Update an existing {} by primary key ({})", table_name, pk_desc)),
+            description: Some(format!(
+                "Update an existing {} by primary key ({})",
+                table_name, pk_desc
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": properties,
@@ -313,11 +327,18 @@ impl ToolGenerator {
             );
         }
 
-        let pk_desc = if pk_names.len() == 1 { pk_names[0].to_string() } else { pk_names.join(", ") };
+        let pk_desc = if pk_names.len() == 1 {
+            pk_names[0].to_string()
+        } else {
+            pk_names.join(", ")
+        };
 
         ToolDefinition {
             name: format!("delete{}", entity_name),
-            description: Some(format!("Delete a {} by primary key ({})", table_name, pk_desc)),
+            description: Some(format!(
+                "Delete a {} by primary key ({})",
+                table_name, pk_desc
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": properties,
@@ -386,10 +407,13 @@ impl ToolGenerator {
             CreatableColumns::Map(map) => {
                 for (col_name, constraints) in map {
                     if let Some(col_schema) = table_schema.get_column(col_name) {
-                        let prop = self.creatable_constraints_to_json_schema(constraints, col_schema);
+                        let prop =
+                            self.creatable_constraints_to_json_schema(constraints, col_schema);
                         properties.insert(col_name.clone(), prop);
                         // Required if constraint says so, or if non-nullable without default
-                        if constraints.required || (!col_schema.nullable && col_schema.default.is_none()) {
+                        if constraints.required
+                            || (!col_schema.nullable && col_schema.default.is_none())
+                        {
                             required.push(col_name.clone());
                         }
                     } else {
@@ -425,7 +449,11 @@ impl ToolGenerator {
             UpdatableColumns::Map(map) => {
                 for (col_name, constraints) in map {
                     if let Some(col_schema) = table_schema.get_column(col_name) {
-                        let prop = self.updatable_constraints_to_json_schema(constraints, col_schema, col_name);
+                        let prop = self.updatable_constraints_to_json_schema(
+                            constraints,
+                            col_schema,
+                            col_name,
+                        );
                         properties.insert(col_name.clone(), prop);
                     } else {
                         // Column not in schema, use basic string type
@@ -446,19 +474,19 @@ impl ToolGenerator {
         if let Some(perms) = self.role.tables.get(table_name) {
             // Get list of readable columns from ReadableConfig
             let readable_cols: Vec<&str> = match &perms.readable {
-                ReadableConfig::All(_) => {
-                    table_schema.columns.iter().map(|c| c.name.as_str()).collect()
-                }
-                ReadableConfig::List(cols) => {
-                    cols.iter().map(|s: &String| s.as_str()).collect()
-                }
+                ReadableConfig::All(_) => table_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect(),
+                ReadableConfig::List(cols) => cols.iter().map(|s: &String| s.as_str()).collect(),
                 ReadableConfig::Config(cfg) => match &cfg.columns {
-                    ColumnList::All(_) => {
-                        table_schema.columns.iter().map(|c| c.name.as_str()).collect()
-                    }
-                    ColumnList::List(cols) => {
-                        cols.iter().map(|s: &String| s.as_str()).collect()
-                    }
+                    ColumnList::All(_) => table_schema
+                        .columns
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect(),
+                    ColumnList::List(cols) => cols.iter().map(|s: &String| s.as_str()).collect(),
                 },
             };
 
@@ -488,11 +516,7 @@ impl ToolGenerator {
     }
 
     /// Convert a column to basic JSON schema.
-    fn column_to_basic_json_schema(
-        &self,
-        col_name: &str,
-        table_schema: &TableSchema,
-    ) -> Value {
+    fn column_to_basic_json_schema(&self, col_name: &str, table_schema: &TableSchema) -> Value {
         if let Some(col) = table_schema.get_column(col_name) {
             let base_type = col.json_schema_type();
             let mut schema = json!({ "type": base_type });
@@ -645,34 +669,34 @@ fn singularize(s: &str) -> String {
         ("teeth", "tooth"),
         ("feet", "foot"),
     ];
-    
+
     for (plural, singular) in irregulars {
         if s == plural {
             return singular.to_string();
         }
     }
-    
+
     // Words ending in 'ies' -> 'y' (e.g., categories -> category)
     if s.ends_with("ies") && s.len() > 3 {
         return format!("{}y", &s[..s.len() - 3]);
     }
-    
+
     // Words ending in 'es' that should keep the 'e' (e.g., boxes -> box)
     // Be careful about words like "status" that end in "us" not "es"
     if s.ends_with("xes") || s.ends_with("ches") || s.ends_with("shes") || s.ends_with("sses") {
         return s[..s.len() - 2].to_string();
     }
-    
+
     // Words ending in 'ves' -> 'f' or 'fe' (e.g., leaves -> leaf)
     if s.ends_with("ves") {
         return format!("{}f", &s[..s.len() - 3]);
     }
-    
+
     // Words ending in 's' but not 'ss' or 'us' or 'is' (e.g., users -> user)
     if s.ends_with('s') && !s.ends_with("ss") && !s.ends_with("us") && !s.ends_with("is") {
         return s[..s.len() - 1].to_string();
     }
-    
+
     // Return as-is if no rule matched
     s.to_string()
 }
@@ -692,7 +716,7 @@ fn pluralize(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::schema::ColumnSchema;
-    use cori_core::{config::AllColumns, TablePermissions};
+    use cori_core::{TablePermissions, config::AllColumns};
     use std::collections::HashMap;
 
     #[test]
@@ -707,10 +731,7 @@ mod tests {
         role.tables.insert(
             "users".to_string(),
             TablePermissions {
-                readable: ReadableConfig::List(vec![
-                    "id".to_string(),
-                    "name".to_string(),
-                ]),
+                readable: ReadableConfig::List(vec!["id".to_string(), "name".to_string()]),
                 creatable: CreatableColumns::default(),
                 updatable: UpdatableColumns::default(),
                 deletable: Default::default(),
@@ -735,8 +756,8 @@ mod tests {
 
     #[test]
     fn test_generate_update_tool_with_constraints() {
-        use cori_core::config::role_definition::{OnlyWhen, ColumnCondition};
-        
+        use cori_core::config::role_definition::{ColumnCondition, OnlyWhen};
+
         let mut role = RoleDefinition {
             name: "test".to_string(),
             description: None,
@@ -748,12 +769,9 @@ mod tests {
         let mut status_conditions = HashMap::new();
         status_conditions.insert(
             "new.status".to_string(),
-            ColumnCondition::In(vec![
-                serde_json::json!("open"),
-                serde_json::json!("closed"),
-            ]),
+            ColumnCondition::In(vec![serde_json::json!("open"), serde_json::json!("closed")]),
         );
-        
+
         let mut updatable = HashMap::new();
         updatable.insert(
             "status".to_string(),
@@ -774,10 +792,7 @@ mod tests {
         role.tables.insert(
             "tickets".to_string(),
             TablePermissions {
-                readable: ReadableConfig::List(vec![
-                    "id".to_string(),
-                    "status".to_string(),
-                ]),
+                readable: ReadableConfig::List(vec!["id".to_string(), "status".to_string()]),
                 creatable: CreatableColumns::default(),
                 updatable: UpdatableColumns::Map(updatable),
                 deletable: Default::default(),
@@ -842,19 +857,34 @@ mod tests {
         let tools = generator.generate_all();
 
         // list should be generated (doesn't need PK)
-        assert!(tools.iter().any(|t| t.name == "listLogs"), "listLogs should be generated");
-        
+        assert!(
+            tools.iter().any(|t| t.name == "listLogs"),
+            "listLogs should be generated"
+        );
+
         // create should be generated (doesn't need PK)
-        assert!(tools.iter().any(|t| t.name == "createLog"), "createLog should be generated");
-        
+        assert!(
+            tools.iter().any(|t| t.name == "createLog"),
+            "createLog should be generated"
+        );
+
         // get should NOT be generated (needs PK for single record lookup)
-        assert!(!tools.iter().any(|t| t.name == "getLog"), "getLog should NOT be generated without PK");
-        
+        assert!(
+            !tools.iter().any(|t| t.name == "getLog"),
+            "getLog should NOT be generated without PK"
+        );
+
         // update should NOT be generated (needs PK to identify row)
-        assert!(!tools.iter().any(|t| t.name == "updateLog"), "updateLog should NOT be generated without PK");
-        
+        assert!(
+            !tools.iter().any(|t| t.name == "updateLog"),
+            "updateLog should NOT be generated without PK"
+        );
+
         // delete should NOT be generated (needs PK to identify row)
-        assert!(!tools.iter().any(|t| t.name == "deleteLog"), "deleteLog should NOT be generated without PK");
+        assert!(
+            !tools.iter().any(|t| t.name == "deleteLog"),
+            "deleteLog should NOT be generated without PK"
+        );
     }
 
     #[test]
@@ -870,10 +900,7 @@ mod tests {
         role.tables.insert(
             "items".to_string(),
             TablePermissions {
-                readable: ReadableConfig::List(vec![
-                    "id".to_string(),
-                    "name".to_string(),
-                ]),
+                readable: ReadableConfig::List(vec!["id".to_string(), "name".to_string()]),
                 creatable: CreatableColumns::All(AllColumns),
                 updatable: UpdatableColumns::All(AllColumns),
                 deletable: cori_core::DeletablePermission::Allowed(true),
@@ -892,10 +919,25 @@ mod tests {
         let tools = generator.generate_all();
 
         // All tools should be generated when PK exists
-        assert!(tools.iter().any(|t| t.name == "listItems"), "listItems should be generated");
-        assert!(tools.iter().any(|t| t.name == "createItem"), "createItem should be generated");
-        assert!(tools.iter().any(|t| t.name == "getItem"), "getItem should be generated with PK");
-        assert!(tools.iter().any(|t| t.name == "updateItem"), "updateItem should be generated with PK");
-        assert!(tools.iter().any(|t| t.name == "deleteItem"), "deleteItem should be generated with PK");
+        assert!(
+            tools.iter().any(|t| t.name == "listItems"),
+            "listItems should be generated"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "createItem"),
+            "createItem should be generated"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "getItem"),
+            "getItem should be generated with PK"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "updateItem"),
+            "updateItem should be generated with PK"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "deleteItem"),
+            "deleteItem should be generated with PK"
+        );
     }
 }

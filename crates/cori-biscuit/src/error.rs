@@ -53,4 +53,3 @@ pub enum BiscuitError {
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
-

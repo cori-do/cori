@@ -1,6 +1,8 @@
 //! Token helper utilities.
 
-use cori_biscuit::claims::{ColumnConstraints, RoleClaims, TablePermissions as ClaimTablePermissions};
+use cori_biscuit::claims::{
+    ColumnConstraints, RoleClaims, TablePermissions as ClaimTablePermissions,
+};
 use cori_core::config::role_definition::{
     CreatableColumns, ReadableConfig, RoleDefinition, UpdatableColumns,
 };
@@ -29,7 +31,10 @@ pub fn role_definition_to_claims(role: &RoleDefinition) -> RoleClaims {
                     if cfg.columns.is_all() {
                         vec!["*".to_string()]
                     } else {
-                        cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default()
+                        cfg.columns
+                            .as_list()
+                            .map(|s| s.to_vec())
+                            .unwrap_or_default()
                     }
                 }
             };
@@ -55,10 +60,16 @@ pub fn role_definition_to_claims(role: &RoleDefinition) -> RoleClaims {
             if let UpdatableColumns::Map(cols) = &table_perms.updatable {
                 for (col_name, constraints) in cols {
                     // Extract allowed values from only_when if it's a simple new.<col>: [values] pattern
-                    let allowed_values: Option<Vec<String>> = constraints.only_when.as_ref()
+                    let allowed_values: Option<Vec<String>> = constraints
+                        .only_when
+                        .as_ref()
                         .and_then(|ow| ow.get_new_value_restriction(col_name))
-                        .map(|v| v.iter().filter_map(|val| val.as_str().map(String::from)).collect::<Vec<_>>());
-                    
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(|val| val.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        });
+
                     let claim_constraints = ColumnConstraints {
                         allowed_values,
                         pattern: None, // Not in current updatable constraints

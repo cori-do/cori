@@ -205,9 +205,10 @@ impl AuditStorage for FileStorage {
     }
 
     async fn query(&self, filter: AuditFilter) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.events.read().map_err(|e| {
-            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let events = self
+            .events
+            .read()
+            .map_err(|e| AuditError::StorageError(format!("Failed to acquire read lock: {}", e)))?;
 
         let mut results: Vec<_> = events
             .iter()
@@ -271,25 +272,31 @@ impl AuditStorage for FileStorage {
     }
 
     async fn count(&self, filter: AuditFilter) -> Result<usize, AuditError> {
-        let events = self.events.read().map_err(|e| {
-            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let events = self
+            .events
+            .read()
+            .map_err(|e| AuditError::StorageError(format!("Failed to acquire read lock: {}", e)))?;
 
-        Ok(events.iter().filter(|e| Self::matches_filter(e, &filter)).count())
+        Ok(events
+            .iter()
+            .filter(|e| Self::matches_filter(e, &filter))
+            .count())
     }
 
     async fn get(&self, event_id: Uuid) -> Result<Option<AuditEvent>, AuditError> {
-        let events = self.events.read().map_err(|e| {
-            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let events = self
+            .events
+            .read()
+            .map_err(|e| AuditError::StorageError(format!("Failed to acquire read lock: {}", e)))?;
 
         Ok(events.iter().find(|e| e.event_id == event_id).cloned())
     }
 
     async fn get_children(&self, parent_event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.events.read().map_err(|e| {
-            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let events = self
+            .events
+            .read()
+            .map_err(|e| AuditError::StorageError(format!("Failed to acquire read lock: {}", e)))?;
 
         let mut children: Vec<_> = events
             .iter()
@@ -304,9 +311,10 @@ impl AuditStorage for FileStorage {
     }
 
     async fn get_event_tree(&self, event_id: Uuid) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.events.read().map_err(|e| {
-            AuditError::StorageError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let events = self
+            .events
+            .read()
+            .map_err(|e| AuditError::StorageError(format!("Failed to acquire read lock: {}", e)))?;
 
         // Find the root event
         let root = match events.iter().find(|e| e.event_id == event_id) {
@@ -498,12 +506,7 @@ mod tests {
     #[tokio::test]
     async fn test_console_storage() {
         let storage = ConsoleStorage::new();
-        let event = AuditEvent::new(
-            AuditEventType::ToolCalled,
-            "admin",
-            "acme",
-            "listCustomers",
-        );
+        let event = AuditEvent::new(AuditEventType::ToolCalled, "admin", "acme", "listCustomers");
 
         // Should not error
         storage.store(event).await.unwrap();
@@ -592,12 +595,7 @@ mod tests {
     #[tokio::test]
     async fn test_null_storage() {
         let storage = NullStorage::new();
-        let event = AuditEvent::new(
-            AuditEventType::ToolCalled,
-            "admin",
-            "acme",
-            "test",
-        );
+        let event = AuditEvent::new(AuditEventType::ToolCalled, "admin", "acme", "test");
 
         // Should not error
         storage.store(event).await.unwrap();
@@ -613,12 +611,7 @@ mod tests {
 
         let storage = FileStorage::new(&log_path).unwrap();
 
-        let event = AuditEvent::new(
-            AuditEventType::ToolCalled,
-            "admin",
-            "acme",
-            "test",
-        );
+        let event = AuditEvent::new(AuditEventType::ToolCalled, "admin", "acme", "test");
 
         storage.store(event).await.unwrap();
 

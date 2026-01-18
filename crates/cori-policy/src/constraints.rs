@@ -215,7 +215,13 @@ impl ConstraintValidator {
         let mut last_error = None;
 
         for conditions in condition_sets {
-            match self.validate_condition_set(column, new_value, conditions, current_row, all_new_values) {
+            match self.validate_condition_set(
+                column,
+                new_value,
+                conditions,
+                current_row,
+                all_new_values,
+            ) {
                 Ok(()) => {
                     any_matched = true;
                     break;
@@ -276,10 +282,7 @@ impl ConstraintValidator {
                             // Return error to fail this condition set (OR logic will try next set).
                             return Err(ValidationError::only_when_violation(
                                 column,
-                                &format!(
-                                    "new.{} referenced but not provided in update",
-                                    col
-                                ),
+                                &format!("new.{} referenced but not provided in update", col),
                             ));
                         }
                     }
@@ -470,7 +473,9 @@ impl ConstraintValidator {
             NumberOrColumnRef::Number(n) => Some(*n),
             NumberOrColumnRef::ColumnRef(col_ref) => {
                 // Parse old.column or new.column
-                let col = col_ref.strip_prefix("old.").or_else(|| col_ref.strip_prefix("new."))?;
+                let col = col_ref
+                    .strip_prefix("old.")
+                    .or_else(|| col_ref.strip_prefix("new."))?;
                 let row = current_row?;
                 row.get(col).and_then(|v| v.as_f64())
             }

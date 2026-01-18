@@ -27,7 +27,10 @@ impl<'a> RoleValidator<'a> {
     }
 
     /// Validate that a role is present in the request.
-    pub fn validate_role_present(&self, request: &ValidationRequest) -> Result<(), ValidationError> {
+    pub fn validate_role_present(
+        &self,
+        request: &ValidationRequest,
+    ) -> Result<(), ValidationError> {
         if request.role_name.is_empty() {
             return Err(ValidationError::role_not_found());
         }
@@ -108,7 +111,10 @@ impl<'a> RoleValidator<'a> {
     }
 
     /// Validate CREATE operation permissions (without constraint validation).
-    pub fn validate_create_permissions(&self, table: &str) -> Result<&TablePermissions, ValidationError> {
+    pub fn validate_create_permissions(
+        &self,
+        table: &str,
+    ) -> Result<&TablePermissions, ValidationError> {
         let perms = self.get_table_permissions(table)?;
 
         // Check if create is allowed
@@ -120,7 +126,10 @@ impl<'a> RoleValidator<'a> {
     }
 
     /// Validate UPDATE operation permissions (without constraint validation).
-    pub fn validate_update_permissions(&self, request: &ValidationRequest) -> Result<&TablePermissions, ValidationError> {
+    pub fn validate_update_permissions(
+        &self,
+        request: &ValidationRequest,
+    ) -> Result<&TablePermissions, ValidationError> {
         let table = request.table;
         let perms = self.get_table_permissions(table)?;
 

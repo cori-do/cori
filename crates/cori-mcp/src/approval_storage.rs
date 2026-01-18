@@ -76,7 +76,10 @@ impl ApprovalFileStorage {
     fn load_all(&self) -> Result<(), ApprovalStorageError> {
         // Load pending
         let pending_requests = Self::load_from_file(&self.pending_path())?;
-        let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+        let mut pending = self
+            .pending
+            .write()
+            .map_err(|_| ApprovalStorageError::LockError)?;
         for request in pending_requests {
             pending.insert(request.id.clone(), request);
         }
@@ -84,7 +87,10 @@ impl ApprovalFileStorage {
 
         // Load approved
         let approved_requests = Self::load_from_file(&self.approved_path())?;
-        let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
+        let mut approved = self
+            .approved
+            .write()
+            .map_err(|_| ApprovalStorageError::LockError)?;
         for request in approved_requests {
             approved.insert(request.id.clone(), request);
         }
@@ -92,7 +98,10 @@ impl ApprovalFileStorage {
 
         // Load denied
         let denied_requests = Self::load_from_file(&self.denied_path())?;
-        let mut denied = self.denied.write().map_err(|_| ApprovalStorageError::LockError)?;
+        let mut denied = self
+            .denied
+            .write()
+            .map_err(|_| ApprovalStorageError::LockError)?;
         for request in denied_requests {
             denied.insert(request.id.clone(), request);
         }
@@ -137,16 +146,16 @@ impl ApprovalFileStorage {
     /// Append a request to a file.
     fn append_to_file(path: &Path, request: &ApprovalRequest) -> Result<(), ApprovalStorageError> {
         let json = serde_json::to_string(request)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{}", json)?;
         Ok(())
     }
 
     /// Rewrite a file with the given requests (used when removing from pending).
-    fn rewrite_file(path: &Path, requests: &HashMap<String, ApprovalRequest>) -> Result<(), ApprovalStorageError> {
+    fn rewrite_file(
+        path: &Path,
+        requests: &HashMap<String, ApprovalRequest>,
+    ) -> Result<(), ApprovalStorageError> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -165,7 +174,10 @@ impl ApprovalFileStorage {
     pub fn store_pending(&self, request: ApprovalRequest) -> Result<(), ApprovalStorageError> {
         // Add to in-memory cache
         {
-            let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut pending = self
+                .pending
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             pending.insert(request.id.clone(), request.clone());
         }
 
@@ -180,7 +192,10 @@ impl ApprovalFileStorage {
     pub fn get(&self, id: &str) -> Result<Option<ApprovalRequest>, ApprovalStorageError> {
         // Check pending first
         {
-            let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut pending = self
+                .pending
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             if let Some(request) = pending.get_mut(id) {
                 // Check for expiration
                 if request.status == ApprovalStatus::Pending && request.is_expired() {
@@ -197,7 +212,10 @@ impl ApprovalFileStorage {
 
         // Check approved
         {
-            let approved = self.approved.read().map_err(|_| ApprovalStorageError::LockError)?;
+            let approved = self
+                .approved
+                .read()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             if let Some(request) = approved.get(id) {
                 return Ok(Some(request.clone()));
             }
@@ -205,7 +223,10 @@ impl ApprovalFileStorage {
 
         // Check denied
         {
-            let denied = self.denied.read().map_err(|_| ApprovalStorageError::LockError)?;
+            let denied = self
+                .denied
+                .read()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             if let Some(request) = denied.get(id) {
                 return Ok(Some(request.clone()));
             }
@@ -215,8 +236,14 @@ impl ApprovalFileStorage {
     }
 
     /// List all pending approval requests.
-    pub fn list_pending(&self, tenant_id: Option<&str>) -> Result<Vec<ApprovalRequest>, ApprovalStorageError> {
-        let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+    pub fn list_pending(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<ApprovalRequest>, ApprovalStorageError> {
+        let mut pending = self
+            .pending
+            .write()
+            .map_err(|_| ApprovalStorageError::LockError)?;
         let mut expired_ids = Vec::new();
 
         // Check for expirations
@@ -228,7 +255,8 @@ impl ApprovalFileStorage {
         }
 
         // Move expired to denied
-        let expired_requests: Vec<_> = expired_ids.iter()
+        let expired_requests: Vec<_> = expired_ids
+            .iter()
             .filter_map(|id| pending.remove(id))
             .collect();
 
@@ -239,12 +267,14 @@ impl ApprovalFileStorage {
         }
 
         // Re-acquire and return filtered list
-        let pending = self.pending.read().map_err(|_| ApprovalStorageError::LockError)?;
+        let pending = self
+            .pending
+            .read()
+            .map_err(|_| ApprovalStorageError::LockError)?;
         Ok(pending
             .values()
             .filter(|r| {
-                r.status == ApprovalStatus::Pending
-                    && tenant_id.map_or(true, |t| r.tenant_id == t)
+                r.status == ApprovalStatus::Pending && tenant_id.map_or(true, |t| r.tenant_id == t)
             })
             .cloned()
             .collect())
@@ -257,7 +287,10 @@ impl ApprovalFileStorage {
         by: impl Into<String>,
         reason: Option<String>,
     ) -> Result<ApprovalRequest, ApprovalError> {
-        let mut pending = self.pending.write().map_err(|_| ApprovalError::NotFound(id.to_string()))?;
+        let mut pending = self
+            .pending
+            .write()
+            .map_err(|_| ApprovalError::NotFound(id.to_string()))?;
 
         let request = pending
             .get_mut(id)
@@ -295,7 +328,10 @@ impl ApprovalFileStorage {
         by: impl Into<String>,
         reason: Option<String>,
     ) -> Result<ApprovalRequest, ApprovalError> {
-        let mut pending = self.pending.write().map_err(|_| ApprovalError::NotFound(id.to_string()))?;
+        let mut pending = self
+            .pending
+            .write()
+            .map_err(|_| ApprovalError::NotFound(id.to_string()))?;
 
         let request = pending
             .get_mut(id)
@@ -328,7 +364,10 @@ impl ApprovalFileStorage {
 
     /// Cancel a request.
     pub fn cancel(&self, id: &str) -> Result<ApprovalRequest, ApprovalError> {
-        let mut pending = self.pending.write().map_err(|_| ApprovalError::NotFound(id.to_string()))?;
+        let mut pending = self
+            .pending
+            .write()
+            .map_err(|_| ApprovalError::NotFound(id.to_string()))?;
 
         let request = pending
             .get_mut(id)
@@ -351,8 +390,15 @@ impl ApprovalFileStorage {
     }
 
     /// Update an approved request with execution result.
-    pub fn update_with_result(&self, id: &str, result: serde_json::Value) -> Result<(), ApprovalStorageError> {
-        let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
+    pub fn update_with_result(
+        &self,
+        id: &str,
+        result: serde_json::Value,
+    ) -> Result<(), ApprovalStorageError> {
+        let mut approved = self
+            .approved
+            .write()
+            .map_err(|_| ApprovalStorageError::LockError)?;
 
         if let Some(request) = approved.get_mut(id) {
             request.execution_result = Some(result);
@@ -365,10 +411,18 @@ impl ApprovalFileStorage {
     }
 
     /// Update an approval request with audit event ID and correlation ID.
-    pub fn update_audit_ids(&self, id: &str, event_id: uuid::Uuid, correlation_id: String) -> Result<(), ApprovalStorageError> {
+    pub fn update_audit_ids(
+        &self,
+        id: &str,
+        event_id: uuid::Uuid,
+        correlation_id: String,
+    ) -> Result<(), ApprovalStorageError> {
         // Try pending first
         {
-            let mut pending = self.pending.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut pending = self
+                .pending
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             if let Some(request) = pending.get_mut(id) {
                 request.set_audit_ids(event_id, correlation_id);
                 // Rewrite the pending file
@@ -379,7 +433,10 @@ impl ApprovalFileStorage {
 
         // If not in pending, try approved
         {
-            let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut approved = self
+                .approved
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             if let Some(request) = approved.get_mut(id) {
                 request.set_audit_ids(event_id, correlation_id);
                 // Rewrite the approved file
@@ -395,17 +452,19 @@ impl ApprovalFileStorage {
     fn move_to_approved(&self, request: ApprovalRequest) -> Result<(), ApprovalStorageError> {
         // Add to approved cache
         {
-            let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut approved = self
+                .approved
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             approved.insert(request.id.clone(), request.clone());
 
             // Trim cache if too large
             if approved.len() > self.max_cache_size {
                 // Remove oldest entries (by decided_at)
                 let mut entries: Vec<_> = approved.iter().collect();
-                entries.sort_by(|a, b| {
-                    a.1.decided_at.cmp(&b.1.decided_at)
-                });
-                let to_remove: Vec<_> = entries.iter()
+                entries.sort_by(|a, b| a.1.decided_at.cmp(&b.1.decided_at));
+                let to_remove: Vec<_> = entries
+                    .iter()
                     .take(approved.len() - self.max_cache_size)
                     .map(|(k, _)| (*k).clone())
                     .collect();
@@ -420,7 +479,10 @@ impl ApprovalFileStorage {
 
         // Rewrite pending.log (remove this request)
         {
-            let pending = self.pending.read().map_err(|_| ApprovalStorageError::LockError)?;
+            let pending = self
+                .pending
+                .read()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             Self::rewrite_file(&self.pending_path(), &pending)?;
         }
 
@@ -432,16 +494,18 @@ impl ApprovalFileStorage {
     fn move_to_denied(&self, request: ApprovalRequest) -> Result<(), ApprovalStorageError> {
         // Add to denied cache
         {
-            let mut denied = self.denied.write().map_err(|_| ApprovalStorageError::LockError)?;
+            let mut denied = self
+                .denied
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             denied.insert(request.id.clone(), request.clone());
 
             // Trim cache if too large
             if denied.len() > self.max_cache_size {
                 let mut entries: Vec<_> = denied.iter().collect();
-                entries.sort_by(|a, b| {
-                    a.1.decided_at.cmp(&b.1.decided_at)
-                });
-                let to_remove: Vec<_> = entries.iter()
+                entries.sort_by(|a, b| a.1.decided_at.cmp(&b.1.decided_at));
+                let to_remove: Vec<_> = entries
+                    .iter()
                     .take(denied.len() - self.max_cache_size)
                     .map(|(k, _)| (*k).clone())
                     .collect();
@@ -456,7 +520,10 @@ impl ApprovalFileStorage {
 
         // Rewrite pending.log (remove this request)
         {
-            let pending = self.pending.read().map_err(|_| ApprovalStorageError::LockError)?;
+            let pending = self
+                .pending
+                .read()
+                .map_err(|_| ApprovalStorageError::LockError)?;
             Self::rewrite_file(&self.pending_path(), &pending)?;
         }
 
@@ -470,18 +537,20 @@ impl ApprovalFileStorage {
 
         // Clean approved cache (keep file intact for audit trail)
         {
-            let mut approved = self.approved.write().map_err(|_| ApprovalStorageError::LockError)?;
-            approved.retain(|_, r| {
-                r.decided_at.map_or(true, |t| t > cutoff)
-            });
+            let mut approved = self
+                .approved
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
+            approved.retain(|_, r| r.decided_at.map_or(true, |t| t > cutoff));
         }
 
         // Clean denied cache (keep file intact for audit trail)
         {
-            let mut denied = self.denied.write().map_err(|_| ApprovalStorageError::LockError)?;
-            denied.retain(|_, r| {
-                r.decided_at.map_or(true, |t| t > cutoff)
-            });
+            let mut denied = self
+                .denied
+                .write()
+                .map_err(|_| ApprovalStorageError::LockError)?;
+            denied.retain(|_, r| r.decided_at.map_or(true, |t| t > cutoff));
         }
 
         Ok(())
@@ -552,7 +621,9 @@ mod tests {
         let id = request.id.clone();
 
         storage.store_pending(request).unwrap();
-        let approved = storage.approve(&id, "admin", Some("OK".to_string())).unwrap();
+        let approved = storage
+            .approve(&id, "admin", Some("OK".to_string()))
+            .unwrap();
 
         assert_eq!(approved.status, ApprovalStatus::Approved);
         assert_eq!(approved.decided_by, Some("admin".to_string()));
@@ -582,7 +653,9 @@ mod tests {
         let id = request.id.clone();
 
         storage.store_pending(request).unwrap();
-        let rejected = storage.reject(&id, "admin", Some("Not allowed".to_string())).unwrap();
+        let rejected = storage
+            .reject(&id, "admin", Some("Not allowed".to_string()))
+            .unwrap();
 
         assert_eq!(rejected.status, ApprovalStatus::Rejected);
 
