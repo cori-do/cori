@@ -245,14 +245,13 @@ impl AuditEvent {
         }
 
         // Include diff summary if present
-        if let Some(ref diff) = self.diff {
-            if let Some(obj) = diff.as_object() {
+        if let Some(ref diff) = self.diff
+            && let Some(obj) = diff.as_object() {
                 let changed_fields: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
                 if !changed_fields.is_empty() {
                     line.push_str(&format!(" changed_fields=[{}]", changed_fields.join(",")));
                 }
             }
-        }
 
         line
     }
@@ -399,8 +398,11 @@ impl AuditEventBuilder {
 
 /// Compute a diff between two JSON values.
 /// Returns an object with changed fields showing { "old": ..., "new": ... }
-pub fn compute_json_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
-    use serde_json::{json, Map, Value};
+pub fn compute_json_diff(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
 
     match (before, after) {
         (Value::Object(before_obj), Value::Object(after_obj)) => {
@@ -534,15 +536,20 @@ mod tests {
         .build();
 
         assert_eq!(approved_event.event_type, AuditEventType::Approved);
-        assert_eq!(approved_event.approver, Some("admin@example.com".to_string()));
+        assert_eq!(
+            approved_event.approver,
+            Some("admin@example.com".to_string())
+        );
     }
 
     #[test]
     fn test_event_type_display() {
         assert_eq!(format!("{}", AuditEventType::ToolCalled), "TOOL_CALLED");
-        assert_eq!(format!("{}", AuditEventType::ApprovalRequested), "APPROVAL_REQUESTED");
+        assert_eq!(
+            format!("{}", AuditEventType::ApprovalRequested),
+            "APPROVAL_REQUESTED"
+        );
         assert_eq!(format!("{}", AuditEventType::Approved), "APPROVED");
         assert_eq!(format!("{}", AuditEventType::Denied), "DENIED");
     }
 }
-

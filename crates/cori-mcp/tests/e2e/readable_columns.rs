@@ -41,11 +41,18 @@ pub async fn test_only_readable_columns_returned(ctx: &TestContext) {
 
     // Get the role's readable columns for customers
     let role = create_support_agent_role();
-    let customer_perms = role.tables.get("customers").expect("customers should be in role");
+    let customer_perms = role
+        .tables
+        .get("customers")
+        .expect("customers should be in role");
     let readable_cols = match &customer_perms.readable {
         ReadableConfig::List(cols) => cols.clone(),
         ReadableConfig::All(_) => panic!("Expected explicit column list"),
-        ReadableConfig::Config(cfg) => cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default(),
+        ReadableConfig::Config(cfg) => cfg
+            .columns
+            .as_list()
+            .map(|s| s.to_vec())
+            .unwrap_or_default(),
     };
 
     // Verify only readable columns are present
@@ -120,7 +127,11 @@ pub async fn test_list_returns_only_readable_columns(ctx: &TestContext) {
     let readable_cols = match &customer_perms.readable {
         ReadableConfig::List(cols) => cols.clone(),
         ReadableConfig::All(_) => panic!("Expected explicit column list"),
-        ReadableConfig::Config(cfg) => cfg.columns.as_list().map(|s| s.to_vec()).unwrap_or_default(),
+        ReadableConfig::Config(cfg) => cfg
+            .columns
+            .as_list()
+            .map(|s| s.to_vec())
+            .unwrap_or_default(),
     };
 
     // Verify each item only has readable columns
@@ -172,7 +183,10 @@ pub async fn test_all_columns_readable(ctx: &TestContext) {
 
     // Should have at least the basic columns
     assert!(data.get("customer_id").is_some(), "Should have customer_id");
-    assert!(data.get("organization_id").is_some(), "Should have organization_id");
+    assert!(
+        data.get("organization_id").is_some(),
+        "Should have organization_id"
+    );
 
     println!("     ✓ All columns accessible with '*' readable");
 }
@@ -208,7 +222,11 @@ pub async fn test_all_columns_includes_sensitive(ctx: &TestContext) {
         let first = &data[0];
         // Count columns - should be more than the restricted list
         let col_count = first.as_object().map(|o| o.len()).unwrap_or(0);
-        assert!(col_count > 5, "Should have many columns with '*', got {}", col_count);
+        assert!(
+            col_count > 5,
+            "Should have many columns with '*', got {}",
+            col_count
+        );
     }
 
     println!("     ✓ All columns mode returns full schema");
@@ -283,13 +301,13 @@ pub async fn test_table_not_in_role_cannot_be_queried(_ctx: &TestContext) {
     // For now, we just verify the role definition is correctly configured.
 
     let role = create_support_agent_role();
-    
+
     // Verify 'users' is not in the role's tables
     assert!(
         !role.tables.contains_key("users"),
         "users should not be in role.tables"
     );
-    
+
     // The can_access_table helper should return false
     assert!(
         !role.can_access_table("users"),
@@ -305,14 +323,32 @@ pub async fn test_can_access_table_helper(_ctx: &TestContext) {
     let role = create_support_agent_role();
 
     // Tables that should be accessible
-    assert!(role.can_access_table("customers"), "customers should be accessible");
-    assert!(role.can_access_table("orders"), "orders should be accessible");
-    assert!(role.can_access_table("tickets"), "tickets should be accessible");
+    assert!(
+        role.can_access_table("customers"),
+        "customers should be accessible"
+    );
+    assert!(
+        role.can_access_table("orders"),
+        "orders should be accessible"
+    );
+    assert!(
+        role.can_access_table("tickets"),
+        "tickets should be accessible"
+    );
 
     // Tables that should not be accessible (not in role)
-    assert!(!role.can_access_table("users"), "users should not be accessible");
-    assert!(!role.can_access_table("api_keys"), "api_keys should not be accessible");
-    assert!(!role.can_access_table("billing"), "billing should not be accessible");
+    assert!(
+        !role.can_access_table("users"),
+        "users should not be accessible"
+    );
+    assert!(
+        !role.can_access_table("api_keys"),
+        "api_keys should not be accessible"
+    );
+    assert!(
+        !role.can_access_table("billing"),
+        "billing should not be accessible"
+    );
 
     // Non-existent table
     assert!(
@@ -352,9 +388,12 @@ pub async fn test_empty_readable_blocks_access(_ctx: &TestContext) {
     // Verify the role is correctly configured with empty readable columns
     let perms = role.tables.get("customers").unwrap();
     assert!(perms.readable.is_empty(), "readable should be empty");
-    
+
     // Verify ReadableConfig helpers work correctly
-    assert!(!perms.readable.contains("customer_id"), "customer_id should not be readable");
+    assert!(
+        !perms.readable.contains("customer_id"),
+        "customer_id should not be readable"
+    );
     assert!(!perms.readable.is_all(), "readable should not be 'all'");
 
     // Note: Actual enforcement of empty readable columns depends on ToolExecutor
@@ -383,7 +422,10 @@ pub async fn test_column_list_contains(_ctx: &TestContext) {
     // Test ReadableConfig::All
     let all = ReadableConfig::All(AllColumns);
     assert!(all.contains("any_column"), "All should contain any column");
-    assert!(all.contains("password"), "All should contain even sensitive columns");
+    assert!(
+        all.contains("password"),
+        "All should contain even sensitive columns"
+    );
 
     println!("     ✓ ReadableConfig contains helper works correctly");
 }
@@ -459,7 +501,10 @@ pub async fn test_get_readable_columns_helper(_ctx: &TestContext) {
     let role = create_support_agent_role();
 
     let readable = role.get_readable_columns("customers");
-    assert!(readable.is_some(), "Should get readable columns for customers");
+    assert!(
+        readable.is_some(),
+        "Should get readable columns for customers"
+    );
 
     let cols = readable.unwrap();
     assert!(cols.contains("customer_id"), "Should include customer_id");

@@ -27,8 +27,14 @@ pub fn generate(output: Option<PathBuf>) -> anyhow::Result<()> {
         println!("⚠️  Keep your private key secure! Never commit it to version control.");
         println!();
         println!("Set as environment variables:");
-        println!("  export BISCUIT_PRIVATE_KEY=$(cat {})", private_path.display());
-        println!("  export BISCUIT_PUBLIC_KEY=$(cat {})", public_path.display());
+        println!(
+            "  export BISCUIT_PRIVATE_KEY=$(cat {})",
+            private_path.display()
+        );
+        println!(
+            "  export BISCUIT_PUBLIC_KEY=$(cat {})",
+            public_path.display()
+        );
     } else {
         // Print to stdout
         println!("Private key (keep secure!):");
@@ -64,4 +70,3 @@ mod tests {
         assert_eq!(public_hex.len(), 64);
     }
 }
-

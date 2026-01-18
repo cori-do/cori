@@ -6,19 +6,16 @@
 //! - Helper functions for test assertions
 
 use cori_core::config::role_definition::{
-    ApprovalConfig, ApprovalRequirement, ColumnCondition, CreatableColumnConstraints, CreatableColumns,
-    DeletablePermission, OnlyWhen, ReadableConfig, RoleDefinition, TablePermissions,
-    UpdatableColumnConstraints, UpdatableColumns,
+    ApprovalConfig, ApprovalRequirement, ColumnCondition, CreatableColumnConstraints,
+    CreatableColumns, DeletablePermission, OnlyWhen, ReadableConfig, RoleDefinition,
+    TablePermissions, UpdatableColumnConstraints, UpdatableColumns,
 };
-use cori_core::config::rules_definition::{
-    RulesDefinition, TableRules,
-    TenantConfig,
-};
+use cori_core::config::rules_definition::{RulesDefinition, TableRules, TenantConfig};
 use cori_mcp::approval::ApprovalManager;
 use cori_mcp::executor::{ExecutionContext, ToolExecutor};
 use cori_mcp::protocol::{ToolContent, ToolDefinition};
 use cori_mcp::schema::{ColumnSchema, DatabaseSchema, TableSchema};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::process::Command;
@@ -145,11 +142,7 @@ impl TestContext {
     }
 
     /// Create an executor with a custom role and rules
-    pub fn executor_with(
-        &self,
-        role: RoleDefinition,
-        rules: RulesDefinition,
-    ) -> ToolExecutor {
+    pub fn executor_with(&self, role: RoleDefinition, rules: RulesDefinition) -> ToolExecutor {
         let approval_manager = Arc::new(ApprovalManager::default());
         ToolExecutor::new(role, approval_manager)
             .with_pool(self.pool.clone())
@@ -227,10 +220,13 @@ fn pk_column_for(entity: &str) -> String {
 fn singularize(s: &str) -> String {
     if s.ends_with("ies") {
         format!("{}y", &s[..s.len() - 3])
-    } else if s.ends_with("es") {
+    } else if let Some(base) = s.strip_suffix("es") {
         // Handle cases like "addresses" -> "address"
-        let base = &s[..s.len() - 2];
-        if base.ends_with("ss") || base.ends_with("ch") || base.ends_with("sh") || base.ends_with("x") {
+        if base.ends_with("ss")
+            || base.ends_with("ch")
+            || base.ends_with("sh")
+            || base.ends_with("x")
+        {
             base.to_string()
         } else {
             s[..s.len() - 1].to_string()
@@ -535,7 +531,7 @@ pub fn create_support_agent_role() -> RoleDefinition {
                     ..Default::default()
                 },
             )])),
-            deletable: DeletablePermission::Allowed(true),  // Allow deleting tickets
+            deletable: DeletablePermission::Allowed(true), // Allow deleting tickets
         },
     );
 
@@ -785,7 +781,9 @@ pub fn create_test_schema() -> DatabaseSchema {
     organizations.add_column(ColumnSchema::new("name", "varchar"));
     organizations.add_column(ColumnSchema::new("slug", "varchar"));
     organizations.add_column(ColumnSchema::new("plan", "varchar"));
-    organizations.primary_key.push("organization_id".to_string());
+    organizations
+        .primary_key
+        .push("organization_id".to_string());
     schema.add_table(organizations);
 
     // Customers table

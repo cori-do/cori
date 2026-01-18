@@ -32,11 +32,13 @@ impl AppState {
     /// Create a new application state.
     pub fn new(config: CoriConfig) -> Self {
         // Try to load keypair from config
-        let keypair = config.biscuit.resolve_private_key()
+        let keypair = config
+            .biscuit
+            .resolve_private_key()
             .ok()
             .flatten()
             .and_then(|pk| cori_biscuit::KeyPair::from_private_key_hex(&pk).ok());
-        
+
         // Get database URL
         let database_url = Some(config.upstream.connection_string());
 
@@ -144,7 +146,7 @@ impl AppState {
     }
 
     /// Get the database schema.
-    /// 
+    ///
     /// Priority: 1) SchemaDefinition from config, 2) SchemaInfo from cache
     pub fn get_db_schema(&self) -> cori_mcp::DatabaseSchema {
         let config = self.inner.config.read().unwrap();
@@ -160,7 +162,7 @@ impl AppState {
     }
 
     /// Generate MCP tools for a role using the shared tool_generation module.
-    /// 
+    ///
     /// This uses the same logic as CLI and MCP server to ensure consistency.
     /// Priority: 1) SchemaDefinition from config, 2) SchemaInfo from cache
     pub fn generate_tools_for_role(&self, role: &RoleDefinition) -> Vec<cori_mcp::ToolDefinition> {

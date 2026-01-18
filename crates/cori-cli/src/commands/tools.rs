@@ -7,7 +7,7 @@
 //! Uses shared tool_generation module for consistency with MCP server and dashboard.
 
 use anyhow::{Context, Result};
-use cori_biscuit::{keys::load_public_key_file, TokenVerifier};
+use cori_biscuit::{TokenVerifier, keys::load_public_key_file};
 use cori_core::config::CoriConfig;
 use std::path::PathBuf;
 
@@ -22,7 +22,12 @@ fn generate_tools_for_role(
 }
 
 /// List tools available for a role or token.
-pub fn list(config_path: PathBuf, role: Option<String>, token: Option<PathBuf>, verbose: bool) -> Result<()> {
+pub fn list(
+    config_path: PathBuf,
+    role: Option<String>,
+    token: Option<PathBuf>,
+    verbose: bool,
+) -> Result<()> {
     // Load configuration with all context (roles, schema, etc.)
     let config = CoriConfig::load_with_context(&config_path)
         .with_context(|| format!("Failed to load configuration from {:?}", config_path))?;
@@ -63,9 +68,9 @@ pub fn list(config_path: PathBuf, role: Option<String>, token: Option<PathBuf>, 
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref();
-        let read_only = annotations.map_or(false, |a| a.read_only == Some(true));
-        let requires_approval = annotations.map_or(false, |a| a.requires_approval == Some(true));
-        let dry_run = annotations.map_or(false, |a| a.dry_run_supported == Some(true));
+        let read_only = annotations.is_some_and(|a| a.read_only == Some(true));
+        let requires_approval = annotations.is_some_and(|a| a.requires_approval == Some(true));
+        let dry_run = annotations.is_some_and(|a| a.dry_run_supported == Some(true));
 
         let mut badges = Vec::new();
         if read_only {
@@ -146,12 +151,11 @@ fn load_public_key_from_config(
     }
 
     // Try from environment variable
-    if let Some(ref env_var) = config.biscuit.public_key_env {
-        if let Ok(key_str) = std::env::var(env_var) {
+    if let Some(ref env_var) = config.biscuit.public_key_env
+        && let Ok(key_str) = std::env::var(env_var) {
             return cori_biscuit::keys::load_public_key_hex(&key_str)
                 .with_context(|| format!("Failed to parse public key from env var {}", env_var));
         }
-    }
 
     // Try default location
     let default_path = base_dir.join("keys/public.key");
@@ -163,7 +167,8 @@ fn load_public_key_from_config(
     anyhow::bail!(
         "No public key found. Configure biscuit.public_key_file in cori.yaml or place key in keys/public.key"
     )
-}/// Show detailed schema for a specific tool.
+}
+/// Show detailed schema for a specific tool.
 pub fn describe(config_path: PathBuf, tool_name: String, role: String) -> Result<()> {
     // Load configuration with all context
     let config = CoriConfig::load_with_context(&config_path)

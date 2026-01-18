@@ -132,7 +132,7 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     // Note: Tables not listed in roles are implicitly blocked
     // No separate sensitive_tables analysis needed
 
-    // Generate schema files 
+    // Generate schema files
     println!("📄 Generating schema files...");
     let schema_dir = project_dir.join("schema");
 
@@ -205,7 +205,9 @@ pub async fn run(database_url: &str, project: &str, force: bool) -> Result<()> {
     println!("   4. Set DATABASE_URL environment variable");
     println!("   5. Start the server: cori run");
     println!("   6. Mint a token: cori token mint --role support_agent --output role.token");
-    println!("   7. Attenuate for tenant: cori token attenuate --base role.token --tenant <id> --output agent.token");
+    println!(
+        "   7. Attenuate for tenant: cori token attenuate --base role.token --tenant <id> --output agent.token"
+    );
     println!();
     println!("📚 See README.md for detailed instructions.");
 
@@ -235,7 +237,7 @@ async fn check_database_connectivity(database_url: &str) -> Result<()> {
 }
 
 /// Create the project directory structure.
-/// 
+///
 /// Creates the following structure:
 /// - schema/           # Database schema files
 /// - roles/            # Role definitions (one file per role)
@@ -315,10 +317,8 @@ fn extract_tables(schema: &JsonValue) -> Vec<TableInfo> {
                             let col_name = c.get("name")?.as_str()?.to_string();
                             // Use native_type to match introspect output (SchemaDefinition.schema.json)
                             let data_type = c.get("native_type")?.as_str()?.to_string();
-                            let nullable = c
-                                .get("nullable")
-                                .and_then(|n| n.as_bool())
-                                .unwrap_or(true);
+                            let nullable =
+                                c.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true);
                             Some(ColumnInfo {
                                 name: col_name,
                                 data_type,
@@ -443,7 +443,8 @@ fn analyze_tenancy(tables: &[TableInfo], tenant_column: &Option<String>) -> Tena
         .unwrap_or_else(|| "organization_id".to_string());
 
     // Build a lookup map for tables
-    let table_map: HashMap<&str, &TableInfo> = tables.iter().map(|t| (t.name.as_str(), t)).collect();
+    let table_map: HashMap<&str, &TableInfo> =
+        tables.iter().map(|t| (t.name.as_str(), t)).collect();
 
     let mut table_tenancy: HashMap<String, TenancySource> = HashMap::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -470,18 +471,15 @@ fn analyze_tenancy(tables: &[TableInfo], tenant_column: &Option<String>) -> Tena
         // Try to find tenant context via FK chain
         match find_tenant_via_fk(table, &table_map, &tenant_col, &table_tenancy) {
             Some(source) => {
-                match &source {
-                    TenancySource::ViaForeignKey { chain, .. } => {
-                        let chain_desc: Vec<String> =
-                            chain.iter().map(|(t, c)| format!("{}.{}", t, c)).collect();
-                        warnings.push(format!(
-                            "Table '{}' has tenant context via FK chain: {} → {}",
-                            table.name,
-                            table.name,
-                            chain_desc.join(" → ")
-                        ));
-                    }
-                    _ => {}
+                if let TenancySource::ViaForeignKey { chain, .. } = &source {
+                    let chain_desc: Vec<String> =
+                        chain.iter().map(|(t, c)| format!("{}.{}", t, c)).collect();
+                    warnings.push(format!(
+                        "Table '{}' has tenant context via FK chain: {} → {}",
+                        table.name,
+                        table.name,
+                        chain_desc.join(" → ")
+                    ));
                 }
                 table_tenancy.insert(table.name.clone(), source);
             }
@@ -573,8 +571,7 @@ fn find_tenant_via_fk(
             for fk in &ref_table.foreign_keys {
                 if !visited.contains(&fk.references_table) {
                     let mut new_path = path.clone();
-                    new_path
-                        .push((fk.references_table.clone(), fk.references_column.clone()));
+                    new_path.push((fk.references_table.clone(), fk.references_column.clone()));
                     queue.push_back((fk.references_table.clone(), fk_column.clone(), new_path));
                 }
             }
@@ -640,13 +637,13 @@ fn is_likely_global_table(name: &str, table: &TableInfo) -> bool {
 /// This is an auto-generated file that captures the database structure.
 fn generate_schema_yaml(raw_schema: &JsonValue, tables: &[TableInfo]) -> String {
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     // Extract database info
     let db_version = raw_schema
         .get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    
+
     // Extract enums
     let enums_yaml = raw_schema
         .get("enums")
@@ -801,7 +798,7 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
         .unwrap_or_else(|| "organization_id".to_string());
 
     let mut table_entries = Vec::new();
-    
+
     // Sort tables for consistent output
     let mut sorted_tables: Vec<_> = analysis.table_tenancy.iter().collect();
     sorted_tables.sort_by_key(|(name, _)| name.as_str());
@@ -809,7 +806,7 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
     for (table_name, source) in sorted_tables {
         // Find the original table info for column details
         let table_info = tables.iter().find(|t| &t.name == table_name);
-        
+
         let entry = match source {
             TenancySource::Direct { column, .. } => {
                 let columns_yaml = generate_column_rules(table_info);
@@ -817,12 +814,12 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
                     r#"  {}:
     tenant: {}{}
 "#,
-                    table_name, 
-                    column,
-                    columns_yaml
+                    table_name, column, columns_yaml
                 )
             }
-            TenancySource::ViaForeignKey { fk_column, chain, .. } => {
+            TenancySource::ViaForeignKey {
+                fk_column, chain, ..
+            } => {
                 let ref_table = &chain[0].0;
                 let columns_yaml = generate_column_rules(table_info);
                 format!(
@@ -831,10 +828,7 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
       via: {}
       references: {}{}
 "#,
-                    table_name, 
-                    fk_column, 
-                    ref_table,
-                    columns_yaml
+                    table_name, fk_column, ref_table, columns_yaml
                 )
             }
             TenancySource::Global => {
@@ -843,8 +837,7 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
                     r#"  {}:
     global: true{}
 "#,
-                    table_name,
-                    columns_yaml
+                    table_name, columns_yaml
                 )
             }
             TenancySource::Unknown => {
@@ -859,9 +852,7 @@ fn generate_rules_yaml(analysis: &TenancyAnalysis, tables: &[TableInfo]) -> Stri
     #   references: <parent_table>
     # global: true         # If this is shared reference data{}
 "#,
-                    table_name,
-                    tenant_col,
-                    columns_yaml
+                    table_name, tenant_col, columns_yaml
                 )
             }
         };
@@ -1050,10 +1041,7 @@ members:
 
 /// Generate the cori.yaml configuration file content.
 /// Conforms to CoriDefinition.schema.json
-fn generate_config(
-    project: &str,
-) -> String {
-
+fn generate_config(project: &str) -> String {
     format!(
         r#"# =============================================================================
 # Cori Configuration
@@ -1275,10 +1263,27 @@ tables:
 /// Conforms to RoleDefinition.schema.json
 fn generate_support_role(tables: &[&TableInfo]) -> String {
     // Common customer-facing table patterns
-    let customer_tables = ["customers", "customer", "contacts", "contact", "clients", "client"];
-    let ticket_tables = ["tickets", "ticket", "issues", "issue", "support_tickets", "cases", "case"];
+    let customer_tables = [
+        "customers",
+        "customer",
+        "contacts",
+        "contact",
+        "clients",
+        "client",
+    ];
+    let ticket_tables = [
+        "tickets",
+        "ticket",
+        "issues",
+        "issue",
+        "support_tickets",
+        "cases",
+        "case",
+    ];
     let order_tables = ["orders", "order", "purchases", "transactions"];
-    let common_tables = ["products", "product", "services", "service", "notes", "comments"];
+    let common_tables = [
+        "products", "product", "services", "service", "notes", "comments",
+    ];
 
     let all_patterns: Vec<&str> = customer_tables
         .iter()
@@ -1393,7 +1398,10 @@ fn generate_readme(
         .table_tenancy
         .iter()
         .filter_map(|(name, source)| {
-            if let TenancySource::ViaForeignKey { fk_column, chain, .. } = source {
+            if let TenancySource::ViaForeignKey {
+                fk_column, chain, ..
+            } = source
+            {
                 let chain_desc: Vec<String> =
                     chain.iter().map(|(t, c)| format!("{}.{}", t, c)).collect();
                 Some((name.clone(), fk_column.clone(), chain_desc.join(" → ")))
@@ -1417,7 +1425,13 @@ fn generate_readme(
         rows.push_str("\n**Example:** When querying a table with FK-inherited tenancy:\n");
         rows.push_str("```sql\n");
         rows.push_str("-- Original query\n");
-        rows.push_str(&format!("SELECT * FROM {} WHERE status = 'active'\n", fk_tables.first().map(|(t, _, _)| t.as_str()).unwrap_or("child_table")));
+        rows.push_str(&format!(
+            "SELECT * FROM {} WHERE status = 'active'\n",
+            fk_tables
+                .first()
+                .map(|(t, _, _)| t.as_str())
+                .unwrap_or("child_table")
+        ));
         rows.push_str("\n-- Cori rewrites to (using JOIN for tenant isolation)\n");
         if let Some((table, fk_col, _)) = fk_tables.first() {
             let parent = tenancy_analysis

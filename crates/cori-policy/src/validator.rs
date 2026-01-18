@@ -91,12 +91,10 @@ impl<'a> ToolValidator<'a> {
         let perms = self.role_validator.get_table_permissions(table)?;
 
         // Validate constraints (creatable columns, restrict_to, required fields)
-        self.constraint_validator.validate_create(
-            table,
-            perms,
-            request.arguments,
-            |col| self.is_tenant_column(table, col),
-        )?;
+        self.constraint_validator
+            .validate_create(table, perms, request.arguments, |col| {
+                self.is_tenant_column(table, col)
+            })?;
 
         // Validate column values against rules (patterns, allowed_values)
         self.validate_column_values(request)?;
@@ -185,7 +183,10 @@ impl<'a> ToolValidator<'a> {
 
     /// Check if a CREATE operation requires approval.
     fn create_requires_approval(&self, request: &ValidationRequest) -> Option<Vec<String>> {
-        let perms = self.role_validator.get_table_permissions(request.table).ok()?;
+        let perms = self
+            .role_validator
+            .get_table_permissions(request.table)
+            .ok()?;
         let fields = self
             .constraint_validator
             .get_create_approval_fields(perms, request.arguments);
@@ -198,11 +199,16 @@ impl<'a> ToolValidator<'a> {
 
     /// Check if an UPDATE operation requires approval.
     fn update_requires_approval(&self, request: &ValidationRequest) -> Option<Vec<String>> {
-        let perms = self.role_validator.get_table_permissions(request.table).ok()?;
+        let perms = self
+            .role_validator
+            .get_table_permissions(request.table)
+            .ok()?;
         let pk_columns = request.pk_columns();
-        let fields = self
-            .constraint_validator
-            .get_update_approval_fields(perms, request.arguments, &pk_columns);
+        let fields = self.constraint_validator.get_update_approval_fields(
+            perms,
+            request.arguments,
+            &pk_columns,
+        );
         if fields.is_empty() {
             None
         } else {
@@ -212,7 +218,10 @@ impl<'a> ToolValidator<'a> {
 
     /// Check if a DELETE operation requires approval.
     fn delete_requires_approval(&self, request: &ValidationRequest) -> Option<Vec<String>> {
-        let perms = self.role_validator.get_table_permissions(request.table).ok()?;
+        let perms = self
+            .role_validator
+            .get_table_permissions(request.table)
+            .ok()?;
         if self.constraint_validator.delete_requires_approval(perms) {
             Some(vec![]) // Empty vec indicates table-level approval, not column-specific
         } else {
@@ -259,10 +268,7 @@ mod tests {
                             ..Default::default()
                         },
                     ),
-                    (
-                        "notes".to_string(),
-                        CreatableColumnConstraints::default(),
-                    ),
+                    ("notes".to_string(), CreatableColumnConstraints::default()),
                 ])),
                 updatable: UpdatableColumns::Map(HashMap::from([(
                     "status".to_string(),

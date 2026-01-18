@@ -5,7 +5,7 @@ use crate::error::BiscuitError;
 use crate::keys::KeyPair;
 use biscuit_auth::builder::AuthorizerBuilder;
 use biscuit_auth::macros::{check, fact};
-use biscuit_auth::{builder::BlockBuilder, Biscuit, PublicKey};
+use biscuit_auth::{Biscuit, PublicKey, builder::BlockBuilder};
 use chrono::{Duration, Utc};
 
 /// Builder for creating Biscuit tokens.
@@ -74,9 +74,9 @@ impl TokenBuilder {
             .build(self.keypair.inner())
             .map_err(|e| BiscuitError::TokenCreationFailed(e.to_string()))?;
 
-        Ok(biscuit
+        biscuit
             .to_base64()
-            .map_err(|e| BiscuitError::SerializationError(e.to_string()))?)
+            .map_err(|e| BiscuitError::SerializationError(e.to_string()))
     }
 
     /// Attenuate a role token with tenant and expiration.
@@ -125,9 +125,9 @@ impl TokenBuilder {
             .append(block)
             .map_err(|e| BiscuitError::AttenuationFailed(e.to_string()))?;
 
-        Ok(attenuated
+        attenuated
             .to_base64()
-            .map_err(|e| BiscuitError::SerializationError(e.to_string()))?)
+            .map_err(|e| BiscuitError::SerializationError(e.to_string()))
     }
 }
 
@@ -145,7 +145,7 @@ impl TokenVerifier {
 
     /// Verify a token and extract claims.
     pub fn verify(&self, token: &str) -> Result<VerifiedToken, BiscuitError> {
-        let biscuit = Biscuit::from_base64(token, self.public_key.clone())
+        let biscuit = Biscuit::from_base64(token, self.public_key)
             .map_err(|e| BiscuitError::TokenParseFailed(e.to_string()))?;
 
         // Create authorizer with policies using AuthorizerBuilder
@@ -225,9 +225,10 @@ impl TokenVerifier {
     ) -> Result<String, BiscuitError> {
         // Use the query method with a rule string
         let rule_str = format!("data($x) <- {}($x)", name);
-        let rule: biscuit_auth::builder::Rule = rule_str
-            .parse()
-            .map_err(|e: biscuit_auth::error::Token| BiscuitError::VerificationFailed(e.to_string()))?;
+        let rule: biscuit_auth::builder::Rule =
+            rule_str.parse().map_err(|e: biscuit_auth::error::Token| {
+                BiscuitError::VerificationFailed(e.to_string())
+            })?;
 
         let results: Vec<(String,)> = authorizer
             .query(rule)

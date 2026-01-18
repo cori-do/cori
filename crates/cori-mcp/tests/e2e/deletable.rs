@@ -6,8 +6,8 @@
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ApprovalRequirement, CreatableColumns, DeletableConstraints, DeletablePermission,
-    ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns, ApprovalConfig,
+    ApprovalConfig, ApprovalRequirement, CreatableColumns, DeletableConstraints,
+    DeletablePermission, ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -35,11 +35,26 @@ pub async fn test_delete_allowed(ctx: &TestContext) {
                 "priority".to_string(),
             ]),
             creatable: CreatableColumns::Map(HashMap::from([
-                ("customer_id".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
-                ("subject".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
-                ("status".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
-                ("priority".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
-                ("ticket_number".to_string(), cori_core::config::role_definition::CreatableColumnConstraints::default()),
+                (
+                    "customer_id".to_string(),
+                    cori_core::config::role_definition::CreatableColumnConstraints::default(),
+                ),
+                (
+                    "subject".to_string(),
+                    cori_core::config::role_definition::CreatableColumnConstraints::default(),
+                ),
+                (
+                    "status".to_string(),
+                    cori_core::config::role_definition::CreatableColumnConstraints::default(),
+                ),
+                (
+                    "priority".to_string(),
+                    cori_core::config::role_definition::CreatableColumnConstraints::default(),
+                ),
+                (
+                    "ticket_number".to_string(),
+                    cori_core::config::role_definition::CreatableColumnConstraints::default(),
+                ),
             ])),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::Allowed(true),
@@ -88,7 +103,9 @@ pub async fn test_delete_allowed(ctx: &TestContext) {
     assert_success(&create_result, "CREATE should succeed");
 
     let created = extract_json(&create_result).unwrap();
-    let ticket_id = created["data"]["ticket_id"].as_i64().expect("Should have ticket_id");
+    let ticket_id = created["data"]["ticket_id"]
+        .as_i64()
+        .expect("Should have ticket_id");
 
     // Delete the ticket
     let delete_tool = delete_tool("Ticket");
@@ -180,9 +197,9 @@ pub async fn test_delete_cross_tenant_blocked(ctx: &TestContext) {
     let result = executor
         .execute(
             &delete_tool,
-            json!({ "ticket_id": 4 }),  // ticket_id 4 belongs to tenant 2 (Globex)
+            json!({ "ticket_id": 4 }), // ticket_id 4 belongs to tenant 2 (Globex)
             &CallToolOptions::default(),
-            &create_context("1"),  // We're tenant 1 (Acme)
+            &create_context("1"), // We're tenant 1 (Acme)
         )
         .await;
 
@@ -213,10 +230,7 @@ pub async fn test_delete_requires_approval(_ctx: &TestContext) {
     tables.insert(
         "orders".to_string(),
         TablePermissions {
-            readable: ReadableConfig::List(vec![
-                "order_id".to_string(),
-                "customer_id".to_string(),
-            ]),
+            readable: ReadableConfig::List(vec!["order_id".to_string(), "customer_id".to_string()]),
             creatable: CreatableColumns::default(),
             updatable: UpdatableColumns::default(),
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
@@ -277,7 +291,13 @@ pub async fn test_delete_requires_approval_with_group(_ctx: &TestContext) {
     if let DeletablePermission::WithConstraints(constraints) = &perms.deletable {
         if let Some(ApprovalRequirement::Detailed(config)) = &constraints.requires_approval {
             assert_eq!(config.group, "managers");
-            assert!(config.message.as_ref().unwrap().contains("manager approval"));
+            assert!(
+                config
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .contains("manager approval")
+            );
         } else {
             panic!("Expected detailed approval requirement");
         }
@@ -316,10 +336,7 @@ pub async fn test_delete_soft_delete_flag(_ctx: &TestContext) {
 
     let perms = role.tables.get("orders").unwrap();
     assert!(perms.deletable.is_allowed(), "Delete should be allowed");
-    assert!(
-        perms.deletable.is_soft_delete(),
-        "Should be soft delete"
-    );
+    assert!(perms.deletable.is_soft_delete(), "Should be soft delete");
 
     println!("     ✓ Deletable with soft_delete flag configured");
 }
@@ -338,7 +355,9 @@ pub async fn test_delete_soft_delete_and_approval(_ctx: &TestContext) {
                 requires_approval: Some(ApprovalRequirement::Detailed(ApprovalConfig {
                     group: "security_team".to_string(),
                     notify_on_pending: true,
-                    message: Some("Sensitive record deletion requires security approval".to_string()),
+                    message: Some(
+                        "Sensitive record deletion requires security approval".to_string(),
+                    ),
                 })),
                 soft_delete: true,
             }),
@@ -373,7 +392,10 @@ pub async fn test_deletable_is_allowed_helper(_ctx: &TestContext) {
 
     // Boolean false
     let blocked = DeletablePermission::Allowed(false);
-    assert!(!blocked.is_allowed(), "Boolean(false) should not be allowed");
+    assert!(
+        !blocked.is_allowed(),
+        "Boolean(false) should not be allowed"
+    );
 
     // Config (always allowed when present)
     let config = DeletablePermission::WithConstraints(DeletableConstraints::default());
@@ -432,7 +454,10 @@ pub async fn test_deletable_is_soft_delete_helper(_ctx: &TestContext) {
 
     // Boolean is never soft delete
     let boolean = DeletablePermission::Allowed(true);
-    assert!(!boolean.is_soft_delete(), "Boolean should not be soft delete");
+    assert!(
+        !boolean.is_soft_delete(),
+        "Boolean should not be soft delete"
+    );
 
     // Config with soft_delete = false
     let config_hard = DeletablePermission::WithConstraints(DeletableConstraints {

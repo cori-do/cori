@@ -33,4 +33,3 @@ pub enum AuditError {
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
-

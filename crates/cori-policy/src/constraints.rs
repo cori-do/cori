@@ -52,13 +52,11 @@ impl ConstraintValidator {
                 }
 
                 // Check restrict_to constraint
-                if let Some(constraints) = perms.creatable.get_constraints(key) {
-                    if let Some(allowed) = &constraints.restrict_to {
-                        if !allowed.contains(value) {
+                if let Some(constraints) = perms.creatable.get_constraints(key)
+                    && let Some(allowed) = &constraints.restrict_to
+                        && !allowed.contains(value) {
                             return Err(ValidationError::value_not_allowed(key, value, allowed));
                         }
-                    }
-                }
             }
         }
 
@@ -121,11 +119,10 @@ impl ConstraintValidator {
                 }
 
                 // Check only_when constraint
-                if let Some(constraints) = perms.updatable.get_constraints(key) {
-                    if let Some(only_when) = &constraints.only_when {
+                if let Some(constraints) = perms.updatable.get_constraints(key)
+                    && let Some(only_when) = &constraints.only_when {
                         self.validate_only_when(key, value, only_when, current_row, arguments)?;
                     }
-                }
             }
         }
 
@@ -144,13 +141,11 @@ impl ConstraintValidator {
 
         if let Some(obj) = arguments.as_object() {
             for key in obj.keys() {
-                if let Some(constraints) = perms.creatable.get_constraints(key) {
-                    if let Some(ref approval) = constraints.requires_approval {
-                        if approval.is_required() {
+                if let Some(constraints) = perms.creatable.get_constraints(key)
+                    && let Some(ref approval) = constraints.requires_approval
+                        && approval.is_required() {
                             approval_fields.push(key.clone());
                         }
-                    }
-                }
             }
         }
 
@@ -174,13 +169,11 @@ impl ConstraintValidator {
                 if pk_columns.contains(&key.as_str()) {
                     continue;
                 }
-                if let Some(constraints) = perms.updatable.get_constraints(key) {
-                    if let Some(ref approval) = constraints.requires_approval {
-                        if approval.is_required() {
+                if let Some(constraints) = perms.updatable.get_constraints(key)
+                    && let Some(ref approval) = constraints.requires_approval
+                        && approval.is_required() {
                             approval_fields.push(key.clone());
                         }
-                    }
-                }
             }
         }
 
@@ -215,7 +208,13 @@ impl ConstraintValidator {
         let mut last_error = None;
 
         for conditions in condition_sets {
-            match self.validate_condition_set(column, new_value, conditions, current_row, all_new_values) {
+            match self.validate_condition_set(
+                column,
+                new_value,
+                conditions,
+                current_row,
+                all_new_values,
+            ) {
                 Ok(()) => {
                     any_matched = true;
                     break;
@@ -276,10 +275,7 @@ impl ConstraintValidator {
                             // Return error to fail this condition set (OR logic will try next set).
                             return Err(ValidationError::only_when_violation(
                                 column,
-                                &format!(
-                                    "new.{} referenced but not provided in update",
-                                    col
-                                ),
+                                &format!("new.{} referenced but not provided in update", col),
                             ));
                         }
                     }
@@ -340,46 +336,40 @@ impl ConstraintValidator {
         current_row: Option<&Value>,
     ) -> bool {
         // Handle equals
-        if let Some(expected) = &cmp.equals {
-            if value != expected {
+        if let Some(expected) = &cmp.equals
+            && value != expected {
                 return false;
             }
-        }
 
         // Handle not_equals
-        if let Some(not_expected) = &cmp.not_equals {
-            if value == not_expected {
+        if let Some(not_expected) = &cmp.not_equals
+            && value == not_expected {
                 return false;
             }
-        }
 
         // Handle not_null
-        if let Some(true) = cmp.not_null {
-            if value.is_null() {
+        if let Some(true) = cmp.not_null
+            && value.is_null() {
                 return false;
             }
-        }
 
         // Handle is_null
-        if let Some(true) = cmp.is_null {
-            if !value.is_null() {
+        if let Some(true) = cmp.is_null
+            && !value.is_null() {
                 return false;
             }
-        }
 
         // Handle in_values
-        if let Some(allowed) = &cmp.in_values {
-            if !allowed.contains(value) {
+        if let Some(allowed) = &cmp.in_values
+            && !allowed.contains(value) {
                 return false;
             }
-        }
 
         // Handle not_in
-        if let Some(disallowed) = &cmp.not_in {
-            if disallowed.contains(value) {
+        if let Some(disallowed) = &cmp.not_in
+            && disallowed.contains(value) {
                 return false;
             }
-        }
 
         // Handle numeric comparisons with column reference support
         if let Some(v) = value.as_f64() {
@@ -427,8 +417,8 @@ impl ConstraintValidator {
         }
 
         // Handle starts_with (for append-only pattern)
-        if let Some(ref prefix_or_ref) = cmp.starts_with {
-            if let Some(new_str) = value.as_str() {
+        if let Some(ref prefix_or_ref) = cmp.starts_with
+            && let Some(new_str) = value.as_str() {
                 // Check if prefix_or_ref is a column reference (old.column)
                 let prefix = if let Some(col) = prefix_or_ref.strip_prefix("old.") {
                     // Resolve from current_row
@@ -453,7 +443,6 @@ impl ConstraintValidator {
                     return false;
                 }
             }
-        }
 
         true
     }
@@ -470,7 +459,9 @@ impl ConstraintValidator {
             NumberOrColumnRef::Number(n) => Some(*n),
             NumberOrColumnRef::ColumnRef(col_ref) => {
                 // Parse old.column or new.column
-                let col = col_ref.strip_prefix("old.").or_else(|| col_ref.strip_prefix("new."))?;
+                let col = col_ref
+                    .strip_prefix("old.")
+                    .or_else(|| col_ref.strip_prefix("new."))?;
                 let row = current_row?;
                 row.get(col).and_then(|v| v.as_f64())
             }

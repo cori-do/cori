@@ -5,7 +5,7 @@
 //! `cori token inspect` - Inspect a token's contents, optionally verify with public key.
 
 use anyhow::Context;
-use cori_biscuit::{inspect_token_unverified, KeyPair, RoleClaims, TokenBuilder, TokenVerifier};
+use cori_biscuit::{KeyPair, RoleClaims, TokenBuilder, TokenVerifier, inspect_token_unverified};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,7 +56,7 @@ fn resolve_public_key(key: Option<String>) -> anyhow::Result<cori_biscuit::Publi
 /// Parse a duration string like "24h", "7d", "1h30m" into chrono::Duration.
 fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
     let s = s.trim().to_lowercase();
-    
+
     // Simple parsing for common formats
     if let Some(hours) = s.strip_suffix('h') {
         let h: i64 = hours.parse()?;
@@ -95,7 +95,7 @@ pub fn mint(
 
     // Build role claims
     let mut claims = RoleClaims::new(&role);
-    
+
     // Add tables (format: "table:col1,col2" or just "table")
     for table_spec in tables {
         let parts: Vec<&str> = table_spec.splitn(2, ':').collect();
@@ -123,7 +123,7 @@ pub fn mint(
     if let Some(output_path) = output {
         fs::write(&output_path, &final_token)?;
         println!("✔ Token written to: {}", output_path.display());
-        
+
         if tenant.is_some() {
             println!("  Type: Agent token (tenant-restricted)");
         } else {
@@ -181,7 +181,7 @@ pub fn attenuate(
 }
 
 /// Inspect a token, optionally verify with public key.
-/// 
+///
 /// Without --key: Shows unverified token contents (block count, facts, checks)
 /// With --key: Verifies signature and shows verified role/tenant information
 pub fn inspect(token: String, key: Option<String>) -> anyhow::Result<()> {
@@ -241,8 +241,14 @@ mod tests {
     fn test_parse_duration() {
         assert_eq!(parse_duration("24h").unwrap(), chrono::Duration::hours(24));
         assert_eq!(parse_duration("7d").unwrap(), chrono::Duration::days(7));
-        assert_eq!(parse_duration("30m").unwrap(), chrono::Duration::minutes(30));
-        assert_eq!(parse_duration("60s").unwrap(), chrono::Duration::seconds(60));
+        assert_eq!(
+            parse_duration("30m").unwrap(),
+            chrono::Duration::minutes(30)
+        );
+        assert_eq!(
+            parse_duration("60s").unwrap(),
+            chrono::Duration::seconds(60)
+        );
     }
 
     #[test]

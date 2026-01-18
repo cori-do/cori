@@ -25,11 +25,11 @@ impl KeyPair {
         let mut rng = rand::rng();
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes);
-        
+
         let private_key = PrivateKey::from_bytes(&bytes, Algorithm::Ed25519)
             .map_err(|e| BiscuitError::KeyGenerationFailed(e.to_string()))?;
         let inner = BiscuitKeyPair::from(&private_key);
-        
+
         Ok(Self { inner })
     }
 
@@ -125,7 +125,7 @@ mod tests {
     fn test_keypair_roundtrip() {
         let keypair1 = KeyPair::generate().unwrap();
         let hex = keypair1.private_key_hex();
-        
+
         let keypair2 = KeyPair::from_private_key_hex(&hex).unwrap();
         assert_eq!(keypair1.public_key_hex(), keypair2.public_key_hex());
     }
@@ -133,13 +133,13 @@ mod tests {
     #[test]
     fn test_keypair_file_save_load() {
         let keypair = KeyPair::generate().unwrap();
-        
+
         let mut priv_file = NamedTempFile::new().unwrap();
         let mut pub_file = NamedTempFile::new().unwrap();
-        
+
         writeln!(priv_file, "{}", keypair.private_key_hex()).unwrap();
         writeln!(pub_file, "{}", keypair.public_key_hex()).unwrap();
-        
+
         let loaded = KeyPair::load_from_file(priv_file.path()).unwrap();
         assert_eq!(keypair.public_key_hex(), loaded.public_key_hex());
     }

@@ -23,12 +23,18 @@ use cori_core::config::{
 /// Embedded JSON schemas for configuration validation.
 /// These are compiled into the binary so validation works without external files.
 mod embedded_schemas {
-    pub const CORI_DEFINITION: &str = include_str!("../../../../schemas/CoriDefinition.schema.json");
-    pub const SCHEMA_DEFINITION: &str = include_str!("../../../../schemas/SchemaDefinition.schema.json");
-    pub const RULES_DEFINITION: &str = include_str!("../../../../schemas/RulesDefinition.schema.json");
-    pub const TYPES_DEFINITION: &str = include_str!("../../../../schemas/TypesDefinition.schema.json");
-    pub const ROLE_DEFINITION: &str = include_str!("../../../../schemas/RoleDefinition.schema.json");
-    pub const GROUP_DEFINITION: &str = include_str!("../../../../schemas/GroupDefinition.schema.json");
+    pub const CORI_DEFINITION: &str =
+        include_str!("../../../../schemas/CoriDefinition.schema.json");
+    pub const SCHEMA_DEFINITION: &str =
+        include_str!("../../../../schemas/SchemaDefinition.schema.json");
+    pub const RULES_DEFINITION: &str =
+        include_str!("../../../../schemas/RulesDefinition.schema.json");
+    pub const TYPES_DEFINITION: &str =
+        include_str!("../../../../schemas/TypesDefinition.schema.json");
+    pub const ROLE_DEFINITION: &str =
+        include_str!("../../../../schemas/RoleDefinition.schema.json");
+    pub const GROUP_DEFINITION: &str =
+        include_str!("../../../../schemas/GroupDefinition.schema.json");
 }
 
 // ============================================================================
@@ -273,8 +279,8 @@ pub async fn run_quiet(config_path: &Path) -> Result<CheckResults> {
     results.extend(validate_json_schemas(&base_dir, config_path)?);
 
     // 2. Load configuration for cross-file checks
-    let config = CoriConfig::load_with_context(config_path)
-        .context("Failed to load configuration")?;
+    let config =
+        CoriConfig::load_with_context(config_path).context("Failed to load configuration")?;
 
     // 3. Table name consistency (roles/rules vs schema)
     results.extend(check_table_names(&config, &base_dir)?);
@@ -312,14 +318,14 @@ pub async fn run_pre_hook(config_path: &Path) -> Result<()> {
 
     if results.has_errors() {
         eprintln!("\n❌ Configuration check failed. Run `cori check` for details.\n");
-        
+
         // Print errors only (no warnings in pre-hook)
         let errors: Vec<_> = results
             .findings
             .iter()
             .filter(|f| f.severity == Severity::Error)
             .collect();
-        
+
         for finding in &errors {
             let location = match (&finding.file, &finding.location) {
                 (Some(f), Some(l)) => format!(" [{}:{}]", f.display(), l),
@@ -327,9 +333,12 @@ pub async fn run_pre_hook(config_path: &Path) -> Result<()> {
                 (None, Some(l)) => format!(" [{}]", l),
                 (None, None) => String::new(),
             };
-            eprintln!("  ✗ [{}]{}: {}", finding.category, location, finding.message);
+            eprintln!(
+                "  ✗ [{}]{}: {}",
+                finding.category, location, finding.message
+            );
         }
-        
+
         eprintln!();
         anyhow::bail!(
             "Configuration has {} error(s). Fix them before running this command.",
@@ -357,8 +366,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
     results.extend(validate_json_schemas(&base_dir, config_path)?);
 
     // 2. Load configuration for cross-file checks
-    let config = CoriConfig::load_with_context(config_path)
-        .context("Failed to load configuration")?;
+    let config =
+        CoriConfig::load_with_context(config_path).context("Failed to load configuration")?;
 
     // 3. Table name consistency (roles/rules vs schema)
     println!("  📊 Checking table name consistency...");
@@ -423,39 +432,36 @@ fn validate_json_schemas(base_dir: &Path, config_path: &Path) -> Result<Vec<Chec
 
     // Validate schema/schema.yaml
     let schema_yaml = base_dir.join("schema").join("schema.yaml");
-    if schema_yaml.exists() {
-        if let Some(schema) = schemas.get("SchemaDefinition") {
+    if schema_yaml.exists()
+        && let Some(schema) = schemas.get("SchemaDefinition") {
             findings.extend(validate_yaml_against_schema(
                 &schema_yaml,
                 schema,
                 "schema/schema.yaml",
             )?);
         }
-    }
 
     // Validate schema/rules.yaml
     let rules_yaml = base_dir.join("schema").join("rules.yaml");
-    if rules_yaml.exists() {
-        if let Some(schema) = schemas.get("RulesDefinition") {
+    if rules_yaml.exists()
+        && let Some(schema) = schemas.get("RulesDefinition") {
             findings.extend(validate_yaml_against_schema(
                 &rules_yaml,
                 schema,
                 "schema/rules.yaml",
             )?);
         }
-    }
 
     // Validate schema/types.yaml
     let types_yaml = base_dir.join("schema").join("types.yaml");
-    if types_yaml.exists() {
-        if let Some(schema) = schemas.get("TypesDefinition") {
+    if types_yaml.exists()
+        && let Some(schema) = schemas.get("TypesDefinition") {
             findings.extend(validate_yaml_against_schema(
                 &types_yaml,
                 schema,
                 "schema/types.yaml",
             )?);
         }
-    }
 
     // Validate roles/*.yaml
     if let Some(schema) = schemas.get("RoleDefinition") {
@@ -464,7 +470,11 @@ fn validate_json_schemas(base_dir: &Path, config_path: &Path) -> Result<Vec<Chec
             for entry in fs::read_dir(&roles_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                if path
+                    .extension()
+                    .map(|e| e == "yaml" || e == "yml")
+                    .unwrap_or(false)
+                {
                     let rel_path = format!("roles/{}", path.file_name().unwrap().to_string_lossy());
                     findings.extend(validate_yaml_against_schema(&path, schema, &rel_path)?);
                 }
@@ -479,8 +489,13 @@ fn validate_json_schemas(base_dir: &Path, config_path: &Path) -> Result<Vec<Chec
             for entry in fs::read_dir(&groups_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-                    let rel_path = format!("groups/{}", path.file_name().unwrap().to_string_lossy());
+                if path
+                    .extension()
+                    .map(|e| e == "yaml" || e == "yml")
+                    .unwrap_or(false)
+                {
+                    let rel_path =
+                        format!("groups/{}", path.file_name().unwrap().to_string_lossy());
                     findings.extend(validate_yaml_against_schema(&path, schema, &rel_path)?);
                 }
             }
@@ -754,8 +769,8 @@ fn check_column_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Check
                 }
 
                 // Check soft_delete column exists
-                if let Some(soft_delete) = &table_rules.soft_delete {
-                    if !schema_columns.contains(soft_delete.column.as_str()) {
+                if let Some(soft_delete) = &table_rules.soft_delete
+                    && !schema_columns.contains(soft_delete.column.as_str()) {
                         findings.push(
                             CheckFinding::error(
                                 "column-names",
@@ -768,7 +783,6 @@ fn check_column_names(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Check
                             .with_location(format!("tables.{}.soft_delete.column", table_name)),
                         );
                     }
-                }
             }
         }
     }
@@ -788,14 +802,12 @@ fn check_readable_config(
     let cols = match readable_config {
         cori_core::config::ReadableConfig::All(_) => return, // All columns, no check needed
         cori_core::config::ReadableConfig::List(cols) => cols,
-        cori_core::config::ReadableConfig::Config(cfg) => {
-            match &cfg.columns {
-                cori_core::config::ColumnList::All(_) => return,
-                cori_core::config::ColumnList::List(cols) => cols,
-            }
-        }
+        cori_core::config::ReadableConfig::Config(cfg) => match &cfg.columns {
+            cori_core::config::ColumnList::All(_) => return,
+            cori_core::config::ColumnList::List(cols) => cols,
+        },
     };
-    
+
     for col in cols {
         if !schema_columns.contains(col.as_str()) {
             findings.push(
@@ -901,7 +913,10 @@ fn check_approval_groups(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
                             &config.groups,
                             &role.approvals,
                             role_name,
-                            &format!("tables.{}.creatable.{}.requires_approval", table_name, col_name),
+                            &format!(
+                                "tables.{}.creatable.{}.requires_approval",
+                                table_name, col_name
+                            ),
                             &mut findings,
                         );
                     }
@@ -918,7 +933,10 @@ fn check_approval_groups(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
                             &config.groups,
                             &role.approvals,
                             role_name,
-                            &format!("tables.{}.updatable.{}.requires_approval", table_name, col_name),
+                            &format!(
+                                "tables.{}.updatable.{}.requires_approval",
+                                table_name, col_name
+                            ),
                             &mut findings,
                         );
                     }
@@ -926,8 +944,8 @@ fn check_approval_groups(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
             }
 
             // Check deletable
-            if let DeletablePermission::WithConstraints(opts) = &perms.deletable {
-                if let Some(req) = &opts.requires_approval {
+            if let DeletablePermission::WithConstraints(opts) = &perms.deletable
+                && let Some(req) = &opts.requires_approval {
                     check_approval_requirement(
                         req,
                         &defined_groups,
@@ -938,7 +956,6 @@ fn check_approval_groups(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
                         &mut findings,
                     );
                 }
-            }
         }
     }
 
@@ -1029,7 +1046,14 @@ fn check_approval_requirement(
             // No approval needed
         }
         ApprovalRequirement::Detailed(config) => {
-            check_approval_config(config, defined_groups, groups, role_name, location, findings);
+            check_approval_config(
+                config,
+                defined_groups,
+                groups,
+                role_name,
+                location,
+                findings,
+            );
         }
     }
 }
@@ -1038,7 +1062,7 @@ fn is_valid_email(s: &str) -> bool {
     // Simple email validation
     let at_pos = s.find('@');
     let dot_pos = s.rfind('.');
-    
+
     match (at_pos, dot_pos) {
         (Some(at), Some(dot)) => at > 0 && dot > at + 1 && dot < s.len() - 1,
         _ => false,
@@ -1071,8 +1095,8 @@ fn check_soft_delete(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckF
     // Check roles
     for (role_name, role) in &config.roles {
         for (table_name, perms) in &role.tables {
-            if let DeletablePermission::WithConstraints(opts) = &perms.deletable {
-                if opts.soft_delete {
+            if let DeletablePermission::WithConstraints(opts) = &perms.deletable
+                && opts.soft_delete {
                     // Role specifies soft_delete: true
                     if !tables_with_soft_delete.contains_key(table_name.as_str()) {
                         findings.push(
@@ -1088,7 +1112,6 @@ fn check_soft_delete(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<CheckF
                         );
                     }
                 }
-            }
 
             // Check if deletion is allowed but soft_delete is configured in rules
             let deletion_allowed = match &perms.deletable {
@@ -1139,8 +1162,8 @@ fn check_type_references(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
     // Check type references in rules
     for (table_name, table_rules) in &rules.tables {
         for (col_name, col_rules) in &table_rules.columns {
-            if let Some(type_ref) = &col_rules.type_ref {
-                if !defined_types.contains(type_ref.as_str()) {
+            if let Some(type_ref) = &col_rules.type_ref
+                && !defined_types.contains(type_ref.as_str()) {
                     findings.push(
                         CheckFinding::error(
                             "type-references",
@@ -1153,7 +1176,6 @@ fn check_type_references(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
                         .with_location(format!("tables.{}.columns.{}.type", table_name, col_name)),
                     );
                 }
-            }
         }
     }
 

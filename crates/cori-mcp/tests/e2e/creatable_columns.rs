@@ -12,8 +12,8 @@
 
 use super::common::*;
 use cori_core::config::role_definition::{
-    ApprovalRequirement, CreatableColumnConstraints, CreatableColumns,
-    DeletablePermission, ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns,
+    ApprovalRequirement, CreatableColumnConstraints, CreatableColumns, DeletablePermission,
+    ReadableConfig, RoleDefinition, TablePermissions, UpdatableColumns,
 };
 use cori_mcp::protocol::CallToolOptions;
 use serde_json::json;
@@ -114,14 +114,13 @@ pub async fn test_create_with_default_value(ctx: &TestContext) {
 
     // Verify default was applied
     let data = extract_json(&result);
-    if let Some(data) = data {
-        if data.get("is_internal").is_some() {
+    if let Some(data) = data
+        && data.get("is_internal").is_some() {
             assert_eq!(
                 data["is_internal"], false,
                 "is_internal should default to false"
             );
         }
-    }
 
     println!("     ✓ Default value correctly applied on create");
 }
@@ -161,7 +160,13 @@ pub async fn test_create_with_restrict_to_valid_value(ctx: &TestContext) {
             "ticket_number".to_string(),
             CreatableColumnConstraints {
                 // Auto-generate ticket number for tests
-                default: Some(json!(format!("TKT-TEST-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()))),
+                default: Some(json!(format!(
+                    "TKT-TEST-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                ))),
                 ..Default::default()
             },
         ),
@@ -206,7 +211,10 @@ pub async fn test_create_with_restrict_to_valid_value(ctx: &TestContext) {
         )
         .await;
 
-    assert_success(&result, "CREATE with valid restrict_to value should succeed");
+    assert_success(
+        &result,
+        "CREATE with valid restrict_to value should succeed",
+    );
 
     println!("     ✓ Create with valid restrict_to value succeeds");
 }
@@ -240,7 +248,13 @@ pub async fn test_create_with_restrict_to_invalid_value(ctx: &TestContext) {
             "ticket_number".to_string(),
             CreatableColumnConstraints {
                 // Auto-generate ticket number for tests
-                default: Some(json!(format!("TKT-TEST-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()))),
+                default: Some(json!(format!(
+                    "TKT-TEST-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                ))),
                 ..Default::default()
             },
         ),
@@ -322,7 +336,13 @@ pub async fn test_create_with_requires_approval(ctx: &TestContext) {
             "ticket_number".to_string(),
             CreatableColumnConstraints {
                 // Auto-generate ticket number for tests
-                default: Some(json!(format!("TKT-TEST-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()))),
+                default: Some(json!(format!(
+                    "TKT-TEST-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                ))),
                 ..Default::default()
             },
         ),
@@ -498,7 +518,10 @@ pub async fn test_get_creatable_constraints_helper(_ctx: &TestContext) {
 
     // Get constraints for customer_id
     let constraints = role.get_creatable_constraints("notes", "customer_id");
-    assert!(constraints.is_some(), "Should get constraints for customer_id");
+    assert!(
+        constraints.is_some(),
+        "Should get constraints for customer_id"
+    );
     assert!(
         constraints.unwrap().required,
         "customer_id should be required"
@@ -506,7 +529,10 @@ pub async fn test_get_creatable_constraints_helper(_ctx: &TestContext) {
 
     // Get constraints for is_internal
     let constraints = role.get_creatable_constraints("notes", "is_internal");
-    assert!(constraints.is_some(), "Should get constraints for is_internal");
+    assert!(
+        constraints.is_some(),
+        "Should get constraints for is_internal"
+    );
     assert!(
         constraints.unwrap().default.is_some(),
         "is_internal should have default"
@@ -514,7 +540,10 @@ pub async fn test_get_creatable_constraints_helper(_ctx: &TestContext) {
 
     // Non-existent column
     let constraints = role.get_creatable_constraints("notes", "nonexistent");
-    assert!(constraints.is_none(), "Non-existent column should return None");
+    assert!(
+        constraints.is_none(),
+        "Non-existent column should return None"
+    );
 
     println!("     ✓ get_creatable_constraints helper works correctly");
 }
@@ -526,9 +555,15 @@ pub async fn test_creatable_column_names_helper(_ctx: &TestContext) {
     let notes_perms = role.tables.get("notes").unwrap();
 
     let col_names = notes_perms.creatable.column_names();
-    assert!(col_names.contains(&"customer_id"), "Should contain customer_id");
+    assert!(
+        col_names.contains(&"customer_id"),
+        "Should contain customer_id"
+    );
     assert!(col_names.contains(&"content"), "Should contain content");
-    assert!(col_names.contains(&"is_internal"), "Should contain is_internal");
+    assert!(
+        col_names.contains(&"is_internal"),
+        "Should contain is_internal"
+    );
 
     println!("     ✓ CreatableColumns column_names helper works correctly");
 }
@@ -595,7 +630,10 @@ pub async fn test_create_dry_run(ctx: &TestContext) {
     assert!(result.is_dry_run, "Should be marked as dry run");
 
     let data = extract_json(&result).expect("Should have JSON response");
-    assert!(data["dryRun"].as_bool().unwrap_or(false), "Should indicate dry run");
+    assert!(
+        data["dryRun"].as_bool().unwrap_or(false),
+        "Should indicate dry run"
+    );
 
     println!("     ✓ CREATE dry run works correctly");
 }

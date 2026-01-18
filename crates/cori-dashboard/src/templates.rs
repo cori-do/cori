@@ -215,12 +215,16 @@ pub fn stats_card(title: &str, value: &str, icon: &str, color: &str) -> String {
 pub fn button(text: &str, variant: &str, attrs: &str) -> String {
     let (bg, hover, text_color) = match variant {
         "primary" => ("bg-primary-600", "hover:bg-primary-700", "text-white"),
-        "secondary" => ("bg-gray-200 dark:bg-gray-700", "hover:bg-gray-300 dark:hover:bg-gray-600", "text-gray-700 dark:text-gray-200"),
+        "secondary" => (
+            "bg-gray-200 dark:bg-gray-700",
+            "hover:bg-gray-300 dark:hover:bg-gray-600",
+            "text-gray-700 dark:text-gray-200",
+        ),
         "danger" => ("bg-red-600", "hover:bg-red-700", "text-white"),
         "success" => ("bg-green-600", "hover:bg-green-700", "text-white"),
         _ => ("bg-gray-200", "hover:bg-gray-300", "text-gray-700"),
     };
-    
+
     format!(
         r##"<button class="{bg} {hover} {text_color} px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50" {attrs}>{text}</button>"##
     )
@@ -249,7 +253,7 @@ pub fn select(name: &str, label: &str, options: &[(String, String, bool)]) -> St
             }
         })
         .collect();
-    
+
     format!(
         r##"<div class="space-y-1">
             <label for="{name}" class="block text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>
@@ -274,7 +278,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
         .iter()
         .map(|h| format!(r#"<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">{h}</th>"#))
         .collect();
-    
+
     let rows_html: String = rows
         .iter()
         .map(|row| {
@@ -285,7 +289,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
             format!(r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">{cells}</tr>"#)
         })
         .collect();
-    
+
     format!(
         r##"<div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
@@ -301,13 +305,18 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 /// Empty state component.
-pub fn empty_state(icon: &str, title: &str, description: &str, action: Option<(&str, &str)>) -> String {
+pub fn empty_state(
+    icon: &str,
+    title: &str,
+    description: &str,
+    action: Option<(&str, &str)>,
+) -> String {
     let action_html = action.map_or(String::new(), |(text, href)| {
         format!(r##"<a href="{href}" class="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-medium transition-colors">
             <i class="fas fa-plus"></i> {text}
         </a>"##)
     });
-    
+
     format!(
         r##"<div class="text-center py-12">
             <i class="fas fa-{icon} text-4xl text-gray-400 dark:text-gray-600 mb-4"></i>
@@ -364,7 +373,7 @@ pub fn tabs(id: &str, tabs: &[(&str, &str, &str)]) -> String {
             )
         })
         .collect();
-    
+
     let tab_contents: String = tabs
         .iter()
         .map(|(key, _, content)| {
@@ -375,9 +384,9 @@ pub fn tabs(id: &str, tabs: &[(&str, &str, &str)]) -> String {
             )
         })
         .collect();
-    
+
     let first_key = tabs.first().map(|(k, _, _)| *k).unwrap_or("default");
-    
+
     format!(
         r##"<div x-data="{{ activeTab: '{first_key}' }}" id="{id}">
             <div class="border-b border-gray-200 dark:border-gray-700 mb-4">

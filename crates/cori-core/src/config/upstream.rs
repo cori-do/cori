@@ -154,11 +154,10 @@ impl UpstreamConfig {
     /// 4. Individual fields
     pub fn connection_string(&self) -> String {
         // Method 1: Environment variable with connection URL
-        if let Some(env_var) = &self.database_url_env {
-            if let Ok(url) = std::env::var(env_var) {
+        if let Some(env_var) = &self.database_url_env
+            && let Ok(url) = std::env::var(env_var) {
                 return url;
             }
-        }
 
         // Method 2: Direct URL
         if let Some(url) = &self.database_url {
@@ -182,19 +181,17 @@ impl UpstreamConfig {
     /// Get the password, checking password_env first.
     fn get_password(&self) -> Option<String> {
         // Try password_env first
-        if let Some(env_var) = &self.password_env {
-            if let Ok(password) = std::env::var(env_var) {
+        if let Some(env_var) = &self.password_env
+            && let Ok(password) = std::env::var(env_var) {
                 return Some(password);
             }
-        }
         // Fall back to direct password
         self.password.clone()
     }
 
     /// Check if this configuration uses environment variables.
     pub fn uses_env_credentials(&self) -> bool {
-        self.database_url_env.is_some()
-            || self.password_env.is_some()
+        self.database_url_env.is_some() || self.password_env.is_some()
     }
 
     /// Get the configured SSL mode.
@@ -259,7 +256,9 @@ mod tests {
     #[test]
     fn test_connection_string_direct_url() {
         let config = UpstreamConfig {
-            database_url: Some("postgresql://admin:secret@db.example.com:5432/production".to_string()),
+            database_url: Some(
+                "postgresql://admin:secret@db.example.com:5432/production".to_string(),
+            ),
             ..Default::default()
         };
         assert_eq!(

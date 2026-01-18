@@ -271,7 +271,6 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ===== Phase 1: Core Command Handlers =====
-
         Command::Keys { cmd } => match cmd {
             KeysCommand::Generate { output } => {
                 commands::keys::generate(output)?;
@@ -334,11 +333,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 commands::tools::list(config, role, token, verbose)?;
             }
-            ToolsCommand::Describe {
-                config,
-                tool,
-                role,
-            } => {
+            ToolsCommand::Describe { config, tool, role } => {
                 commands::tools::describe(config, tool, role)?;
             }
         },
@@ -386,11 +381,10 @@ struct DbConfig {
 /// Build database URL from upstream config.
 fn build_database_url(upstream: &UpstreamConfig) -> anyhow::Result<String> {
     // First check for database_url_env
-    if let Some(env_var) = &upstream.database_url_env {
-        if let Ok(url) = env::var(env_var) {
+    if let Some(env_var) = &upstream.database_url_env
+        && let Ok(url) = env::var(env_var) {
             return Ok(url);
         }
-    }
 
     // Check for direct database_url
     if let Some(url) = &upstream.database_url {
@@ -405,8 +399,9 @@ fn build_database_url(upstream: &UpstreamConfig) -> anyhow::Result<String> {
     // Build from individual components
     let host = upstream.host.as_deref().unwrap_or("localhost");
     let port = upstream.port;
-    let database = upstream.database.as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var"))?;
+    let database = upstream.database.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Database name required in upstream config or DATABASE_URL env var")
+    })?;
     let username = upstream.username.as_deref().unwrap_or("postgres");
     let password = upstream.password.as_deref().unwrap_or("");
 
@@ -434,13 +429,13 @@ async fn run_db_sync(config_path: &Path) -> anyhow::Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let schema_dir = config_dir.join("schema");
-    
+
     fs::create_dir_all(&schema_dir)?;
     let schema_path = schema_dir.join("schema.yaml");
-    
+
     // Introspect database schema
     let snapshot = cori_adapter_pg::introspect::introspect_schema_json(&db_url).await?;
-    
+
     // Convert to YAML format
     let yaml = serde_yaml::to_string(&snapshot)?;
     fs::write(&schema_path, yaml)?;

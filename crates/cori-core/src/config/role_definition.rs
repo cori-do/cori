@@ -169,23 +169,20 @@ impl RoleDefinition {
     pub fn table_requires_approval(&self, table: &str) -> bool {
         if let Some(perms) = self.tables.get(table) {
             // Check creatable columns
-            if let Some(map) = perms.creatable.as_map() {
-                if map.values().any(|c| c.requires_approval.is_some()) {
+            if let Some(map) = perms.creatable.as_map()
+                && map.values().any(|c| c.requires_approval.is_some()) {
                     return true;
                 }
-            }
             // Check updatable columns
-            if let Some(map) = perms.updatable.as_map() {
-                if map.values().any(|c| c.requires_approval.is_some()) {
+            if let Some(map) = perms.updatable.as_map()
+                && map.values().any(|c| c.requires_approval.is_some()) {
                     return true;
                 }
-            }
             // Check deletable
-            if let DeletablePermission::WithConstraints(opts) = &perms.deletable {
-                if opts.requires_approval.is_some() {
+            if let DeletablePermission::WithConstraints(opts) = &perms.deletable
+                && opts.requires_approval.is_some() {
                     return true;
                 }
-            }
         }
         false
     }
@@ -592,13 +589,11 @@ impl OnlyWhen {
     /// Check if this is a simple restriction on new value (new.<col>: [values]).
     pub fn get_new_value_restriction(&self, column: &str) -> Option<&Vec<serde_json::Value>> {
         let key = format!("new.{}", column);
-        if let OnlyWhen::Single(conditions) = self {
-            if conditions.len() == 1 {
-                if let Some(ColumnCondition::In(values)) = conditions.get(&key) {
+        if let OnlyWhen::Single(conditions) = self
+            && conditions.len() == 1
+                && let Some(ColumnCondition::In(values)) = conditions.get(&key) {
                     return Some(values);
                 }
-            }
-        }
         None
     }
 
@@ -747,9 +742,10 @@ impl DeletablePermission {
     pub fn requires_approval(&self) -> bool {
         match self {
             DeletablePermission::Allowed(_) => false,
-            DeletablePermission::WithConstraints(c) => {
-                c.requires_approval.as_ref().map_or(false, |r| r.is_required())
-            }
+            DeletablePermission::WithConstraints(c) => c
+                .requires_approval
+                .as_ref()
+                .is_some_and(|r| r.is_required()),
         }
     }
 
@@ -872,7 +868,9 @@ tables:
         assert!(!role.can_delete("tickets"));
 
         // Check constraints
-        let subject_constraints = role.get_creatable_constraints("tickets", "subject").unwrap();
+        let subject_constraints = role
+            .get_creatable_constraints("tickets", "subject")
+            .unwrap();
         assert!(subject_constraints.required);
 
         let status_constraints = role.get_updatable_constraints("tickets", "status").unwrap();
@@ -896,10 +894,16 @@ tables:
         assert!(role.can_create_column("users", "any_column"));
         assert!(role.can_update_column("users", "any_column"));
         assert!(role.can_delete("users"));
-        
+
         // Also check the higher-level can_create/can_update methods used by tool generator
-        assert!(role.can_create("users"), "can_create should be true for creatable: '*'");
-        assert!(role.can_update("users"), "can_update should be true for updatable: '*'");
+        assert!(
+            role.can_create("users"),
+            "can_create should be true for creatable: '*'"
+        );
+        assert!(
+            role.can_update("users"),
+            "can_update should be true for updatable: '*'"
+        );
     }
 
     #[test]
@@ -940,7 +944,7 @@ tables:
         let role = RoleDefinition::from_yaml(yaml).unwrap();
         let constraints = role.get_updatable_constraints("orders", "status").unwrap();
         assert!(constraints.has_conditions());
-        
+
         if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
             assert!(conditions.contains_key("old.status"));
             assert!(conditions.contains_key("old.shipping_address"));
@@ -968,7 +972,7 @@ tables:
 
         let role = RoleDefinition::from_yaml(yaml).unwrap();
         let constraints = role.get_updatable_constraints("tickets", "status").unwrap();
-        
+
         if let Some(OnlyWhen::Multiple(sets)) = &constraints.only_when {
             assert_eq!(sets.len(), 2);
             assert!(sets[0].contains_key("old.status"));
@@ -993,9 +997,11 @@ tables:
 "#;
 
         let role = RoleDefinition::from_yaml(yaml).unwrap();
-        let constraints = role.get_updatable_constraints("inventory", "quantity").unwrap();
+        let constraints = role
+            .get_updatable_constraints("inventory", "quantity")
+            .unwrap();
         assert!(constraints.has_conditions());
-        
+
         if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
             if let Some(ColumnCondition::Comparison(cmp)) = conditions.get("new.quantity") {
                 assert!(cmp.greater_than.is_some());
@@ -1026,7 +1032,7 @@ tables:
 
         let role = RoleDefinition::from_yaml(yaml).unwrap();
         let constraints = role.get_updatable_constraints("tickets", "notes").unwrap();
-        
+
         if let Some(OnlyWhen::Single(conditions)) = &constraints.only_when {
             if let Some(ColumnCondition::Comparison(cmp)) = conditions.get("new.notes") {
                 assert_eq!(cmp.starts_with.as_deref(), Some("old.notes"));

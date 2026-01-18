@@ -53,4 +53,3 @@ impl IntoResponse for DashboardError {
         (status, self.to_string()).into_response()
     }
 }
-

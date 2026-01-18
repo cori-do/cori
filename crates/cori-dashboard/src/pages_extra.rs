@@ -2,8 +2,8 @@
 
 use crate::templates::{badge, empty_state, input, layout, select, tabs};
 use cori_audit::{AuditEvent, AuditEventType};
-use cori_core::config::role_definition::RoleDefinition;
 use cori_core::CoriConfig;
+use cori_core::config::role_definition::RoleDefinition;
 use cori_mcp::{ApprovalRequest, ApprovalStatus};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,11 +28,19 @@ pub struct PaginationInfo {
 // =============================================================================
 
 pub fn tokens_page(roles: &HashMap<String, RoleDefinition>, selected_role: Option<&str>) -> String {
-    let role_options: Vec<(String, String, bool)> = std::iter::once(("".to_string(), "Select a role...".to_string(), selected_role.is_none()))
-        .chain(roles.keys().map(|name| {
-            (name.clone(), name.clone(), selected_role == Some(name.as_str()))
-        }))
-        .collect();
+    let role_options: Vec<(String, String, bool)> = std::iter::once((
+        "".to_string(),
+        "Select a role...".to_string(),
+        selected_role.is_none(),
+    ))
+    .chain(roles.keys().map(|name| {
+        (
+            name.clone(),
+            name.clone(),
+            selected_role == Some(name.as_str()),
+        )
+    }))
+    .collect();
 
     let content = format!(
         r##"<div class="mb-6">
@@ -43,11 +51,14 @@ pub fn tokens_page(roles: &HashMap<String, RoleDefinition>, selected_role: Optio
         </div>
         
         {tabs}"##,
-        tabs = tabs("token-tabs", &[
-            ("mint", "Mint Token", &mint_token_form(&role_options)),
-            ("attenuate", "Attenuate Token", &attenuate_token_form()),
-            ("inspect", "Inspect Token", &inspect_token_form()),
-        ]),
+        tabs = tabs(
+            "token-tabs",
+            &[
+                ("mint", "Mint Token", &mint_token_form(&role_options)),
+                ("attenuate", "Attenuate Token", &attenuate_token_form()),
+                ("inspect", "Inspect Token", &inspect_token_form()),
+            ]
+        ),
     );
 
     layout("Tokens", &content)
@@ -93,7 +104,13 @@ fn mint_token_form(role_options: &[(String, String, bool)]) -> String {
         role_select = select("role", "Role", role_options),
         role_select_2 = select("role", "Role", role_options),
         tenant_input = input("tenant", "Tenant ID", "text", "", "e.g., acme_corp"),
-        expires_input = input("expires_in_hours", "Expires In (hours)", "number", "24", "24"),
+        expires_input = input(
+            "expires_in_hours",
+            "Expires In (hours)",
+            "number",
+            "24",
+            "24"
+        ),
     )
 }
 
@@ -125,13 +142,18 @@ fn attenuate_token_form() -> String {
         
         <div id="token-result" class="mt-6"></div>"##,
         tenant_input = input("tenant", "Tenant ID", "text", "", "e.g., client_a"),
-        expires_input = input("expires_in_hours", "Expires In (hours)", "number", "24", "24"),
+        expires_input = input(
+            "expires_in_hours",
+            "Expires In (hours)",
+            "number",
+            "24",
+            "24"
+        ),
     )
 }
 
 fn inspect_token_form() -> String {
-    format!(
-        r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+    r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Inspect Token</h3>
             <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
                 View the claims and metadata of a Biscuit token.
@@ -150,12 +172,17 @@ fn inspect_token_form() -> String {
             </form>
         </div>
         
-        <div id="inspect-result" class="mt-6"></div>"##
-    )
+        <div id="inspect-result" class="mt-6"></div>"##.to_string()
 }
 
 /// Token result HTML fragment.
-pub fn token_result_fragment(token: &str, token_type: &str, role: Option<&str>, tenant: Option<&str>, expires_at: Option<&str>) -> String {
+pub fn token_result_fragment(
+    token: &str,
+    token_type: &str,
+    role: Option<&str>,
+    tenant: Option<&str>,
+    expires_at: Option<&str>,
+) -> String {
     format!(
         r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <div class="flex items-center justify-between mb-4">
@@ -206,7 +233,7 @@ pub fn token_inspect_fragment(info: &crate::api_types::TokenInspectResponse) -> 
     } else {
         badge("Invalid/Expired", "red")
     };
-    
+
     format!(
         r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <div class="flex items-center justify-between mb-4">
@@ -281,7 +308,7 @@ pub fn audit_logs_page(
 ) -> String {
     // Get current view mode (needed for event rendering)
     let current_view = filters.view.as_deref().unwrap_or("timeline");
-    
+
     // Generate event rows with hierarchical support
     let event_rows: String = events
         .iter()
@@ -521,7 +548,7 @@ pub fn audit_logs_page(
     } else {
         String::new()
     };
-    
+
     let content = format!(
         r##"<div class="flex items-center justify-between mb-6">
             <div>
@@ -711,21 +738,18 @@ pub fn audit_logs_page(
 /// Build query params string from filters (excluding pagination/sort).
 fn build_filter_params(filters: &crate::api_types::AuditQueryParams) -> String {
     let mut params = Vec::new();
-    if let Some(ref t) = filters.tenant_id {
-        if !t.is_empty() {
+    if let Some(ref t) = filters.tenant_id
+        && !t.is_empty() {
             params.push(format!("tenant_id={}", urlencoding::encode(t)));
         }
-    }
-    if let Some(ref r) = filters.role {
-        if !r.is_empty() {
+    if let Some(ref r) = filters.role
+        && !r.is_empty() {
             params.push(format!("role={}", urlencoding::encode(r)));
         }
-    }
-    if let Some(ref e) = filters.event_type {
-        if !e.is_empty() {
+    if let Some(ref e) = filters.event_type
+        && !e.is_empty() {
             params.push(format!("event_type={}", urlencoding::encode(e)));
         }
-    }
     params.join("&")
 }
 
@@ -805,7 +829,9 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
         .unwrap_or_default();
 
     // Related Events section (hierarchical workflow)
-    let related_events_section = if event.parent_event_id.is_some() || event.correlation_id.is_some() {
+    let related_events_section = if event.parent_event_id.is_some()
+        || event.correlation_id.is_some()
+    {
         let parent_link = event.parent_event_id.map(|pid| format!(
             r##"<div class="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-900/30"
                  hx-get="/api/audit/{}" hx-target="#event-detail" hx-swap="innerHTML">
@@ -814,14 +840,14 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
                 <span class="text-xs font-mono text-gray-500">{}</span>
             </div>"##, pid, pid
         )).unwrap_or_default();
-        
+
         let children_section = format!(
             r##"<div hx-get="/api/audit/{}/children" hx-trigger="load" hx-swap="innerHTML">
                 <div class="text-sm text-gray-500 italic">Loading children...</div>
             </div>"##,
             event.event_id
         );
-        
+
         let correlation_badge = event.correlation_id.as_ref().map(|cid| format!(
             r##"<div class="flex items-center gap-2">
                 <span class="text-sm text-gray-500">Workflow ID:</span>
@@ -831,7 +857,7 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
                 </a>
             </div>"##, cid, cid
         )).unwrap_or_default();
-        
+
         format!(
             r##"<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
                 <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
@@ -846,9 +872,7 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
                     </div>
                 </div>
             </div>"##,
-            correlation_badge,
-            parent_link,
-            children_section
+            correlation_badge, parent_link, children_section
         )
     } else {
         String::new()
@@ -940,11 +964,21 @@ pub fn audit_event_detail_fragment(event: &AuditEvent) -> String {
 // =============================================================================
 
 pub fn approvals_page(approvals: &[ApprovalRequest]) -> String {
-    let pending: Vec<_> = approvals.iter().filter(|a| a.status == ApprovalStatus::Pending).collect();
-    let decided: Vec<_> = approvals.iter().filter(|a| a.status != ApprovalStatus::Pending).collect();
+    let pending: Vec<_> = approvals
+        .iter()
+        .filter(|a| a.status == ApprovalStatus::Pending)
+        .collect();
+    let decided: Vec<_> = approvals
+        .iter()
+        .filter(|a| a.status != ApprovalStatus::Pending)
+        .collect();
 
     let pending_cards: String = pending.iter().map(|a| approval_card(a, true)).collect();
-    let history_cards: String = decided.iter().take(20).map(|a| approval_card(a, false)).collect();
+    let history_cards: String = decided
+        .iter()
+        .take(20)
+        .map(|a| approval_card(a, false))
+        .collect();
 
     let content = format!(
         r##"<div class="flex items-center justify-between mb-6">
@@ -964,28 +998,39 @@ pub fn approvals_page(approvals: &[ApprovalRequest]) -> String {
         
         {tabs}"##,
         pending_count = pending.len(),
-        tabs = tabs("approval-tabs", &[
-            ("pending", &format!("Pending ({})", pending.len()), &if pending.is_empty() {
-                empty_state(
-                    "check-double",
-                    "No Pending Approvals",
-                    "All caught up! Actions requiring approval will appear here.",
-                    None,
-                )
-            } else {
-                format!(r#"<div class="space-y-4">{}</div>"#, pending_cards)
-            }),
-            ("history", "History", &if decided.is_empty() {
-                empty_state(
+        tabs = tabs(
+            "approval-tabs",
+            &[
+                (
+                    "pending",
+                    &format!("Pending ({})", pending.len()),
+                    &if pending.is_empty() {
+                        empty_state(
+                            "check-double",
+                            "No Pending Approvals",
+                            "All caught up! Actions requiring approval will appear here.",
+                            None,
+                        )
+                    } else {
+                        format!(r#"<div class="space-y-4">{}</div>"#, pending_cards)
+                    }
+                ),
+                (
                     "history",
-                    "No Approval History",
-                    "Decided approvals will appear here.",
-                    None,
-                )
-            } else {
-                format!(r#"<div class="space-y-4">{}</div>"#, history_cards)
-            }),
-        ]),
+                    "History",
+                    &if decided.is_empty() {
+                        empty_state(
+                            "history",
+                            "No Approval History",
+                            "Decided approvals will appear here.",
+                            None,
+                        )
+                    } else {
+                        format!(r#"<div class="space-y-4">{}</div>"#, history_cards)
+                    }
+                ),
+            ]
+        ),
     );
 
     layout("Approvals", &content)
@@ -1095,7 +1140,10 @@ fn approval_card(approval: &ApprovalRequest, show_actions: bool) -> String {
 
 fn approval_diff_table(approval: &ApprovalRequest) -> String {
     let args_obj = approval.arguments.as_object();
-    let before_obj = approval.original_values.as_ref().and_then(|v| v.as_object());
+    let before_obj = approval
+        .original_values
+        .as_ref()
+        .and_then(|v| v.as_object());
 
     if args_obj.is_none() && before_obj.is_none() {
         return String::new();
@@ -1122,11 +1170,7 @@ fn approval_diff_table(approval: &ApprovalRequest) -> String {
         return String::new();
     }
 
-    let mut keys: Vec<String> = before_map
-        .keys()
-        .chain(after_map.keys())
-        .cloned()
-        .collect();
+    let mut keys: Vec<String> = before_map.keys().chain(after_map.keys()).cloned().collect();
     keys.sort();
     keys.dedup();
 
@@ -1206,13 +1250,16 @@ pub fn settings_page(config: &CoriConfig) -> String {
         </div>
         
         {tabs}"##,
-        tabs = tabs("settings-tabs", &[
-            ("connection", "Connection", &connection_settings(config)),
-            ("security", "Security", &security_settings(config)),
-            ("guardrails", "Guardrails", &guardrails_settings(config)),
-            ("audit", "Audit", &audit_settings(config)),
-            ("tenancy", "Tenancy", &tenancy_settings(config)),
-        ]),
+        tabs = tabs(
+            "settings-tabs",
+            &[
+                ("connection", "Connection", &connection_settings(config)),
+                ("security", "Security", &security_settings(config)),
+                ("guardrails", "Guardrails", &guardrails_settings(config)),
+                ("audit", "Audit", &audit_settings(config)),
+                ("tenancy", "Tenancy", &tenancy_settings(config)),
+            ]
+        ),
     );
 
     layout("Settings", &content)
@@ -1288,18 +1335,22 @@ fn connection_settings(config: &CoriConfig) -> String {
 }
 
 fn security_settings(config: &CoriConfig) -> String {
-    let public_key_status = config.biscuit.resolve_public_key()
+    let public_key_status = config
+        .biscuit
+        .resolve_public_key()
         .ok()
         .flatten()
         .map(|_| "Configured ✓".to_string())
         .unwrap_or_else(|| "Not configured".to_string());
-    
-    let private_key_status = config.biscuit.resolve_private_key()
+
+    let private_key_status = config
+        .biscuit
+        .resolve_private_key()
         .ok()
         .flatten()
         .map(|_| "Configured ✓")
         .unwrap_or("Not configured");
-    
+
     format!(
         r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Biscuit Configuration</h3>
@@ -1344,9 +1395,21 @@ fn security_settings(config: &CoriConfig) -> String {
         </div>"##,
         public_key = public_key_status,
         private_key_status = private_key_status,
-        vs_enabled = if config.virtual_schema.enabled { "Yes" } else { "No" },
-        always_hidden = if config.virtual_schema.always_hidden.is_empty() { "None".to_string() } else { config.virtual_schema.always_hidden.join(", ") },
-        always_visible = if config.virtual_schema.always_visible.is_empty() { "None".to_string() } else { config.virtual_schema.always_visible.join(", ") },
+        vs_enabled = if config.virtual_schema.enabled {
+            "Yes"
+        } else {
+            "No"
+        },
+        always_hidden = if config.virtual_schema.always_hidden.is_empty() {
+            "None".to_string()
+        } else {
+            config.virtual_schema.always_hidden.join(", ")
+        },
+        always_visible = if config.virtual_schema.always_visible.is_empty() {
+            "None".to_string()
+        } else {
+            config.virtual_schema.always_visible.join(", ")
+        },
     )
 }
 
@@ -1370,18 +1433,41 @@ fn guardrails_settings(config: &CoriConfig) -> String {
                 </button>
             </form>
         </div>"##,
-        max_rows_input = input("max_rows_per_query", "Max Rows per Query", "number", &config.guardrails.max_rows_per_query.to_string(), "10000"),
-        max_affected_input = input("max_affected_rows", "Max Affected Rows", "number", &config.guardrails.max_affected_rows.to_string(), "1000"),
-        blocked_ops = ["TRUNCATE", "DROP", "ALTER", "CREATE"].iter().map(|op| {
-            let checked = if config.guardrails.blocked_operations.contains(&op.to_string()) { "checked" } else { "" };
-            format!(
-                r#"<label class="flex items-center gap-2">
+        max_rows_input = input(
+            "max_rows_per_query",
+            "Max Rows per Query",
+            "number",
+            &config.guardrails.max_rows_per_query.to_string(),
+            "10000"
+        ),
+        max_affected_input = input(
+            "max_affected_rows",
+            "Max Affected Rows",
+            "number",
+            &config.guardrails.max_affected_rows.to_string(),
+            "1000"
+        ),
+        blocked_ops = ["TRUNCATE", "DROP", "ALTER", "CREATE"]
+            .iter()
+            .map(|op| {
+                let checked = if config
+                    .guardrails
+                    .blocked_operations
+                    .contains(&op.to_string())
+                {
+                    "checked"
+                } else {
+                    ""
+                };
+                format!(
+                    r#"<label class="flex items-center gap-2">
                     <input type="checkbox" name="blocked_operations[]" value="{op}" {checked}
                            class="w-4 h-4 text-primary-600 rounded border-gray-300">
                     <span class="text-sm">{op}</span>
                 </label>"#
-            )
-        }).collect::<String>(),
+                )
+            })
+            .collect::<String>(),
     )
 }
 
@@ -1427,34 +1513,54 @@ fn audit_settings(config: &CoriConfig) -> String {
             </form>
         </div>"##,
         enabled_checked = if config.audit.enabled { "checked" } else { "" },
-        log_queries_checked = if config.audit.log_queries { "checked" } else { "" },
-        log_results_checked = if config.audit.log_results { "checked" } else { "" },
-        retention_input = input("retention_days", "Retention (days)", "number", &config.audit.retention_days.to_string(), "90"),
+        log_queries_checked = if config.audit.log_queries {
+            "checked"
+        } else {
+            ""
+        },
+        log_results_checked = if config.audit.log_results {
+            "checked"
+        } else {
+            ""
+        },
+        retention_input = input(
+            "retention_days",
+            "Retention (days)",
+            "number",
+            &config.audit.retention_days.to_string(),
+            "90"
+        ),
         storage_backend = config.audit.storage.backend,
     )
 }
 
 fn tenancy_settings(config: &CoriConfig) -> String {
     let rules = config.rules.as_ref();
-    
+
     let table_rows: String = rules
         .map(|r| {
-            r.tables.iter().map(|(name, tr)| {
-                let tenant_column = tr.get_direct_tenant_column()
-                    .unwrap_or("-");
-                let is_global = tr.global.unwrap_or(false);
-                
-                format!(
-                    r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+            r.tables
+                .iter()
+                .map(|(name, tr)| {
+                    let tenant_column = tr.get_direct_tenant_column().unwrap_or("-");
+                    let is_global = tr.global.unwrap_or(false);
+
+                    format!(
+                        r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                         <td class="px-4 py-3 font-medium">{name}</td>
                         <td class="px-4 py-3"><code class="text-sm">{column}</code></td>
                         <td class="px-4 py-3">{global}</td>
                     </tr>"#,
-                    name = name,
-                    column = tenant_column,
-                    global = if is_global { badge("Global", "blue") } else { badge("Scoped", "green") },
-                )
-            }).collect::<String>()
+                        name = name,
+                        column = tenant_column,
+                        global = if is_global {
+                            badge("Global", "blue")
+                        } else {
+                            badge("Scoped", "green")
+                        },
+                    )
+                })
+                .collect::<String>()
         })
         .unwrap_or_default();
 
@@ -1494,6 +1600,8 @@ fn tenancy_settings(config: &CoriConfig) -> String {
         table_rows = table_rows,
         empty_state = if table_count == 0 {
             r#"<div class="text-center py-8 text-gray-500">No tables configured in schema/rules.yaml</div>"#
-        } else { "" },
+        } else {
+            ""
+        },
     )
 }

@@ -168,4 +168,3 @@ pub struct RequestContext {
     /// Role name from the token's authority block.
     pub role: Option<String>,
 }
-

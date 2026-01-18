@@ -118,7 +118,10 @@ pub async fn test_role_with_approvals(_ctx: &TestContext) {
     let role = create_support_agent_role();
 
     // Support agent role should have approvals config
-    let approvals = role.approvals.as_ref().expect("Should have approvals config");
+    let approvals = role
+        .approvals
+        .as_ref()
+        .expect("Should have approvals config");
     assert_eq!(approvals.group, "support_managers");
     assert!(approvals.notify_on_pending);
 
@@ -196,7 +199,11 @@ pub async fn test_updatable_requires_approval(_ctx: &TestContext) {
     let role = create_role_with_updatable(
         "tickets",
         updatable,
-        vec!["id".to_string(), "priority".to_string(), "tenant_id".to_string()],
+        vec![
+            "id".to_string(),
+            "priority".to_string(),
+            "tenant_id".to_string(),
+        ],
     );
 
     assert!(role.table_requires_approval("tickets"));
@@ -227,7 +234,9 @@ pub async fn test_deletable_requires_approval(_ctx: &TestContext) {
                 requires_approval: Some(ApprovalRequirement::Detailed(ApprovalConfig {
                     group: "security_team".to_string(),
                     notify_on_pending: true,
-                    message: Some("Deletion of critical records requires security approval".to_string()),
+                    message: Some(
+                        "Deletion of critical records requires security approval".to_string(),
+                    ),
                 })),
                 soft_delete: false,
             }),
@@ -292,7 +301,11 @@ pub async fn test_approval_manager_approve_request(_ctx: &TestContext) {
     );
 
     // Approve the request
-    let result = manager.approve(&request.id, "alice@example.com", Some("Looks good".to_string()));
+    let result = manager.approve(
+        &request.id,
+        "alice@example.com",
+        Some("Looks good".to_string()),
+    );
     assert!(result.is_ok(), "Approval should succeed");
 
     let approved = result.unwrap();
@@ -374,11 +387,19 @@ pub async fn test_approval_manager_list_pending(_ctx: &TestContext) {
 
     // List for tenant_1 only
     let tenant1_pending = manager.list_pending(Some("tenant_1"));
-    assert_eq!(tenant1_pending.len(), 2, "Should have 2 pending for tenant_1");
+    assert_eq!(
+        tenant1_pending.len(),
+        2,
+        "Should have 2 pending for tenant_1"
+    );
 
     // List for tenant_2 only
     let tenant2_pending = manager.list_pending(Some("tenant_2"));
-    assert_eq!(tenant2_pending.len(), 1, "Should have 1 pending for tenant_2");
+    assert_eq!(
+        tenant2_pending.len(),
+        1,
+        "Should have 1 pending for tenant_2"
+    );
 
     println!("     ✓ ApprovalManager lists pending by tenant");
 }
@@ -389,13 +410,7 @@ pub async fn test_approval_manager_expired_request(_ctx: &TestContext) {
     // Create manager with negative TTL (already expired)
     let manager = ApprovalManager::new(Duration::seconds(-1));
 
-    let request = manager.create_request(
-        "updateTicket",
-        json!({}),
-        vec![],
-        "tenant_1",
-        "agent",
-    );
+    let request = manager.create_request("updateTicket", json!({}), vec![], "tenant_1", "agent");
 
     // Try to approve - should fail with expired error
     let result = manager.approve(&request.id, "admin", None);
@@ -414,36 +429,13 @@ pub async fn test_approval_manager_default(_ctx: &TestContext) {
     // Test Default implementation (24 hour TTL)
     let manager = ApprovalManager::default();
 
-    let request = manager.create_request(
-        "testTool",
-        json!({}),
-        vec![],
-        "tenant_1",
-        "agent",
-    );
+    let request = manager.create_request("testTool", json!({}), vec![], "tenant_1", "agent");
 
     // Should not be expired with default 24h TTL
     assert!(!request.is_expired());
     assert!(request.is_pending());
 
     println!("     ✓ ApprovalManager::default() works correctly");
-}
-
-// =============================================================================
-// APPROVAL STATUS
-// =============================================================================
-
-pub async fn test_approval_status_variants(_ctx: &TestContext) {
-    println!("  🧪 test_approval_status_variants");
-
-    // Test all status variants
-    assert_eq!(ApprovalStatus::Pending, ApprovalStatus::Pending);
-    assert_eq!(ApprovalStatus::Approved, ApprovalStatus::Approved);
-    assert_eq!(ApprovalStatus::Rejected, ApprovalStatus::Rejected);
-    assert_eq!(ApprovalStatus::Expired, ApprovalStatus::Expired);
-    assert_eq!(ApprovalStatus::Cancelled, ApprovalStatus::Cancelled);
-
-    println!("     ✓ ApprovalStatus variants work correctly");
 }
 
 // =============================================================================
@@ -539,7 +531,11 @@ pub async fn test_approval_workflow_full_cycle(_ctx: &TestContext) {
 
     // 3. Approve
     let approved = manager
-        .approve(&request.id, "manager@example.com", Some("Approved for escalation".to_string()))
+        .approve(
+            &request.id,
+            "manager@example.com",
+            Some("Approved for escalation".to_string()),
+        )
         .unwrap();
     assert_eq!(approved.status, ApprovalStatus::Approved);
     assert!(approved.decided_at.is_some());
@@ -571,10 +567,17 @@ pub async fn test_approval_workflow_rejection_cycle(_ctx: &TestContext) {
 
     // 2. Reject
     let rejected = manager
-        .reject(&request.id, "security@example.com", Some("Unauthorized deletion attempt".to_string()))
+        .reject(
+            &request.id,
+            "security@example.com",
+            Some("Unauthorized deletion attempt".to_string()),
+        )
         .unwrap();
     assert_eq!(rejected.status, ApprovalStatus::Rejected);
-    assert_eq!(rejected.reason, Some("Unauthorized deletion attempt".to_string()));
+    assert_eq!(
+        rejected.reason,
+        Some("Unauthorized deletion attempt".to_string())
+    );
 
     // 3. Verify not pending
     let pending = manager.list_pending(Some("1"));
@@ -588,13 +591,7 @@ pub async fn test_already_decided_error(_ctx: &TestContext) {
 
     let manager = ApprovalManager::new(Duration::hours(1));
 
-    let request = manager.create_request(
-        "test",
-        json!({}),
-        vec![],
-        "tenant_1",
-        "agent",
-    );
+    let request = manager.create_request("test", json!({}), vec![], "tenant_1", "agent");
 
     // Approve first
     manager.approve(&request.id, "user1", None).unwrap();
@@ -645,9 +642,6 @@ pub async fn run_all_tests(ctx: &TestContext) {
     test_approval_manager_list_pending(ctx).await;
     test_approval_manager_expired_request(ctx).await;
     test_approval_manager_default(ctx).await;
-
-    // Approval status
-    test_approval_status_variants(ctx).await;
 
     // Role helpers
     test_role_table_requires_approval_helper(ctx).await;

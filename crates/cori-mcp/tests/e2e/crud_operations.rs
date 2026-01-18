@@ -18,7 +18,12 @@ pub async fn test_get_customer_by_id(ctx: &TestContext) {
 
     // Customer 1 belongs to organization 1 (Acme)
     let result = executor
-        .execute(&tool, json!({ "customer_id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(
+            &tool,
+            json!({ "customer_id": 1 }),
+            &CallToolOptions::default(),
+            &create_context("1"),
+        )
         .await;
 
     assert_success(&result, "GET customer should succeed");
@@ -49,7 +54,12 @@ pub async fn test_get_order_by_id(ctx: &TestContext) {
 
     // Order 1 belongs to org 1 with known values
     let result = executor
-        .execute(&tool, json!({ "order_id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(
+            &tool,
+            json!({ "order_id": 1 }),
+            &CallToolOptions::default(),
+            &create_context("1"),
+        )
         .await;
 
     assert_success(&result, "GET order should succeed");
@@ -99,7 +109,12 @@ pub async fn test_get_invoice_by_id(ctx: &TestContext) {
 
     // Invoice 1 belongs to org 1
     let result = executor
-        .execute(&tool, json!({ "invoice_id": 1 }), &CallToolOptions::default(), &create_context("1"))
+        .execute(
+            &tool,
+            json!({ "invoice_id": 1 }),
+            &CallToolOptions::default(),
+            &create_context("1"),
+        )
         .await;
 
     assert_success(&result, "GET invoice should succeed");
@@ -212,7 +227,10 @@ pub async fn test_list_customers(ctx: &TestContext) {
         "lifetime_value should be a number in list results"
     );
 
-    println!("     ✓ Listed {} customers, all with correct tenant", data.len());
+    println!(
+        "     ✓ Listed {} customers, all with correct tenant",
+        data.len()
+    );
 }
 
 pub async fn test_list_orders_with_decimal(ctx: &TestContext) {
@@ -252,7 +270,10 @@ pub async fn test_list_orders_with_decimal(ctx: &TestContext) {
         );
     }
 
-    println!("     ✓ Listed {} orders with correct DECIMAL values", data.len());
+    println!(
+        "     ✓ Listed {} orders with correct DECIMAL values",
+        data.len()
+    );
 }
 
 pub async fn test_list_tickets(ctx: &TestContext) {
@@ -357,7 +378,11 @@ pub async fn test_pagination_beyond_results(ctx: &TestContext) {
     assert_success(&result, "Query should succeed");
     let data = extract_json(&result).unwrap();
     let items = data["data"].as_array().unwrap();
-    assert_eq!(items.len(), 0, "Should return empty array for offset beyond results");
+    assert_eq!(
+        items.len(),
+        0,
+        "Should return empty array for offset beyond results"
+    );
 
     println!("     ✓ Pagination beyond results returns empty array");
 }
@@ -426,7 +451,10 @@ pub async fn test_filter_by_multiple_values(ctx: &TestContext) {
         assert_eq!(ticket["status"], "open", "All tickets should be open");
     }
 
-    println!("     ✓ Filter by multiple values working ({} results)", data.len());
+    println!(
+        "     ✓ Filter by multiple values working ({} results)",
+        data.len()
+    );
 }
 
 // =============================================================================
@@ -486,7 +514,10 @@ pub async fn test_dry_run_list(ctx: &TestContext) {
     assert!(result.is_dry_run, "Should be marked as dry run");
 
     let data = extract_json(&result).expect("Should have JSON response");
-    assert!(data["dryRun"].as_bool().unwrap_or(false), "Should indicate dry run");
+    assert!(
+        data["dryRun"].as_bool().unwrap_or(false),
+        "Should indicate dry run"
+    );
 
     println!("     ✓ Dry run LIST returned query preview");
 }

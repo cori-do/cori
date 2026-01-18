@@ -53,4 +53,3 @@ pub enum McpError {
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
-

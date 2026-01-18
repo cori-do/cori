@@ -19,11 +19,11 @@ pub mod biscuit;
 pub mod dashboard;
 pub mod group_definition;
 pub mod mcp;
-pub mod upstream;
 pub mod role_definition;
 pub mod rules_definition;
 pub mod schema_definition;
 pub mod types_definition;
+pub mod upstream;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,7 +35,6 @@ pub use biscuit::BiscuitConfig;
 pub use dashboard::{AuthConfig, AuthType, BasicAuthUser, DashboardConfig, OidcConfig};
 pub use group_definition::GroupDefinition;
 pub use mcp::{McpConfig, Transport};
-pub use upstream::{ConnectionPoolConfig, SslMode, UpstreamConfig};
 pub use role_definition::{
     AllColumns, ApprovalConfig, ApprovalRequirement, ColumnCondition, ColumnList,
     ComparisonCondition, CreatableColumnConstraints, CreatableColumns, DeletableConstraints,
@@ -51,9 +50,11 @@ pub use schema_definition::{
     ForeignKeyAction, ForeignKeyReference, Index, SchemaDefinition, TableSchema,
 };
 pub use types_definition::{TypeDef, TypesDefinition};
+pub use upstream::{ConnectionPoolConfig, SslMode, UpstreamConfig};
 
 /// Complete Cori configuration loaded from files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct CoriConfig {
     /// Project name.
     #[serde(default)]
@@ -129,30 +130,6 @@ pub struct CoriConfig {
     pub types: Option<TypesDefinition>,
 }
 
-impl Default for CoriConfig {
-    fn default() -> Self {
-        Self {
-            project: None,
-            version: None,
-            upstream: UpstreamConfig::default(),
-            biscuit: BiscuitConfig::default(),
-            mcp: McpConfig::default(),
-            dashboard: DashboardConfig::default(),
-            audit: AuditConfig::default(),
-            approvals: ApprovalsConfig::default(),
-            virtual_schema: VirtualSchemaConfig::default(),
-            guardrails: GuardrailsConfig::default(),
-            observability: ObservabilityConfig::default(),
-            schema_dir: None,
-            groups_dir: None,
-            roles: HashMap::new(),
-            groups: HashMap::new(),
-            schema: None,
-            rules: None,
-            types: None,
-        }
-    }
-}
 
 /// Virtual schema filtering configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +345,7 @@ impl Default for HealthConfig {
 
 /// Tracing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct TracingConfig {
     /// Whether tracing is enabled.
     #[serde(default)]
@@ -378,14 +356,6 @@ pub struct TracingConfig {
     pub endpoint: Option<String>,
 }
 
-impl Default for TracingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: None,
-        }
-    }
-}
 
 // Default value functions
 fn default_true() -> bool {
@@ -501,7 +471,11 @@ impl CoriConfig {
             for entry in fs::read_dir(&roles_path)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                if path
+                    .extension()
+                    .map(|e| e == "yaml" || e == "yml")
+                    .unwrap_or(false)
+                {
                     // Load as RoleDefinition
                     if let Ok(role) = RoleDefinition::from_file(&path) {
                         config.roles.insert(role.name.clone(), role);
@@ -526,7 +500,11 @@ impl CoriConfig {
             for entry in fs::read_dir(&groups_path)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+                if path
+                    .extension()
+                    .map(|e| e == "yaml" || e == "yml")
+                    .unwrap_or(false)
+                {
                     let group = GroupDefinition::from_file(&path)?;
                     config.groups.insert(group.name.clone(), group);
                 }
@@ -573,16 +551,18 @@ impl CoriConfig {
 
     /// Check if a table is globally visible in schema introspection.
     pub fn is_table_always_visible(&self, table: &str) -> bool {
-        self.virtual_schema.always_visible.iter().any(|t| t == table)
+        self.virtual_schema
+            .always_visible
+            .iter()
+            .any(|t| t == table)
     }
 
     /// Get tenant configuration for a table from rules.
     pub fn get_table_tenant_config(&self, table: &str) -> Option<&TenantConfig> {
-        if let Some(rules) = &self.rules {
-            if let Some(config) = rules.get_tenant_config(table) {
+        if let Some(rules) = &self.rules
+            && let Some(config) = rules.get_tenant_config(table) {
                 return Some(config);
             }
-        }
         None
     }
 
