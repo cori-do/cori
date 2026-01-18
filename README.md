@@ -366,8 +366,6 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicket` — automatic
 | Human-in-the-loop approvals | ✅ Working |
 | Audit logging | ✅ Working |
 | Admin dashboard | ✅ Working |
-| Connection pooling | 📋 Planned |
-| Production hardening | 📋 Planned |
 
 
 ---
