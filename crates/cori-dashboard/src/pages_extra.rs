@@ -153,8 +153,7 @@ fn attenuate_token_form() -> String {
 }
 
 fn inspect_token_form() -> String {
-    format!(
-        r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+    r##"<div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Inspect Token</h3>
             <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
                 View the claims and metadata of a Biscuit token.
@@ -173,8 +172,7 @@ fn inspect_token_form() -> String {
             </form>
         </div>
         
-        <div id="inspect-result" class="mt-6"></div>"##
-    )
+        <div id="inspect-result" class="mt-6"></div>"##.to_string()
 }
 
 /// Token result HTML fragment.
@@ -740,21 +738,18 @@ pub fn audit_logs_page(
 /// Build query params string from filters (excluding pagination/sort).
 fn build_filter_params(filters: &crate::api_types::AuditQueryParams) -> String {
     let mut params = Vec::new();
-    if let Some(ref t) = filters.tenant_id {
-        if !t.is_empty() {
+    if let Some(ref t) = filters.tenant_id
+        && !t.is_empty() {
             params.push(format!("tenant_id={}", urlencoding::encode(t)));
         }
-    }
-    if let Some(ref r) = filters.role {
-        if !r.is_empty() {
+    if let Some(ref r) = filters.role
+        && !r.is_empty() {
             params.push(format!("role={}", urlencoding::encode(r)));
         }
-    }
-    if let Some(ref e) = filters.event_type {
-        if !e.is_empty() {
+    if let Some(ref e) = filters.event_type
+        && !e.is_empty() {
             params.push(format!("event_type={}", urlencoding::encode(e)));
         }
-    }
     params.join("&")
 }
 

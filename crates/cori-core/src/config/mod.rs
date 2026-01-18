@@ -54,6 +54,7 @@ pub use upstream::{ConnectionPoolConfig, SslMode, UpstreamConfig};
 
 /// Complete Cori configuration loaded from files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct CoriConfig {
     /// Project name.
     #[serde(default)]
@@ -129,30 +130,6 @@ pub struct CoriConfig {
     pub types: Option<TypesDefinition>,
 }
 
-impl Default for CoriConfig {
-    fn default() -> Self {
-        Self {
-            project: None,
-            version: None,
-            upstream: UpstreamConfig::default(),
-            biscuit: BiscuitConfig::default(),
-            mcp: McpConfig::default(),
-            dashboard: DashboardConfig::default(),
-            audit: AuditConfig::default(),
-            approvals: ApprovalsConfig::default(),
-            virtual_schema: VirtualSchemaConfig::default(),
-            guardrails: GuardrailsConfig::default(),
-            observability: ObservabilityConfig::default(),
-            schema_dir: None,
-            groups_dir: None,
-            roles: HashMap::new(),
-            groups: HashMap::new(),
-            schema: None,
-            rules: None,
-            types: None,
-        }
-    }
-}
 
 /// Virtual schema filtering configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +345,7 @@ impl Default for HealthConfig {
 
 /// Tracing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct TracingConfig {
     /// Whether tracing is enabled.
     #[serde(default)]
@@ -378,14 +356,6 @@ pub struct TracingConfig {
     pub endpoint: Option<String>,
 }
 
-impl Default for TracingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: None,
-        }
-    }
-}
 
 // Default value functions
 fn default_true() -> bool {
@@ -589,11 +559,10 @@ impl CoriConfig {
 
     /// Get tenant configuration for a table from rules.
     pub fn get_table_tenant_config(&self, table: &str) -> Option<&TenantConfig> {
-        if let Some(rules) = &self.rules {
-            if let Some(config) = rules.get_tenant_config(table) {
+        if let Some(rules) = &self.rules
+            && let Some(config) = rules.get_tenant_config(table) {
                 return Some(config);
             }
-        }
         None
     }
 

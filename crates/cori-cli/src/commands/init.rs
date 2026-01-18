@@ -471,18 +471,15 @@ fn analyze_tenancy(tables: &[TableInfo], tenant_column: &Option<String>) -> Tena
         // Try to find tenant context via FK chain
         match find_tenant_via_fk(table, &table_map, &tenant_col, &table_tenancy) {
             Some(source) => {
-                match &source {
-                    TenancySource::ViaForeignKey { chain, .. } => {
-                        let chain_desc: Vec<String> =
-                            chain.iter().map(|(t, c)| format!("{}.{}", t, c)).collect();
-                        warnings.push(format!(
-                            "Table '{}' has tenant context via FK chain: {} → {}",
-                            table.name,
-                            table.name,
-                            chain_desc.join(" → ")
-                        ));
-                    }
-                    _ => {}
+                if let TenancySource::ViaForeignKey { chain, .. } = &source {
+                    let chain_desc: Vec<String> =
+                        chain.iter().map(|(t, c)| format!("{}.{}", t, c)).collect();
+                    warnings.push(format!(
+                        "Table '{}' has tenant context via FK chain: {} → {}",
+                        table.name,
+                        table.name,
+                        chain_desc.join(" → ")
+                    ));
                 }
                 table_tenancy.insert(table.name.clone(), source);
             }

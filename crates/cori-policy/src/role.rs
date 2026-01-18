@@ -99,13 +99,11 @@ impl<'a> RoleValidator<'a> {
         }
 
         // Check max_per_page limit
-        if let Some(max) = perms.readable.max_per_page() {
-            if let Some(limit) = request.arguments.get("limit").and_then(|v| v.as_u64()) {
-                if limit > max {
+        if let Some(max) = perms.readable.max_per_page()
+            && let Some(limit) = request.arguments.get("limit").and_then(|v| v.as_u64())
+                && limit > max {
                     return Err(ValidationError::max_per_page_exceeded(limit, max, table));
                 }
-            }
-        }
 
         Ok(())
     }

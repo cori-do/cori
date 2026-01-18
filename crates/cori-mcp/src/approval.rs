@@ -356,7 +356,7 @@ impl ApprovalManager {
                     .values()
                     .filter(|r| {
                         r.status == ApprovalStatus::Pending
-                            && tenant_id.map_or(true, |t| r.tenant_id == t)
+                            && tenant_id.is_none_or(|t| r.tenant_id == t)
                     })
                     .cloned()
                     .collect()

@@ -38,8 +38,7 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
 
     let quick_actions = card(
         "Quick Actions",
-        &format!(
-            r##"<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        r##"<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <a href="/roles/new" class="flex items-center gap-4 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                 <div class="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
                     <i class="fas fa-plus text-blue-500"></i>
@@ -76,8 +75,7 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
                     <p class="text-sm text-gray-500 dark:text-gray-400">Query execution history</p>
                 </div>
             </a>
-        </div>"##
-        ),
+        </div>"##,
     );
 
     let connection_info = card(
@@ -260,8 +258,7 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
             )
         }
         None => {
-            format!(
-                r##"<div class="text-center py-12">
+            r##"<div class="text-center py-12">
                     <i class="fas fa-database text-6xl text-gray-300 dark:text-gray-600 mb-4"></i>
                     <h2 class="text-xl font-medium text-gray-900 dark:text-white mb-2">No Schema Loaded</h2>
                     <p class="text-gray-600 dark:text-gray-400 mb-6">Click below to introspect your database schema.</p>
@@ -270,8 +267,7 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                         <i class="fas fa-database"></i>
                         <span>Load Schema</span>
                     </button>
-                </div>"##
-            )
+                </div>"##.to_string()
         }
     };
 
@@ -285,16 +281,12 @@ fn column_row(col: &ColumnInfo, primary_key: &[String], tenant_column: &str) -> 
     let badges = format!(
         "{}{}",
         if is_pk {
-            format!(
-                r#"<span class="ml-2 text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-1.5 py-0.5 rounded">PK</span>"#
-            )
+            r#"<span class="ml-2 text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-1.5 py-0.5 rounded">PK</span>"#.to_string()
         } else {
             String::new()
         },
         if is_tenant {
-            format!(
-                r#"<span class="ml-2 text-xs bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 px-1.5 py-0.5 rounded">Tenant</span>"#
-            )
+            r#"<span class="ml-2 text-xs bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 px-1.5 py-0.5 rounded">Tenant</span>"#.to_string()
         } else {
             String::new()
         },

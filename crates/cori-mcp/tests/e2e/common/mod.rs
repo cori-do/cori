@@ -220,9 +220,8 @@ fn pk_column_for(entity: &str) -> String {
 fn singularize(s: &str) -> String {
     if s.ends_with("ies") {
         format!("{}y", &s[..s.len() - 3])
-    } else if s.ends_with("es") {
+    } else if let Some(base) = s.strip_suffix("es") {
         // Handle cases like "addresses" -> "address"
-        let base = &s[..s.len() - 2];
         if base.ends_with("ss")
             || base.ends_with("ch")
             || base.ends_with("sh")

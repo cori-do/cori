@@ -77,8 +77,8 @@ impl<'a> RulesValidator<'a> {
         };
 
         // Check pattern validation
-        if let Some(pattern) = &column_rules.pattern {
-            if let Some(s) = value.as_str() {
+        if let Some(pattern) = &column_rules.pattern
+            && let Some(s) = value.as_str() {
                 match regex::Regex::new(pattern) {
                     Ok(re) => {
                         if !re.is_match(s) {
@@ -92,14 +92,12 @@ impl<'a> RulesValidator<'a> {
                     }
                 }
             }
-        }
 
         // Check allowed_values validation
-        if let Some(allowed) = &column_rules.allowed_values {
-            if !allowed.contains(value) {
+        if let Some(allowed) = &column_rules.allowed_values
+            && !allowed.contains(value) {
                 return Err(ValidationError::allowed_values_violation(column, allowed));
             }
-        }
 
         Ok(())
     }

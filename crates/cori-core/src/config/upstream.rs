@@ -154,11 +154,10 @@ impl UpstreamConfig {
     /// 4. Individual fields
     pub fn connection_string(&self) -> String {
         // Method 1: Environment variable with connection URL
-        if let Some(env_var) = &self.database_url_env {
-            if let Ok(url) = std::env::var(env_var) {
+        if let Some(env_var) = &self.database_url_env
+            && let Ok(url) = std::env::var(env_var) {
                 return url;
             }
-        }
 
         // Method 2: Direct URL
         if let Some(url) = &self.database_url {
@@ -182,11 +181,10 @@ impl UpstreamConfig {
     /// Get the password, checking password_env first.
     fn get_password(&self) -> Option<String> {
         // Try password_env first
-        if let Some(env_var) = &self.password_env {
-            if let Ok(password) = std::env::var(env_var) {
+        if let Some(env_var) = &self.password_env
+            && let Ok(password) = std::env::var(env_var) {
                 return Some(password);
             }
-        }
         // Fall back to direct password
         self.password.clone()
     }

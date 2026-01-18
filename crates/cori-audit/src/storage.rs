@@ -108,11 +108,10 @@ impl FileStorage {
         let path = path.as_ref().to_path_buf();
 
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent)?;
             }
-        }
 
         // Load existing events from file
         let events = Self::load_from_file(&path)?;
@@ -349,46 +348,38 @@ impl AuditStorage for FileStorage {
 impl FileStorage {
     /// Check if an event matches the given filter.
     fn matches_filter(event: &AuditEvent, filter: &AuditFilter) -> bool {
-        if let Some(ref tenant) = filter.tenant_id {
-            if &event.tenant_id != tenant {
+        if let Some(ref tenant) = filter.tenant_id
+            && &event.tenant_id != tenant {
                 return false;
             }
-        }
-        if let Some(ref role) = filter.role {
-            if &event.role != role {
+        if let Some(ref role) = filter.role
+            && &event.role != role {
                 return false;
             }
-        }
-        if let Some(ref action) = filter.action {
-            if &event.action != action {
+        if let Some(ref action) = filter.action
+            && &event.action != action {
                 return false;
             }
-        }
-        if let Some(event_type) = filter.event_type {
-            if event.event_type != event_type {
+        if let Some(event_type) = filter.event_type
+            && event.event_type != event_type {
                 return false;
             }
-        }
-        if let Some(start) = filter.start_time {
-            if event.occurred_at < start {
+        if let Some(start) = filter.start_time
+            && event.occurred_at < start {
                 return false;
             }
-        }
-        if let Some(end) = filter.end_time {
-            if event.occurred_at > end {
+        if let Some(end) = filter.end_time
+            && event.occurred_at > end {
                 return false;
             }
-        }
-        if let Some(parent_id) = filter.parent_event_id {
-            if event.parent_event_id != Some(parent_id) {
+        if let Some(parent_id) = filter.parent_event_id
+            && event.parent_event_id != Some(parent_id) {
                 return false;
             }
-        }
-        if let Some(ref correlation_id) = filter.correlation_id {
-            if event.correlation_id.as_ref() != Some(correlation_id) {
+        if let Some(ref correlation_id) = filter.correlation_id
+            && event.correlation_id.as_ref() != Some(correlation_id) {
                 return false;
             }
-        }
         if filter.root_only && event.parent_event_id.is_some() {
             return false;
         }

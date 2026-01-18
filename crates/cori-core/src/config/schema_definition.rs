@@ -80,7 +80,9 @@ pub struct DatabaseInfo {
 /// Supported database engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DatabaseEngine {
+    #[default]
     Postgres,
     Mysql,
     Mariadb,
@@ -88,11 +90,6 @@ pub enum DatabaseEngine {
     Sqlserver,
 }
 
-impl Default for DatabaseEngine {
-    fn default() -> Self {
-        Self::Postgres
-    }
-}
 
 /// Custom enum type definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +181,7 @@ pub struct ColumnSchema {
 /// Generic column types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ColumnType {
     String,
     Text,
@@ -204,14 +202,10 @@ pub enum ColumnType {
     Binary,
     Array,
     Enum,
+    #[default]
     Unknown,
 }
 
-impl Default for ColumnType {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 /// Foreign key definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]

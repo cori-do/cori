@@ -114,14 +114,13 @@ pub async fn test_create_with_default_value(ctx: &TestContext) {
 
     // Verify default was applied
     let data = extract_json(&result);
-    if let Some(data) = data {
-        if data.get("is_internal").is_some() {
+    if let Some(data) = data
+        && data.get("is_internal").is_some() {
             assert_eq!(
                 data["is_internal"], false,
                 "is_internal should default to false"
             );
         }
-    }
 
     println!("     ✓ Default value correctly applied on create");
 }

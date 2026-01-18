@@ -68,9 +68,9 @@ pub fn list(
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref();
-        let read_only = annotations.map_or(false, |a| a.read_only == Some(true));
-        let requires_approval = annotations.map_or(false, |a| a.requires_approval == Some(true));
-        let dry_run = annotations.map_or(false, |a| a.dry_run_supported == Some(true));
+        let read_only = annotations.is_some_and(|a| a.read_only == Some(true));
+        let requires_approval = annotations.is_some_and(|a| a.requires_approval == Some(true));
+        let dry_run = annotations.is_some_and(|a| a.dry_run_supported == Some(true));
 
         let mut badges = Vec::new();
         if read_only {
@@ -151,12 +151,11 @@ fn load_public_key_from_config(
     }
 
     // Try from environment variable
-    if let Some(ref env_var) = config.biscuit.public_key_env {
-        if let Ok(key_str) = std::env::var(env_var) {
+    if let Some(ref env_var) = config.biscuit.public_key_env
+        && let Ok(key_str) = std::env::var(env_var) {
             return cori_biscuit::keys::load_public_key_hex(&key_str)
                 .with_context(|| format!("Failed to parse public key from env var {}", env_var));
         }
-    }
 
     // Try default location
     let default_path = base_dir.join("keys/public.key");

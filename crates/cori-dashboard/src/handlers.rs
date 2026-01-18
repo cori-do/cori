@@ -614,11 +614,10 @@ pub mod api {
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        if let Some(logger) = state.audit_logger() {
-            if let Ok(Some(event)) = logger.get(event_id).await {
+        if let Some(logger) = state.audit_logger()
+            && let Ok(Some(event)) = logger.get(event_id).await {
                 return Ok(Html(pages_extra::audit_event_detail_fragment(&event)));
             }
-        }
 
         Err(StatusCode::NOT_FOUND)
     }
@@ -629,11 +628,10 @@ pub mod api {
     ) -> Result<Json<Vec<cori_audit::AuditEvent>>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        if let Some(logger) = state.audit_logger() {
-            if let Ok(tree) = logger.get_event_tree(event_id).await {
+        if let Some(logger) = state.audit_logger()
+            && let Ok(tree) = logger.get_event_tree(event_id).await {
                 return Ok(Json(tree));
             }
-        }
 
         Err(StatusCode::NOT_FOUND)
     }
@@ -644,8 +642,8 @@ pub mod api {
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        if let Some(logger) = state.audit_logger() {
-            if let Ok(children) = logger.get_children(event_id).await {
+        if let Some(logger) = state.audit_logger()
+            && let Ok(children) = logger.get_children(event_id).await {
                 if children.is_empty() {
                     return Ok(Html(
                         r#"<div class="text-sm text-gray-500 italic">No child events</div>"#
@@ -684,7 +682,6 @@ pub mod api {
 
                 return Ok(Html(children_html));
             }
-        }
 
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
@@ -695,8 +692,8 @@ pub mod api {
     ) -> Result<Html<String>, StatusCode> {
         let event_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        if let Some(logger) = state.audit_logger() {
-            if let Ok(children) = logger.get_children(event_id).await {
+        if let Some(logger) = state.audit_logger()
+            && let Ok(children) = logger.get_children(event_id).await {
                 if children.is_empty() {
                     return Ok(Html(String::new()));
                 }
@@ -747,7 +744,6 @@ pub mod api {
 
                 return Ok(Html(children_html));
             }
-        }
 
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     }

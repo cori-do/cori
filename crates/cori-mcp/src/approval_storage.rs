@@ -274,7 +274,7 @@ impl ApprovalFileStorage {
         Ok(pending
             .values()
             .filter(|r| {
-                r.status == ApprovalStatus::Pending && tenant_id.map_or(true, |t| r.tenant_id == t)
+                r.status == ApprovalStatus::Pending && tenant_id.is_none_or(|t| r.tenant_id == t)
             })
             .cloned()
             .collect())
@@ -541,7 +541,7 @@ impl ApprovalFileStorage {
                 .approved
                 .write()
                 .map_err(|_| ApprovalStorageError::LockError)?;
-            approved.retain(|_, r| r.decided_at.map_or(true, |t| t > cutoff));
+            approved.retain(|_, r| r.decided_at.is_none_or(|t| t > cutoff));
         }
 
         // Clean denied cache (keep file intact for audit trail)
@@ -550,7 +550,7 @@ impl ApprovalFileStorage {
                 .denied
                 .write()
                 .map_err(|_| ApprovalStorageError::LockError)?;
-            denied.retain(|_, r| r.decided_at.map_or(true, |t| t > cutoff));
+            denied.retain(|_, r| r.decided_at.is_none_or(|t| t > cutoff));
         }
 
         Ok(())

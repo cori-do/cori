@@ -484,7 +484,7 @@ async fn run_http_mode(
         let schema = schema.clone();
         let core_roles = core_roles.clone();
         let approval_manager = approval_manager.clone();
-        let public_key = mcp_public_key.clone();
+        let public_key = mcp_public_key;
         let audit_logger_for_mcp = audit_logger.clone();
 
         let handle = tokio::spawn(async move {
@@ -758,11 +758,10 @@ fn load_token(token_file: Option<PathBuf>) -> Result<String> {
 /// Build database URL from upstream config.
 fn build_database_url(upstream: &UpstreamConfigFile) -> Result<String> {
     // First check for database_url_env
-    if let Some(env_var) = &upstream.database_url_env {
-        if let Ok(url) = std::env::var(env_var) {
+    if let Some(env_var) = &upstream.database_url_env
+        && let Ok(url) = std::env::var(env_var) {
             return Ok(url);
         }
-    }
 
     // Check for direct database_url
     if let Some(url) = &upstream.database_url {
@@ -827,12 +826,11 @@ fn resolve_public_key(config: &BiscuitConfig, config_dir: &Path) -> Result<Publi
     }
 
     // Try environment variable
-    if let Some(env_var) = &config.public_key_env {
-        if let Ok(hex) = std::env::var(env_var) {
+    if let Some(env_var) = &config.public_key_env
+        && let Ok(hex) = std::env::var(env_var) {
             return cori_biscuit::keys::load_public_key_hex(&hex)
                 .context("Failed to parse public key from environment variable");
         }
-    }
 
     anyhow::bail!(
         "No Biscuit public key configured. Set biscuit.public_key_file or biscuit.public_key_env"
@@ -856,12 +854,11 @@ fn resolve_keypair(
     }
 
     // Try environment variable
-    if let Some(env_var) = &config.private_key_env {
-        if let Ok(hex) = std::env::var(env_var) {
+    if let Some(env_var) = &config.private_key_env
+        && let Ok(hex) = std::env::var(env_var) {
             return cori_biscuit::keys::KeyPair::from_private_key_hex(&hex)
                 .context("Failed to parse private key from environment variable");
         }
-    }
 
     // Try default path
     let default_path = config_dir.join("keys/private.key");

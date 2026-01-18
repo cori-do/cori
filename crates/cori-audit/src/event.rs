@@ -245,14 +245,13 @@ impl AuditEvent {
         }
 
         // Include diff summary if present
-        if let Some(ref diff) = self.diff {
-            if let Some(obj) = diff.as_object() {
+        if let Some(ref diff) = self.diff
+            && let Some(obj) = diff.as_object() {
                 let changed_fields: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
                 if !changed_fields.is_empty() {
                     line.push_str(&format!(" changed_fields=[{}]", changed_fields.join(",")));
                 }
             }
-        }
 
         line
     }

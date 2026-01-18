@@ -86,11 +86,10 @@ impl TableSchema {
 
     /// Get the ID column type for JSON schema (defaults to "integer").
     pub fn get_id_type(&self) -> &str {
-        if let Some(pk) = self.primary_key.first() {
-            if let Some(col) = self.get_column(pk) {
+        if let Some(pk) = self.primary_key.first()
+            && let Some(col) = self.get_column(pk) {
                 return col.json_schema_type();
             }
-        }
         "integer"
     }
 

@@ -169,23 +169,20 @@ impl RoleDefinition {
     pub fn table_requires_approval(&self, table: &str) -> bool {
         if let Some(perms) = self.tables.get(table) {
             // Check creatable columns
-            if let Some(map) = perms.creatable.as_map() {
-                if map.values().any(|c| c.requires_approval.is_some()) {
+            if let Some(map) = perms.creatable.as_map()
+                && map.values().any(|c| c.requires_approval.is_some()) {
                     return true;
                 }
-            }
             // Check updatable columns
-            if let Some(map) = perms.updatable.as_map() {
-                if map.values().any(|c| c.requires_approval.is_some()) {
+            if let Some(map) = perms.updatable.as_map()
+                && map.values().any(|c| c.requires_approval.is_some()) {
                     return true;
                 }
-            }
             // Check deletable
-            if let DeletablePermission::WithConstraints(opts) = &perms.deletable {
-                if opts.requires_approval.is_some() {
+            if let DeletablePermission::WithConstraints(opts) = &perms.deletable
+                && opts.requires_approval.is_some() {
                     return true;
                 }
-            }
         }
         false
     }
@@ -592,13 +589,11 @@ impl OnlyWhen {
     /// Check if this is a simple restriction on new value (new.<col>: [values]).
     pub fn get_new_value_restriction(&self, column: &str) -> Option<&Vec<serde_json::Value>> {
         let key = format!("new.{}", column);
-        if let OnlyWhen::Single(conditions) = self {
-            if conditions.len() == 1 {
-                if let Some(ColumnCondition::In(values)) = conditions.get(&key) {
+        if let OnlyWhen::Single(conditions) = self
+            && conditions.len() == 1
+                && let Some(ColumnCondition::In(values)) = conditions.get(&key) {
                     return Some(values);
                 }
-            }
-        }
         None
     }
 
@@ -750,7 +745,7 @@ impl DeletablePermission {
             DeletablePermission::WithConstraints(c) => c
                 .requires_approval
                 .as_ref()
-                .map_or(false, |r| r.is_required()),
+                .is_some_and(|r| r.is_required()),
         }
     }
 

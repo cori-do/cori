@@ -252,11 +252,10 @@ impl ToolExecutor {
     /// Get the primary key columns for a table from schema.
     /// Returns empty vector if no primary key is defined in the schema.
     fn get_primary_key_columns(&self, table: &str) -> Vec<String> {
-        if let Some(schema) = &self.schema {
-            if let Some(table_schema) = schema.get_table(table) {
+        if let Some(schema) = &self.schema
+            && let Some(table_schema) = schema.get_table(table) {
                 return table_schema.primary_key.clone();
             }
-        }
         // No schema or table not found - return empty (no PK)
         Vec::new()
     }
@@ -266,13 +265,11 @@ impl ToolExecutor {
         if let Some(perms) = self.role.tables.get(table) {
             // Check if any updatable column has only_when constraints with old.* conditions
             for col_name in perms.updatable.column_names() {
-                if let Some(constraints) = perms.updatable.get_constraints(col_name) {
-                    if let Some(only_when) = &constraints.only_when {
-                        if only_when.has_old_conditions() {
+                if let Some(constraints) = perms.updatable.get_constraints(col_name)
+                    && let Some(only_when) = &constraints.only_when
+                        && only_when.has_old_conditions() {
                             return true;
                         }
-                    }
-                }
             }
         }
         false
@@ -488,8 +485,8 @@ impl ToolExecutor {
         }
 
         // 2. Check if approval is required (role-level requires_approval)
-        if let Some(approval_fields) = validator.requires_approval(&validation_request) {
-            if !options.dry_run {
+        if let Some(approval_fields) = validator.requires_approval(&validation_request)
+            && !options.dry_run {
                 // Determine if this is an update/delete operation that needs a snapshot
                 let request = match &operation {
                     ToolOperation::Update { table } | ToolOperation::Delete { table } => {
@@ -554,8 +551,8 @@ impl ToolExecutor {
                 };
 
                 // Log approval request with full context (arguments and original state)
-                if let Some(logger) = &self.audit_logger {
-                    if let Ok(event_id) = logger
+                if let Some(logger) = &self.audit_logger
+                    && let Ok(event_id) = logger
                         .log_approval_requested_with_context(
                             &context.role,
                             &context.tenant_id,
@@ -578,11 +575,9 @@ impl ToolExecutor {
                             tracing::warn!(error = %e, "Failed to update approval request with audit IDs");
                         }
                     }
-                }
                 return ExecutionResult::pending_approval(ApprovalPendingResponse::from(&request));
             }
             // In dry-run mode, continue to show what would happen
-        }
 
         // 3. Validate arguments against tool schema constraints
         if let Err(e) = self.validate_arguments(tool, &arguments) {
@@ -781,11 +776,10 @@ impl ToolExecutor {
         // Check required fields
         if let Some(required) = schema["required"].as_array() {
             for req in required {
-                if let Some(field) = req.as_str() {
-                    if arguments.get(field).is_none() {
+                if let Some(field) = req.as_str()
+                    && arguments.get(field).is_none() {
                         return Err(format!("Missing required field: {}", field));
                     }
-                }
             }
         }
 
@@ -805,50 +799,42 @@ impl ToolExecutor {
                     }
 
                     // Check type
-                    if let Some(expected_type) = prop_schema["type"].as_str() {
-                        if !self.check_type(value, expected_type) {
+                    if let Some(expected_type) = prop_schema["type"].as_str()
+                        && !self.check_type(value, expected_type) {
                             return Err(format!(
                                 "Invalid type for '{}': expected {}, got {:?}",
                                 field, expected_type, value
                             ));
                         }
-                    }
 
                     // Check min/max
-                    if let Some(min) = prop_schema["minimum"].as_f64() {
-                        if let Some(v) = value.as_f64() {
-                            if v < min {
+                    if let Some(min) = prop_schema["minimum"].as_f64()
+                        && let Some(v) = value.as_f64()
+                            && v < min {
                                 return Err(format!(
                                     "Value for '{}' must be at least {}",
                                     field, min
                                 ));
                             }
-                        }
-                    }
-                    if let Some(max) = prop_schema["maximum"].as_f64() {
-                        if let Some(v) = value.as_f64() {
-                            if v > max {
+                    if let Some(max) = prop_schema["maximum"].as_f64()
+                        && let Some(v) = value.as_f64()
+                            && v > max {
                                 return Err(format!(
                                     "Value for '{}' must be at most {}",
                                     field, max
                                 ));
                             }
-                        }
-                    }
 
                     // Check pattern
-                    if let Some(pattern) = prop_schema["pattern"].as_str() {
-                        if let Some(s) = value.as_str() {
-                            if let Ok(re) = regex::Regex::new(pattern) {
-                                if !re.is_match(s) {
+                    if let Some(pattern) = prop_schema["pattern"].as_str()
+                        && let Some(s) = value.as_str()
+                            && let Ok(re) = regex::Regex::new(pattern)
+                                && !re.is_match(s) {
                                     return Err(format!(
                                         "Value for '{}' does not match pattern: {}",
                                         field, pattern
                                     ));
                                 }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -1229,15 +1215,14 @@ impl ToolExecutor {
         }
 
         // Validate required fields and apply default values from role's creatable column constraints
-        if let Some(creatable) = self.role.get_creatable_columns(table) {
-            if let Some(constraints_map) = creatable.as_map() {
+        if let Some(creatable) = self.role.get_creatable_columns(table)
+            && let Some(constraints_map) = creatable.as_map() {
                 for (col_name, constraints) in constraints_map {
                     // Skip tenant column - it's handled separately from the token
-                    if let Some(tc) = &tenant_column {
-                        if col_name == tc {
+                    if let Some(tc) = &tenant_column
+                        && col_name == tc {
                             continue;
                         }
-                    }
 
                     let has_value = final_args.contains_key(col_name);
 
@@ -1250,14 +1235,12 @@ impl ToolExecutor {
                     }
 
                     // If column not provided and has a default, apply it
-                    if !has_value {
-                        if let Some(default_val) = &constraints.default {
+                    if !has_value
+                        && let Some(default_val) = &constraints.default {
                             final_args.insert(col_name.clone(), default_val.clone());
                         }
-                    }
                 }
             }
-        }
 
         // Start with tenant column (if table is tenant-scoped)
         // SECURITY: Tenant value ALWAYS comes from the Biscuit token, never from user input
@@ -1420,21 +1403,18 @@ impl ToolExecutor {
             }
 
             // Check only_when constraint from role definition for restrict_to pattern
-            if let Some(cols) = updatable_columns {
-                if let Some(constraints) = cols.get_constraints(key) {
+            if let Some(cols) = updatable_columns
+                && let Some(constraints) = cols.get_constraints(key) {
                     // Check if there's a simple new.<col>: [values] restriction
-                    if let Some(only_when) = &constraints.only_when {
-                        if let Some(allowed_values) = only_when.get_new_value_restriction(key) {
-                            if !allowed_values.contains(value) {
+                    if let Some(only_when) = &constraints.only_when
+                        && let Some(allowed_values) = only_when.get_new_value_restriction(key)
+                            && !allowed_values.contains(value) {
                                 return ExecutionResult::error(format!(
                                     "Value '{}' for column '{}' not in allowed values: {:?}",
                                     value, key, allowed_values
                                 ));
                             }
-                        }
-                    }
                 }
-            }
 
             // Build SET clause with inline values
             if let Some(s) = value.as_str() {

@@ -381,7 +381,7 @@ impl McpServer {
 
         // Start HTTP server with or without authentication
         let http_server = match &self.public_key {
-            Some(pk) => HttpServer::with_auth(self.config.get_port(), request_tx, pk.clone()),
+            Some(pk) => HttpServer::with_auth(self.config.get_port(), request_tx, *pk),
             None => {
                 tracing::warn!(
                     "No public key configured - MCP HTTP server running WITHOUT authentication!"

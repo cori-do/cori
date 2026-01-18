@@ -381,11 +381,10 @@ struct DbConfig {
 /// Build database URL from upstream config.
 fn build_database_url(upstream: &UpstreamConfig) -> anyhow::Result<String> {
     // First check for database_url_env
-    if let Some(env_var) = &upstream.database_url_env {
-        if let Ok(url) = env::var(env_var) {
+    if let Some(env_var) = &upstream.database_url_env
+        && let Ok(url) = env::var(env_var) {
             return Ok(url);
         }
-    }
 
     // Check for direct database_url
     if let Some(url) = &upstream.database_url {

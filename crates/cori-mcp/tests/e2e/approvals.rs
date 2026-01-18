@@ -439,23 +439,6 @@ pub async fn test_approval_manager_default(_ctx: &TestContext) {
 }
 
 // =============================================================================
-// APPROVAL STATUS
-// =============================================================================
-
-pub async fn test_approval_status_variants(_ctx: &TestContext) {
-    println!("  🧪 test_approval_status_variants");
-
-    // Test all status variants
-    assert_eq!(ApprovalStatus::Pending, ApprovalStatus::Pending);
-    assert_eq!(ApprovalStatus::Approved, ApprovalStatus::Approved);
-    assert_eq!(ApprovalStatus::Rejected, ApprovalStatus::Rejected);
-    assert_eq!(ApprovalStatus::Expired, ApprovalStatus::Expired);
-    assert_eq!(ApprovalStatus::Cancelled, ApprovalStatus::Cancelled);
-
-    println!("     ✓ ApprovalStatus variants work correctly");
-}
-
-// =============================================================================
 // ROLE HELPERS FOR APPROVALS
 // =============================================================================
 
@@ -659,9 +642,6 @@ pub async fn run_all_tests(ctx: &TestContext) {
     test_approval_manager_list_pending(ctx).await;
     test_approval_manager_expired_request(ctx).await;
     test_approval_manager_default(ctx).await;
-
-    // Approval status
-    test_approval_status_variants(ctx).await;
 
     // Role helpers
     test_role_table_requires_approval_helper(ctx).await;

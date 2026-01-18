@@ -58,7 +58,7 @@ impl<'a> ValidationRequest<'a> {
     pub fn pk_columns(&self) -> Vec<&str> {
         self.primary_key_columns
             .as_ref()
-            .map(|cols| cols.iter().copied().collect())
+            .map(|cols| cols.to_vec())
             .unwrap_or_default()
     }
 

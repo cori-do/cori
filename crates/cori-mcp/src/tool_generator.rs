@@ -192,11 +192,10 @@ impl ToolGenerator {
 
         // Add filter properties for readable columns
         let filter_props = self.generate_filter_properties(table_name, table_schema);
-        if let Value::Object(ref mut props) = properties {
-            if let Value::Object(filters) = filter_props {
+        if let Value::Object(ref mut props) = properties
+            && let Value::Object(filters) = filter_props {
                 props.extend(filters);
             }
-        }
 
         ToolDefinition {
             name: format!("list{}", pluralize(entity_name)),
@@ -599,11 +598,10 @@ impl ToolGenerator {
         let mut schema = json!({ "type": base_type });
 
         // Extract enum values from only_when if it's a simple new.<col>: [values] pattern
-        if let Some(only_when) = &constraints.only_when {
-            if let Some(values) = only_when.get_new_value_restriction(col_name) {
+        if let Some(only_when) = &constraints.only_when
+            && let Some(values) = only_when.get_new_value_restriction(col_name) {
                 schema["enum"] = json!(values);
             }
-        }
 
         // Add format if applicable
         if let Some(format) = col_schema.json_schema_format() {
@@ -629,11 +627,10 @@ impl ToolGenerator {
         let mut schema = json!({ "type": "string" });
 
         // Extract enum values from only_when if it's a simple new.<col>: [values] pattern
-        if let Some(only_when) = &constraints.only_when {
-            if let Some(values) = only_when.get_new_value_restriction(col_name) {
+        if let Some(only_when) = &constraints.only_when
+            && let Some(values) = only_when.get_new_value_restriction(col_name) {
                 schema["enum"] = json!(values);
             }
-        }
 
         if let Some(guidance) = &constraints.guidance {
             schema["description"] = json!(guidance);

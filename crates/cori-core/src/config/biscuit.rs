@@ -27,19 +27,17 @@ impl BiscuitConfig {
     /// Resolve the public key from environment or file.
     pub fn resolve_public_key(&self) -> Result<Option<String>, std::io::Error> {
         // Try environment variable first
-        if let Some(env_var) = &self.public_key_env {
-            if let Ok(key) = std::env::var(env_var) {
+        if let Some(env_var) = &self.public_key_env
+            && let Ok(key) = std::env::var(env_var) {
                 return Ok(Some(key));
             }
-        }
 
         // Try file path
-        if let Some(path) = &self.public_key_file {
-            if path.exists() {
+        if let Some(path) = &self.public_key_file
+            && path.exists() {
                 let key = std::fs::read_to_string(path)?;
                 return Ok(Some(key.trim().to_string()));
             }
-        }
 
         Ok(None)
     }
@@ -47,19 +45,17 @@ impl BiscuitConfig {
     /// Resolve the private key from environment or file.
     pub fn resolve_private_key(&self) -> Result<Option<String>, std::io::Error> {
         // Try environment variable first
-        if let Some(env_var) = &self.private_key_env {
-            if let Ok(key) = std::env::var(env_var) {
+        if let Some(env_var) = &self.private_key_env
+            && let Ok(key) = std::env::var(env_var) {
                 return Ok(Some(key));
             }
-        }
 
         // Try file path
-        if let Some(path) = &self.private_key_file {
-            if path.exists() {
+        if let Some(path) = &self.private_key_file
+            && path.exists() {
                 let key = std::fs::read_to_string(path)?;
                 return Ok(Some(key.trim().to_string()));
             }
-        }
 
         Ok(None)
     }

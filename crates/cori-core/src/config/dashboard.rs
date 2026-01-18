@@ -68,11 +68,10 @@ impl BasicAuthUser {
     /// Get the password, checking password_env first.
     pub fn get_password(&self) -> Option<String> {
         // Try password_env first
-        if let Some(env_var) = &self.password_env {
-            if let Ok(password) = std::env::var(env_var) {
+        if let Some(env_var) = &self.password_env
+            && let Ok(password) = std::env::var(env_var) {
                 return Some(password);
             }
-        }
         // Fall back to direct password
         self.password.clone()
     }
@@ -103,11 +102,10 @@ impl OidcConfig {
     /// Get the client secret, checking client_secret_env first.
     pub fn get_client_secret(&self) -> Option<String> {
         // Try client_secret_env first
-        if let Some(env_var) = &self.client_secret_env {
-            if let Ok(secret) = std::env::var(env_var) {
+        if let Some(env_var) = &self.client_secret_env
+            && let Ok(secret) = std::env::var(env_var) {
                 return Some(secret);
             }
-        }
         // Fall back to direct secret
         self.client_secret.clone()
     }
