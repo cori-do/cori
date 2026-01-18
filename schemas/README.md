@@ -6,11 +6,65 @@ This folder contains JSON Schema definitions for validating Cori's YAML configur
 
 | Schema | File | Purpose |
 |--------|------|---------|
+| [CoriDefinition](#coridefinition) | `CoriDefinition.schema.json` | Main configuration file (`cori.yaml`) |
 | [SchemaDefinition](#schemadefinition) | `SchemaDefinition.schema.json` | Auto-generated database structure |
 | [RulesDefinition](#rulesdefinition) | `RulesDefinition.schema.json` | Tenancy, soft-delete, and validation rules |
 | [TypesDefinition](#typesdefinition) | `TypesDefinition.schema.json` | Reusable semantic types for validation |
 | [RoleDefinition](#roledefinition) | `RoleDefinition.schema.json` | AI agent roles with table/column permissions |
 | [GroupDefinition](#groupdefinition) | `GroupDefinition.schema.json` | Approval groups for human-in-the-loop |
+| [AuditEvent](#auditevent) | `AuditEvent.schema.json` | Audit log event structure |
+
+---
+
+## CoriDefinition
+
+**File:** `CoriDefinition.schema.json`  
+**Config file:** `cori.yaml`  
+**Managed by:** User
+
+The main configuration file that defines database connection, Biscuit token settings, MCP server configuration, dashboard settings, and audit logging. This is the entry point for configuring a Cori instance.
+
+### Sections
+
+| Section | Required | Description |
+|---------|----------|-------------|
+| `project` | No | Project name identifier |
+| `version` | No | Configuration version (e.g., "1.0") |
+| `upstream` | **Yes** | PostgreSQL database connection |
+| `biscuit` | No | Biscuit token keys (defaults to `keys/` directory) |
+| `mcp` | No | MCP server settings (defaults to stdio transport) |
+| `dashboard` | No | Admin web UI settings |
+| `audit` | No | Audit logging configuration |
+| `observability` | No | Metrics, health checks, and tracing |
+
+### Example
+
+```yaml
+project: my-saas-app
+version: "1.0"
+
+upstream:
+  database_url_env: DATABASE_URL
+  pool:
+    min_connections: 1
+    max_connections: 10
+
+biscuit:
+  public_key_file: keys/public.key
+  private_key_file: keys/private.key
+
+mcp:
+  enabled: true
+  transport: stdio
+
+dashboard:
+  enabled: true
+  port: 8080
+
+audit:
+  enabled: true
+  directory: logs/
+```
 
 ---
 
@@ -146,10 +200,20 @@ Defines AI agent roles with granular table and column permissions. Roles control
 
 | Permission | Description |
 |------------|-------------|
-| `readable` | Columns the agent can SELECT |
+| `readable` | Columns the agent can SELECT (with optional pagination limit) |
 | `creatable` | Columns the agent can set on INSERT (with constraints) |
 | `updatable` | Columns the agent can modify on UPDATE (with constraints) |
 | `deletable` | Whether DELETE is allowed (with optional soft-delete/approval) |
+
+### Readable Configuration
+
+The `readable` field supports multiple formats:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `"*"` | `readable: "*"` | All columns |
+| Array | `readable: [id, name, email]` | Specific columns |
+| Object | `readable: { columns: [...], max_per_page: 100 }` | Columns with pagination limit |
 
 ### Column Constraints
 
@@ -161,13 +225,46 @@ Defines AI agent roles with granular table and column permissions. Roles control
 - `guidance`: Instructions for AI agents
 
 **For updatable columns:**
-- `restrict_to`: Whitelist of allowed values
-- `transitions`: State machine (valid from → to transitions)
-- `only_when`: Conditional update (only if current value matches)
-- `increment_only`: Numeric values can only increase
-- `append_only`: Text values can only be appended
+- `only_when`: Conditional update rules using `old.*` (current value) and `new.*` (incoming value) syntax
 - `requires_approval`: Human approval needed
 - `guidance`: Instructions for AI agents
+
+**For deletable:**
+- `true`: Hard delete allowed
+- `false`: Delete not allowed
+- `{ requires_approval: true }`: Delete requires human approval
+- `{ soft_delete: true }`: Use soft delete (set column instead of removing)
+- `{ requires_approval: true, soft_delete: true }`: Both
+
+### `only_when` Syntax
+
+The `only_when` constraint uses `old.<column>` for current row values and `new.<column>` for incoming values:
+
+| Pattern | Description |
+|---------|-------------|
+| `new.status: [open, closed]` | Restrict new value to a whitelist |
+| `old.status: open, new.status: [closed]` | State transition (open → closed) |
+| `new.quantity: { greater_than: old.quantity }` | Increment only |
+| `new.notes: { starts_with: old.notes }` | Append only |
+| Array of conditions | OR logic (any can match) |
+
+### Comparison Operators
+
+Available in `only_when` conditions:
+
+| Operator | Description |
+|----------|-------------|
+| `equals` | Must equal value |
+| `not_equals` | Must not equal value |
+| `greater_than` | Must be greater than value or `old.<column>` |
+| `greater_than_or_equal` | Must be greater than or equal |
+| `lower_than` | Must be less than value or `old.<column>` |
+| `lower_than_or_equal` | Must be less than or equal |
+| `not_null` | Must not be null |
+| `is_null` | Must be null |
+| `in` | Must be one of these values |
+| `not_in` | Must not be one of these values |
+| `starts_with` | Must start with value or `old.<column>` |
 
 ### Example
 
@@ -181,25 +278,42 @@ approvals:
 
 tables:
   customers:
-    readable: [id, name, email, plan]
+    readable:
+      columns: [id, name, email, plan, created_at]
+      max_per_page: 100
     # No creatable/updatable = read-only
     
   tickets:
-    readable: [id, subject, status, priority, created_at]
+    readable:
+      columns: [id, subject, status, priority, created_at]
+      max_per_page: 100
     creatable:
       subject: { required: true }
-      priority: { default: low, restrict_to: [low, medium, high] }
+      description: { required: true }
+      customer_id: { required: true }
+      priority: { default: medium, restrict_to: [low, medium, high] }
+      status: { default: open, restrict_to: [open] }
     updatable:
       status:
-        restrict_to: [open, in_progress, resolved]
-        transitions:
-          open: [in_progress]
-          in_progress: [open, resolved]
+        only_when:
+          - { old.status: open, new.status: [in_progress, resolved] }
+          - { old.status: in_progress, new.status: [open, resolved, escalated] }
+          - { old.status: resolved, new.status: open }
       priority:
+        only_when: { new.priority: [low, medium, high] }
         requires_approval: true
+      description:
+        only_when:
+          old.status: [open, in_progress]
+          new.description: { starts_with: old.description }
     deletable: false
 
-default_page_size: 100
+  inventory:
+    readable: [id, product_id, quantity, warehouse_id]
+    updatable:
+      quantity:
+        only_when: { new.quantity: { greater_than: old.quantity } }
+        guidance: "Quantity can only be increased, never decreased"
 ```
 
 ---
@@ -260,15 +374,75 @@ approvals:
 
 ---
 
+## AuditEvent
+
+**File:** `AuditEvent.schema.json`  
+**Generated by:** Cori audit system  
+**Managed by:** Automatic (read-only)
+
+Defines the structure of audit log events written by Cori. These events provide a tamper-evident record of all database operations performed through MCP.
+
+### Event Types
+
+| Type | Description |
+|------|-------------|
+| `intent_received` | A mutation intent was received from an agent |
+| `plan_validated` | The execution plan was validated |
+| `policy_checked` | Policy check was performed |
+| `approval_required` | Action requires human approval |
+| `approved` | Action was approved by a human |
+| `action_previewed` | Dry-run preview was executed |
+| `action_executed` | Action was executed |
+| `verification_failed` | Post-execution verification failed |
+| `committed` | Transaction was committed |
+| `compensated` | Compensation was applied after failure |
+| `failed` | Action failed |
+
+### Required Fields
+
+| Field | Description |
+|-------|-------------|
+| `event_id` | Unique UUID for this event |
+| `occurred_at` | UTC timestamp (RFC3339) |
+| `tenant_id` | Tenant the event relates to |
+| `intent_id` | The mutation intent this event is part of |
+| `principal_id` | The user/agent that initiated the action |
+| `step_id` | Step within the plan (or `__intent__` for intent-level) |
+| `event_type` | One of the event types above |
+| `action` | The action performed (insert, update, delete) |
+| `allowed` | Whether the action was allowed by policy |
+
+### Example
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "occurred_at": "2026-01-18T10:30:00Z",
+  "tenant_id": "acme_corp",
+  "intent_id": "intent_123",
+  "principal_id": "support_agent",
+  "step_id": "step_1",
+  "event_type": "action_executed",
+  "action": "update",
+  "resource_kind": "table",
+  "resource_id": "tickets",
+  "allowed": true,
+  "preview": false
+}
+```
+
+---
+
 ## Validation
 
 Use the CLI to validate all configuration files against these schemas:
 
 ```bash
-cori validate --config cori.yaml
+cori check
 ```
 
 This validates:
+- `cori.yaml` against `CoriDefinition.schema.json`
 - `schema/schema.yaml` against `SchemaDefinition.schema.json`
 - `schema/rules.yaml` against `RulesDefinition.schema.json`
 - `schema/types.yaml` against `TypesDefinition.schema.json`
@@ -289,6 +463,7 @@ Add to `.vscode/settings.json`:
 ```json
 {
   "yaml.schemas": {
+    "./schemas/CoriDefinition.schema.json": "cori.yaml",
     "./schemas/SchemaDefinition.schema.json": "schema/schema.yaml",
     "./schemas/RulesDefinition.schema.json": "schema/rules.yaml",
     "./schemas/TypesDefinition.schema.json": "schema/types.yaml",
