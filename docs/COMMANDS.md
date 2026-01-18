@@ -181,6 +181,12 @@ Set as environment variables:
 
 Biscuit token management commands.
 
+All token commands use **convention over configuration** — keys are automatically loaded from:
+1. Explicit `--key` argument (file path or hex string)
+2. Environment variable (`BISCUIT_PRIVATE_KEY` or `BISCUIT_PUBLIC_KEY`)
+3. Configuration in `cori.yaml` (`biscuit.private_key_file` / `biscuit.public_key_file`)
+4. Default location: `keys/private.key` / `keys/public.key`
+
 ### `token mint`
 
 Mint a new role token (or agent token if `--tenant` is specified).
@@ -195,8 +201,9 @@ cori token mint --role <role> [options]
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `--config`, `-c` | ❌ | `cori.yaml` | Path to configuration file (for key resolution) |
 | `--role` | ✅ | | Role name for the token |
-| `--key` | ❌ | `$BISCUIT_PRIVATE_KEY` | Path to private key file OR hex-encoded key |
+| `--key` | ❌ | (from config) | Path to private key file OR hex-encoded key (overrides config) |
 | `--tenant` | ❌ | | Tenant ID (if specified, creates an attenuated agent token) |
 | `--expires` | ❌ | | Expiration duration (e.g., `24h`, `7d`, `30m`, `60s`) |
 | `--table` | ❌ | | Tables to grant access to. Format: `table:col1,col2` or just `table`. Can be repeated. |
@@ -206,13 +213,13 @@ cori token mint --role <role> [options]
 
 | Variable | Description |
 |----------|-------------|
-| `BISCUIT_PRIVATE_KEY` | Hex-encoded private key (used if `--key` not provided) |
+| `BISCUIT_PRIVATE_KEY` | Hex-encoded private key (fallback if not in config) |
 
 #### Example
 
 ```bash
-# Mint a base role token (no tenant restriction)
-cori token mint --role support_agent --key keys/private.key --output role.token
+# Mint a base role token (uses keys/private.key by default)
+cori token mint --role support_agent --output role.token
 
 # Mint an agent token with tenant restriction
 cori token mint \
@@ -222,6 +229,9 @@ cori token mint \
   --table customers:id,name,email \
   --table orders \
   --output agent.token
+
+# With explicit key (overrides config)
+cori token mint --role support_agent --key /path/to/private.key --output role.token
 
 # Using environment variable for key
 export BISCUIT_PRIVATE_KEY=$(cat keys/private.key)
@@ -256,9 +266,10 @@ cori token attenuate --base <token-file> --tenant <id> [options]
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `--config`, `-c` | ❌ | `cori.yaml` | Path to configuration file (for key resolution) |
 | `--base` | ✅ | | Path to base role token file |
 | `--tenant` | ✅ | | Tenant ID to restrict the token to |
-| `--key` | ❌ | `$BISCUIT_PRIVATE_KEY` | Path to private key file OR hex-encoded key |
+| `--key` | ❌ | (from config) | Path to private key file OR hex-encoded key (overrides config) |
 | `--expires` | ❌ | | Expiration duration (e.g., `24h`, `7d`) |
 | `--output`, `-o` | ❌ | | Output file path. If not specified, prints to stdout. |
 
@@ -266,17 +277,23 @@ cori token attenuate --base <token-file> --tenant <id> [options]
 
 | Variable | Description |
 |----------|-------------|
-| `BISCUIT_PRIVATE_KEY` | Hex-encoded private key (used if `--key` not provided) |
+| `BISCUIT_PRIVATE_KEY` | Hex-encoded private key (fallback if not in config) |
 
 #### Example
 
 ```bash
-# Attenuate a role token for a specific tenant
+# Attenuate a role token for a specific tenant (uses keys/private.key by default)
 cori token attenuate \
   --base role.token \
   --tenant client_a \
   --expires 24h \
-  --key keys/private.key \
+  --output agent.token
+
+# With explicit key (overrides config)
+cori token attenuate \
+  --base role.token \
+  --tenant client_a \
+  --key /path/to/private.key \
   --output agent.token
 ```
 
@@ -294,13 +311,13 @@ cori token attenuate \
 
 Inspect a token's contents, optionally verify with public key.
 
-- **Without `--key`**: Shows unverified token contents (block count, facts, checks) with a warning.
-- **With `--key`**: Verifies signature and shows validity status.
+- **Without `--verify`**: Shows unverified token contents (block count, facts, checks) with a warning.
+- **With `--verify`**: Verifies signature using key from config or `--key`.
 
 #### Usage
 
 ```bash
-cori token inspect <token> [--key <path>]
+cori token inspect <token> [options]
 ```
 
 #### Arguments
@@ -308,13 +325,15 @@ cori token inspect <token> [--key <path>]
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `<token>` | ✅ | | Token string OR path to token file |
-| `--key` | ❌ | `$BISCUIT_PUBLIC_KEY` | Path to public key file OR hex-encoded key for verification |
+| `--config`, `-c` | ❌ | `cori.yaml` | Path to configuration file (for key resolution) |
+| `--key` | ❌ | (from config) | Path to public key file OR hex-encoded key (overrides config) |
+| `--verify` | ❌ | `false` | Verify the token signature using key from config or `--key` |
 
 #### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `BISCUIT_PUBLIC_KEY` | Hex-encoded public key (used if `--key` not provided) |
+| `BISCUIT_PUBLIC_KEY` | Hex-encoded public key (fallback if not in config) |
 
 #### Example
 
@@ -322,8 +341,11 @@ cori token inspect <token> [--key <path>]
 # Inspect a token from file (unverified)
 cori token inspect agent.token
 
-# Inspect and verify a token
-cori token inspect agent.token --key keys/public.key
+# Inspect and verify a token (uses keys/public.key from config)
+cori token inspect agent.token --verify
+
+# Verify with explicit key (overrides config)
+cori token inspect agent.token --key /path/to/public.key
 
 # Inspect a token string directly
 cori token inspect "En0KEwoEY..."
@@ -340,7 +362,7 @@ Biscuit {
     authority: ...
 }
 
-💡 Use --key <public.key> to verify the token signature
+💡 Use --verify to verify the token signature (uses key from cori.yaml)
 ```
 
 #### Output (Verified - Success)
@@ -504,13 +526,14 @@ cori tools list [options]
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `--config`, `-c` | ❌ | `cori.yaml` | Path to configuration file (YAML) |
 | `--role` | ❌* | | Role name to generate tools for |
 | `--token`, `-t` | ❌* | | Token file to extract role from |
-| `--key` | ❌ | | Public key file for token verification (required with `--token`) |
-| `--roles-dir` | ❌ | `roles` | Directory containing role configuration files |
 | `--verbose` | ❌ | `false` | Show detailed tool schemas |
 
 *Either `--role` or `--token` is required (mutually exclusive).
+
+When using `--token`, the public key is loaded from the configuration (see convention over configuration).
 
 #### Example
 
@@ -518,11 +541,14 @@ cori tools list [options]
 # List tools for a role
 cori tools list --role support_agent
 
-# List tools from a token
-cori tools list --token agent.token --key keys/public.key
+# List tools from a token (uses public key from cori.yaml)
+cori tools list --token agent.token
 
 # Show detailed schemas
 cori tools list --role support_agent --verbose
+
+# With custom config
+cori tools list --config /path/to/cori.yaml --role support_agent
 ```
 
 #### Output
@@ -563,7 +589,7 @@ Show detailed schema for a specific tool.
 #### Usage
 
 ```bash
-cori tools describe <tool> --role <role> [--roles-dir <path>]
+cori tools describe <tool> --role <role> [--config <path>]
 ```
 
 #### Arguments
@@ -572,7 +598,7 @@ cori tools describe <tool> --role <role> [--roles-dir <path>]
 |----------|----------|---------|-------------|
 | `<tool>` | ✅ | | Tool name to describe |
 | `--role` | ✅ | | Role name |
-| `--roles-dir` | ❌ | `roles` | Directory containing role configuration files |
+| `--config`, `-c` | ❌ | `cori.yaml` | Path to configuration file (YAML) |
 
 #### Example
 
@@ -707,14 +733,14 @@ cori init --from-db "postgres://..." --project myproject
 # 3. Validate configuration
 cori check
 
-# 4. Mint a role token
-cori token mint --role support_agent --key keys/private.key --output role.token
+# 4. Mint a role token (uses keys/private.key by default)
+cori token mint --role support_agent --output role.token
 
 # 5. Attenuate for a specific tenant
 cori token attenuate --base role.token --tenant acme --expires 24h --output agent.token
 
-# 6. Verify the token
-cori token inspect agent.token --key keys/public.key
+# 6. Verify the token (uses keys/public.key from config)
+cori token inspect agent.token --verify
 
 # 7. Start the server
 cori run --config cori.yaml

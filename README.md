@@ -94,15 +94,14 @@ cori run
 ### 3. Mint a Token
 
 ```sh
-# Create a role token
-cori token mint --role support_agent --key keys/private.key --output role.token
+# Create a role token (uses keys/private.key by default)
+cori token mint --role support_agent --output role.token
 
 # Attenuate for a specific tenant
 cori token attenuate \
     --base role.token \
     --tenant acme_corp \
     --expires 24h \
-    --key keys/private.key \
     --output agent.token
 ```
 
