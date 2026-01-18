@@ -16,16 +16,12 @@ thiserror.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
 
 # Logging
 tracing.workspace = true
 
 # HTTP server for MCP HTTP transport
 axum.workspace = true
-
-# Async traits
-async-trait.workspace = true
 
 # Date/time handling
 chrono.workspace = true
@@ -34,7 +30,6 @@ chrono.workspace = true
 uuid.workspace = true
 
 # Async stream utilities
-futures = "0.3"
 async-stream = "0.3"
 
 # Regex for JSON schema pattern validation
