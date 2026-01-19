@@ -84,19 +84,19 @@ pub fn home_page(config: &CoriConfig, role_count: usize, pending_approvals: usiz
             r##"<div class="space-y-4">
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">MCP HTTP</span>
-                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">localhost:{mcp_port}</code>
+                <code class="text-sm bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">localhost:{mcp_port}</code>
             </div>
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">Dashboard</span>
-                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">localhost:{dashboard_port}</code>
+                <code class="text-sm bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">localhost:{dashboard_port}</code>
             </div>
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">MCP Transport</span>
-                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">{mcp_transport}</code>
+                <code class="text-sm bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">{mcp_transport}</code>
             </div>
             <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <span class="text-gray-600 dark:text-gray-400">Upstream DB</span>
-                <code class="text-sm bg-gray-200 dark:bg-gray-800 px-2 py-1 rounded">{upstream_host}:{upstream_port}</code>
+                <code class="text-sm bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">{upstream_host}:{upstream_port}</code>
             </div>
         </div>"##,
             mcp_port = config.mcp.get_port(),
@@ -163,14 +163,14 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                             </div>
                             <div class="flex items-center gap-4">
                                 <span class="text-sm text-gray-500 dark:text-gray-400">{column_count} columns</span>
-                                <i class="fas fa-chevron-down transform transition-transform" :class="{{ 'rotate-180': open }}"></i>
+                                <i class="fas fa-chevron-down text-gray-500 dark:text-gray-400 transform transition-transform" :class="{{ 'rotate-180': open }}"></i>
                             </div>
                         </button>
                         <div x-show="open" x-collapse>
                             <div class="border-t border-gray-200 dark:border-gray-700 p-4">
                                 <div class="mb-4 flex items-center gap-4 text-sm">
                                     <span class="text-gray-500 dark:text-gray-400">Tenant Column:</span>
-                                    <code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded">{tenant_column}</code>
+                                    <code class="bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">{tenant_column}</code>
                                     {pk_info}
                                 </div>
                                 <table class="w-full">
@@ -197,7 +197,7 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                     status_badge = status_badge,
                     pk_info = if !t.primary_key.is_empty() {
                         format!(r#"<span class="text-gray-500 dark:text-gray-400">Primary Key:</span>
-                                   <code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded">{}</code>"#,
+                                   <code class="bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-2 py-1 rounded">{}</code>"#,
                             t.primary_key.join(", "))
                     } else {
                         String::new()
@@ -211,7 +211,7 @@ pub fn schema_browser_page(schema: Option<&SchemaInfo>, rules: Option<&RulesDefi
                             </ul>
                         </div>"##,
                         t.foreign_keys.iter().map(|fk| {
-                            format!(r#"<li><code class="bg-gray-100 dark:bg-gray-800 px-1 rounded">{}</code> → <code class="bg-gray-100 dark:bg-gray-800 px-1 rounded">{}.{}</code></li>"#,
+                            format!(r#"<li><code class="bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-1 rounded">{}</code> → <code class="bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-300 px-1 rounded">{}.{}</code></li>"#,
                                 fk.columns.join(", "),
                                 fk.references_table,
                                 fk.references_columns.join(", "))
@@ -358,7 +358,7 @@ pub fn roles_page(roles: &HashMap<String, RoleDefinition>) -> String {
                     </div>
 
                     <div class="flex gap-2 pt-4 border-t border-gray-100 dark:border-gray-700">
-                        <a href="/roles/{name}" class="flex-1 text-center py-2 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
+                        <a href="/roles/{name}" class="flex-1 text-center py-2 text-sm bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
                             View Details
                         </a>
                         <a href="/tokens?role={name}" class="flex-1 text-center py-2 text-sm bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 hover:bg-primary-200 dark:hover:bg-primary-900/50 rounded-lg transition-colors">

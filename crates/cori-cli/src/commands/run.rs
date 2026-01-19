@@ -10,7 +10,7 @@ use cori_audit::AuditLogger;
 use cori_biscuit::{PublicKey, TokenVerifier, keys::load_public_key_file};
 use cori_core::config::role_definition::RoleDefinition;
 use cori_core::config::rules_definition::RulesDefinition;
-use cori_core::config::{AuditConfig, DashboardConfig, McpConfig, Transport, UpstreamConfig};
+use cori_core::config::{AuditConfig, McpConfig, Transport};
 use cori_dashboard::DashboardServer;
 use cori_mcp::McpServer;
 use cori_mcp::approval::ApprovalManager;
@@ -420,6 +420,7 @@ pub async fn run(
             schema,
             approval_manager.clone(),
             run_config,
+            cori_config,
             core_roles,
             audit_logger,
             dashboard_enabled,
@@ -436,6 +437,7 @@ pub async fn run(
             schema,
             approval_manager.clone(),
             run_config,
+            cori_config,
             core_roles,
             audit_logger,
             effective_mcp_port,
@@ -456,6 +458,7 @@ async fn run_http_mode(
     schema: cori_mcp::schema::DatabaseSchema,
     approval_manager: Arc<ApprovalManager>,
     run_config: RunConfig,
+    mut cori_config: cori_core::config::CoriConfig,
     core_roles: HashMap<String, RoleDefinition>,
     audit_logger: Option<Arc<AuditLogger>>,
     mcp_port: u16,
@@ -546,15 +549,14 @@ async fn run_http_mode(
 
     // Start Dashboard (if enabled)
     if dashboard_enabled {
-        let dashboard_config = DashboardConfig {
-            enabled: true,
-            host: "127.0.0.1".to_string(),
-            port: dashboard_port,
-            ..Default::default()
-        };
+        // Use dashboard config from the loaded CoriConfig (includes auth settings)
+        // Override port if specified via CLI
+        let mut dashboard_config = cori_config.dashboard.clone();
+        dashboard_config.port = dashboard_port;
+        dashboard_config.enabled = true;
 
-        // Build CoriConfig for dashboard state
-        let cori_config = build_cori_config(&run_config, config_dir, &rules, &core_roles)?;
+        // Ensure CoriConfig also has updated dashboard config for AppState
+        cori_config.dashboard = dashboard_config.clone();
 
         let audit_logger_for_dashboard = audit_logger
             .clone()
@@ -602,6 +604,7 @@ async fn run_stdio_mode(
     schema: cori_mcp::schema::DatabaseSchema,
     approval_manager: Arc<ApprovalManager>,
     run_config: RunConfig,
+    mut cori_config: cori_core::config::CoriConfig,
     core_roles: HashMap<String, RoleDefinition>,
     audit_logger: Option<Arc<AuditLogger>>,
     dashboard_enabled: bool,
@@ -645,14 +648,15 @@ async fn run_stdio_mode(
 
     // Start dashboard in background if enabled
     let dashboard_handle = if dashboard_enabled {
-        let dashboard_config = DashboardConfig {
-            enabled: true,
-            host: "127.0.0.1".to_string(),
-            port: dashboard_port,
-            ..Default::default()
-        };
+        // Use dashboard config from the loaded CoriConfig (includes auth settings)
+        // Override port if specified via CLI
+        let mut dashboard_config = cori_config.dashboard.clone();
+        dashboard_config.port = dashboard_port;
+        dashboard_config.enabled = true;
 
-        let cori_config = build_cori_config(&run_config, config_dir, &rules, &core_roles)?;
+        // Ensure CoriConfig also has updated dashboard config for AppState
+        cori_config.dashboard = dashboard_config.clone();
+
         let audit_logger_for_dashboard = audit_logger
             .unwrap_or_else(|| Arc::new(AuditLogger::new(AuditConfig::default()).unwrap()));
         let keypair = resolve_keypair(&run_config.biscuit, config_dir)?;
@@ -870,83 +874,4 @@ fn resolve_keypair(
     anyhow::bail!(
         "No Biscuit private key found. Set biscuit.private_key_file or place key in keys/private.key"
     )
-}
-
-/// Build a CoriConfig for the dashboard state.
-fn build_cori_config(
-    run_config: &RunConfig,
-    _config_dir: &Path,
-    rules: &Option<RulesDefinition>,
-    roles: &HashMap<String, RoleDefinition>,
-) -> Result<cori_core::config::CoriConfig> {
-    use cori_core::config::CoriConfig;
-
-    let upstream = UpstreamConfig {
-        host: run_config
-            .upstream
-            .host
-            .clone()
-            .unwrap_or_else(|| "localhost".to_string()),
-        port: run_config.upstream.port,
-        database: run_config
-            .upstream
-            .database
-            .clone()
-            .unwrap_or_else(|| "postgres".to_string()),
-        username: run_config
-            .upstream
-            .username
-            .clone()
-            .unwrap_or_else(|| "postgres".to_string()),
-        password: run_config.upstream.password.clone(),
-        database_url_env: run_config.upstream.database_url_env.clone(),
-        database_url: run_config.upstream.database_url.clone(),
-        ..Default::default()
-    };
-
-    let mcp = McpConfig {
-        enabled: run_config.mcp.enabled,
-        transport: match run_config.mcp.transport.as_deref() {
-            Some("http") => Transport::Http,
-            _ => Transport::Stdio,
-        },
-        host: "127.0.0.1".to_string(),
-        port: run_config.mcp.http_port,
-    };
-
-    let dashboard = DashboardConfig {
-        enabled: run_config.dashboard.enabled,
-        host: "127.0.0.1".to_string(),
-        port: run_config.dashboard.listen_port,
-        ..Default::default()
-    };
-
-    let audit = AuditConfig {
-        enabled: run_config.audit.enabled,
-        log_queries: run_config.audit.log_queries,
-        log_results: run_config.audit.log_results,
-        ..Default::default()
-    };
-
-    Ok(CoriConfig {
-        project: None,
-        version: None,
-        upstream,
-        biscuit: cori_core::config::BiscuitConfig {
-            public_key_env: run_config.biscuit.public_key_env.clone(),
-            public_key_file: run_config.biscuit.public_key_file.clone(),
-            private_key_env: run_config.biscuit.private_key_env.clone(),
-            private_key_file: run_config.biscuit.private_key_file.clone(),
-            ..Default::default()
-        },
-        mcp,
-        dashboard,
-        audit,
-        rules: rules.clone(),
-        virtual_schema: Default::default(),
-        guardrails: Default::default(),
-        observability: Default::default(),
-        roles: roles.clone(),
-        ..Default::default()
-    })
 }

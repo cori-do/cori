@@ -23,6 +23,9 @@ tracing.workspace = true
 # HTTP server
 axum.workspace = true
 
+# Base64 encoding for Basic auth
+base64 = "0.22"
+
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
 

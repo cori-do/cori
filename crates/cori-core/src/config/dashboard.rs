@@ -127,6 +127,49 @@ impl DashboardConfig {
     pub fn get_port(&self) -> u16 {
         self.port
     }
+
+    /// Check if authentication is configured and enabled.
+    /// Returns true if at least one user has a valid password configured.
+    pub fn is_auth_configured(&self) -> bool {
+        self.auth.is_configured()
+    }
+}
+
+impl AuthConfig {
+    /// Check if authentication is properly configured.
+    /// For basic auth, at least one user must have a resolvable password.
+    /// For OIDC, the configuration must be present with required fields.
+    pub fn is_configured(&self) -> bool {
+        match self.auth_type {
+            AuthType::Basic => {
+                // Check if any user has a resolvable password
+                self.users.iter().any(|user| user.get_password().is_some())
+            }
+            AuthType::Oidc => {
+                // OIDC is configured if the oidc block is present
+                self.oidc.is_some()
+            }
+        }
+    }
+
+    /// Validate basic auth credentials.
+    /// Returns Some(username) if valid, None otherwise.
+    pub fn validate_basic_auth(&self, username: &str, password: &str) -> Option<String> {
+        if self.auth_type != AuthType::Basic {
+            return None;
+        }
+
+        for user in &self.users {
+            if user.username == username {
+                if let Some(expected_password) = user.get_password() {
+                    if expected_password == password {
+                        return Some(username.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 fn default_enabled() -> bool {

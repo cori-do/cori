@@ -98,9 +98,8 @@ fn nav_template() -> &'static str {
                 <button @click="sidebarOpen = !sidebarOpen" class="p-2 hover:bg-primary-700 rounded-lg lg:hidden">
                     <i class="fas fa-bars"></i>
                 </button>
-                <a href="/" class="flex items-center gap-2">
-                    <img src="https://assets.cori.do/cori-logo.png" alt="Cori" class="h-8">
-                    <span class="text-sm bg-primary-500 dark:bg-primary-700 px-2 py-1 rounded">Dashboard</span>
+                <a href="/">
+                    <img src="https://assets.cori.do/cori-logo-white.png" alt="Cori" class="h-8">
                 </a>
             </div>
             <div class="flex items-center gap-4">
@@ -111,9 +110,12 @@ fn nav_template() -> &'static str {
                     </span>
                 </div>
                 <button @click="darkMode = !darkMode; localStorage.setItem('darkMode', darkMode)"
-                        class="p-2 hover:bg-primary-700 rounded-lg">
+                        class="p-2 hover:bg-primary-700 rounded-lg" title="Toggle dark mode">
                     <i class="fas" :class="darkMode ? 'fa-sun' : 'fa-moon'"></i>
                 </button>
+                <a href="/logout" class="p-2 hover:bg-primary-700 rounded-lg" title="Sign out">
+                    <i class="fas fa-sign-out-alt"></i>
+                </a>
             </div>
         </div>
     </nav>"##
