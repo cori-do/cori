@@ -35,6 +35,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # URL encoding
 urlencoding = "2"
 
+# HTML escaping
+html-escape = "0.2"
+
 # Internal crates
 cori-core = { path = "../cori-core" }
 cori-biscuit = { path = "../cori-biscuit" }
