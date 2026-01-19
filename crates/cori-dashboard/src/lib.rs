@@ -20,6 +20,7 @@
 
 // Public modules
 pub mod api_types;
+pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod pages;

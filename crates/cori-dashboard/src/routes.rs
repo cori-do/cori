@@ -1,9 +1,12 @@
 //! Route definitions for the dashboard.
 
+use crate::auth::{auth_middleware, login_page, login_submit, logout};
 use crate::handlers;
 use crate::state::AppState;
 use axum::{
     Router,
+    extract::{Request, State},
+    middleware,
     routing::{delete, get, post, put},
 };
 
@@ -15,6 +18,11 @@ pub fn create_router() -> Router {
 /// Create the router with application state.
 pub fn create_router_with_state(state: AppState) -> Router {
     Router::new()
+        // Login routes (no auth required)
+        .route("/login", get(login_page))
+        .route("/login", post(login_submit))
+        .route("/logout", get(logout))
+        .route("/logout", post(logout))
         // Page routes (HTML)
         .route("/", get(handlers::home))
         .route("/schema", get(handlers::schema_browser))
@@ -28,6 +36,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/settings", get(handlers::settings))
         // API routes (JSON/HTMX)
         .nest("/api", api_routes())
+        // Apply auth middleware to all routes (before with_state)
+        .layer(middleware::from_fn_with_state::<_, _, (State<AppState>, Request)>(state.clone(), auth_middleware))
         .with_state(state)
 }
 

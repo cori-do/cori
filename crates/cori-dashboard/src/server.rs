@@ -46,6 +46,15 @@ impl DashboardServer {
     /// Start the dashboard server.
     pub async fn run(&self) -> Result<(), DashboardError> {
         let addr = format!("0.0.0.0:{}", self.config.get_port());
+        
+        // Check if authentication is configured
+        if !self.config.is_auth_configured() {
+            tracing::warn!(
+                "⚠️  Dashboard is running WITHOUT authentication! \
+                Set dashboard.auth.users[].password or dashboard.auth.users[].password_env in cori.yaml to secure access."
+            );
+        }
+        
         tracing::info!(address = %addr, "Starting Cori dashboard");
 
         let app = if let Some(state) = &self.state {

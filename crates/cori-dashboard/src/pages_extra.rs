@@ -220,9 +220,9 @@ pub fn token_result_fragment(
         </div>"##,
         type_badge = badge(token_type, if token_type == "Agent" { "green" } else { "blue" }),
         token = token,
-        role_info = role.map(|r| format!(r#"<div><span class="text-gray-500">Role:</span> <span class="font-medium">{}</span></div>"#, r)).unwrap_or_default(),
-        tenant_info = tenant.map(|t| format!(r#"<div><span class="text-gray-500">Tenant:</span> <span class="font-medium">{}</span></div>"#, t)).unwrap_or_default(),
-        expires_info = expires_at.map(|e| format!(r#"<div><span class="text-gray-500">Expires:</span> <span class="font-medium">{}</span></div>"#, e)).unwrap_or_default(),
+        role_info = role.map(|r| format!(r#"<div><span class="text-gray-500 dark:text-gray-400">Role:</span> <span class="font-medium text-gray-900 dark:text-gray-200">{}</span></div>"#, r)).unwrap_or_default(),
+        tenant_info = tenant.map(|t| format!(r#"<div><span class="text-gray-500 dark:text-gray-400">Tenant:</span> <span class="font-medium text-gray-900 dark:text-gray-200">{}</span></div>"#, t)).unwrap_or_default(),
+        expires_info = expires_at.map(|e| format!(r#"<div><span class="text-gray-500 dark:text-gray-400">Expires:</span> <span class="font-medium text-gray-900 dark:text-gray-200">{}</span></div>"#, e)).unwrap_or_default(),
     )
 }
 
@@ -567,7 +567,7 @@ pub fn audit_logs_page(
                         <i class="fas fa-sitemap mr-2"></i>Grouped
                     </a>
                 </div>
-                <a href="/audit" class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
+                <a href="/audit" class="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">
                     <i class="fas fa-sync-alt"></i>
                     <span>Refresh</span>
                 </a>
@@ -1273,19 +1273,19 @@ fn connection_settings(config: &CoriConfig) -> String {
                 <div class="space-y-4">
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Host</span>
-                        <code class="text-sm">{host}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{host}</code>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Port</span>
-                        <code class="text-sm">{port}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{port}</code>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Database</span>
-                        <code class="text-sm">{database}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{database}</code>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">SSL Mode</span>
-                        <code class="text-sm">{ssl_mode}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{ssl_mode}</code>
                     </div>
                 </div>
             </div>
@@ -1295,15 +1295,15 @@ fn connection_settings(config: &CoriConfig) -> String {
                 <div class="space-y-4">
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Enabled</span>
-                        <span class="font-medium">{mcp_enabled}</span>
+                        <span class="font-medium text-gray-900 dark:text-gray-300">{mcp_enabled}</span>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Transport</span>
-                        <code class="text-sm">{mcp_transport}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{mcp_transport}</code>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">HTTP Port</span>
-                        <code class="text-sm">{mcp_http_port}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{mcp_http_port}</code>
                     </div>
                 </div>
             </div>
@@ -1313,11 +1313,11 @@ fn connection_settings(config: &CoriConfig) -> String {
                 <div class="space-y-4">
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Listen Port</span>
-                        <code class="text-sm">{dashboard_port}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{dashboard_port}</code>
                     </div>
                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <span class="text-gray-600 dark:text-gray-400">Auth Type</span>
-                        <code class="text-sm">{auth_type:?}</code>
+                        <code class="text-sm text-gray-900 dark:text-gray-300">{auth_type:?}</code>
                     </div>
                 </div>
             </div>
@@ -1361,7 +1361,7 @@ fn security_settings(config: &CoriConfig) -> String {
                 </div>
                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                     <span class="text-gray-600 dark:text-gray-400">Private Key</span>
-                    <span class="text-gray-500">{private_key_status}</span>
+                    <span class="text-gray-500 dark:text-gray-400">{private_key_status}</span>
                 </div>
             </div>
             
@@ -1381,15 +1381,15 @@ fn security_settings(config: &CoriConfig) -> String {
             <div class="space-y-4">
                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                     <span class="text-gray-600 dark:text-gray-400">Enabled</span>
-                    <span class="font-medium">{vs_enabled}</span>
+                    <span class="font-medium text-gray-900 dark:text-gray-300">{vs_enabled}</span>
                 </div>
                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                     <span class="text-gray-600 dark:text-gray-400">Always Hidden Tables</span>
-                    <span class="text-sm">{always_hidden}</span>
+                    <span class="text-sm text-gray-900 dark:text-gray-300">{always_hidden}</span>
                 </div>
                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                     <span class="text-gray-600 dark:text-gray-400">Always Visible Tables</span>
-                    <span class="text-sm">{always_visible}</span>
+                    <span class="text-sm text-gray-900 dark:text-gray-300">{always_visible}</span>
                 </div>
             </div>
         </div>"##,
@@ -1504,7 +1504,7 @@ fn audit_settings(config: &CoriConfig) -> String {
                 
                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                     <span class="text-gray-600 dark:text-gray-400">Storage Backend</span>
-                    <code class="text-sm">{storage_backend:?}</code>
+                    <code class="text-sm text-gray-900 dark:text-gray-300">{storage_backend:?}</code>
                 </div>
                 
                 <button type="submit" class="w-full py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg font-medium">
@@ -1547,8 +1547,8 @@ fn tenancy_settings(config: &CoriConfig) -> String {
 
                     format!(
                         r#"<tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                        <td class="px-4 py-3 font-medium">{name}</td>
-                        <td class="px-4 py-3"><code class="text-sm">{column}</code></td>
+                        <td class="px-4 py-3 font-medium text-gray-900 dark:text-white">{name}</td>
+                        <td class="px-4 py-3"><code class="text-sm text-gray-900 dark:text-gray-300">{column}</code></td>
                         <td class="px-4 py-3">{global}</td>
                     </tr>"#,
                         name = name,
