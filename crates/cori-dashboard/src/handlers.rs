@@ -45,7 +45,8 @@ pub async fn roles_list(State(state): State<AppState>) -> Html<String> {
 /// Handler for the new role page.
 pub async fn role_new(State(state): State<AppState>) -> Html<String> {
     let schema = state.schema_cache();
-    Html(pages::role_editor_page(None, schema.as_ref(), true))
+    let rules = state.get_rules();
+    Html(pages::role_editor_page(None, schema.as_ref(), rules.as_ref(), true))
 }
 
 /// Handler for role detail page.
@@ -75,8 +76,9 @@ pub async fn role_detail(State(state): State<AppState>, Path(name): Path<String>
 /// Handler for role edit page.
 pub async fn role_edit(State(state): State<AppState>, Path(name): Path<String>) -> Html<String> {
     let schema = state.schema_cache();
+    let rules = state.get_rules();
     if let Some(role) = state.get_role(&name) {
-        Html(pages::role_editor_page(Some(&role), schema.as_ref(), false))
+        Html(pages::role_editor_page(Some(&role), schema.as_ref(), rules.as_ref(), false))
     } else {
         Html(crate::templates::layout(
             "Role Not Found",
@@ -336,7 +338,9 @@ pub mod api {
         Form(form): Form<RoleFormData>,
     ) -> Result<Html<String>, (StatusCode, String)> {
         let role = form_to_role_definition(&form);
-        state.save_role(form.name.clone(), role);
+        
+        state.save_role(form.name.clone(), role)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" created successfully'); window.location.href='/roles/{}';</script>"#,
@@ -354,7 +358,9 @@ pub mod api {
         }
 
         let role = form_to_role_definition(&form);
-        state.save_role(name.clone(), role);
+        
+        state.save_role(name.clone(), role)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" updated successfully'); window.location.href='/roles/{}';</script>"#,
@@ -365,8 +371,10 @@ pub mod api {
     pub async fn role_delete(
         State(state): State<AppState>,
         Path(name): Path<String>,
-    ) -> Result<Html<String>, StatusCode> {
-        state.delete_role(&name).ok_or(StatusCode::NOT_FOUND)?;
+    ) -> Result<Html<String>, (StatusCode, String)> {
+        state.delete_role(&name)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or((StatusCode::NOT_FOUND, "Role not found".to_string()))?;
 
         Ok(Html(format!(
             r#"<script>showToast('Role "{}" deleted'); window.location.href='/roles';</script>"#,
@@ -1096,11 +1104,16 @@ pub mod api {
     // Form Types
     // -------------------------------------------------------------------------
 
+    /// Form data for creating/updating a role.
+    /// This uses a JSON-based approach for complex nested structures.
     #[derive(Debug, serde::Deserialize)]
     pub struct RoleFormData {
         pub name: String,
         pub description: Option<String>,
-        // Table permissions would be nested, simplified here
+        /// Default approval group name
+        pub approval_group: Option<String>,
+        /// JSON-encoded table permissions (complex nested structure)
+        pub tables_json: Option<String>,
     }
 
     #[derive(Debug, serde::Deserialize)]
@@ -1252,11 +1265,354 @@ pub mod api {
     }
 
     fn form_to_role_definition(form: &RoleFormData) -> cori_core::RoleDefinition {
+        use cori_core::config::role_definition::{ApprovalConfig, TablePermissions};
+
+        let mut tables = std::collections::HashMap::new();
+
+        // Parse the JSON-encoded table permissions
+        if let Some(json_str) = &form.tables_json {
+            if let Ok(table_perms) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let Some(obj) = table_perms.as_object() {
+                    for (table_name, perms) in obj {
+                        let perms_obj = perms.as_object();
+                        if perms_obj.is_none() {
+                            continue;
+                        }
+                        let perms_obj = perms_obj.unwrap();
+
+                        // Parse readable
+                        let readable = parse_readable_config(perms_obj.get("readable"));
+
+                        // Parse creatable
+                        let creatable = parse_creatable_columns(perms_obj.get("creatable"));
+
+                        // Parse updatable
+                        let updatable = parse_updatable_columns(perms_obj.get("updatable"));
+
+                        // Parse deletable
+                        let deletable = parse_deletable_permission(perms_obj.get("deletable"));
+
+                        tables.insert(
+                            table_name.clone(),
+                            TablePermissions {
+                                readable,
+                                creatable,
+                                updatable,
+                                deletable,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Build approvals config
+        let approvals = form.approval_group.as_ref().filter(|s| !s.is_empty()).map(|group| {
+            ApprovalConfig {
+                group: group.clone(),
+                notify_on_pending: true,
+                message: None,
+            }
+        });
+
         cori_core::RoleDefinition {
             name: form.name.clone(),
-            description: form.description.clone(),
-            approvals: None,
-            tables: std::collections::HashMap::new(), // Would parse from form
+            description: form.description.clone().filter(|s| !s.is_empty()),
+            approvals,
+            tables,
+        }
+    }
+
+    /// Parse readable configuration from JSON value
+    fn parse_readable_config(value: Option<&serde_json::Value>) -> cori_core::config::role_definition::ReadableConfig {
+        use cori_core::config::role_definition::{
+            AllColumns, ColumnList, ReadableConfig, ReadableConfigFull,
+        };
+
+        match value {
+            Some(serde_json::Value::String(s)) if s == "*" => {
+                ReadableConfig::All(AllColumns)
+            }
+            Some(serde_json::Value::Array(arr)) => {
+                let cols: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                ReadableConfig::List(cols)
+            }
+            Some(serde_json::Value::Object(obj)) => {
+                let columns = if let Some(cols) = obj.get("columns") {
+                    match cols {
+                        serde_json::Value::String(s) if s == "*" => ColumnList::All(AllColumns),
+                        serde_json::Value::Array(arr) => {
+                            let cols: Vec<String> = arr
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect();
+                            ColumnList::List(cols)
+                        }
+                        _ => ColumnList::List(vec![]),
+                    }
+                } else {
+                    ColumnList::List(vec![])
+                };
+
+                let max_per_page = obj
+                    .get("max_per_page")
+                    .and_then(|v| v.as_u64());
+
+                ReadableConfig::Config(ReadableConfigFull {
+                    columns,
+                    max_per_page,
+                })
+            }
+            _ => ReadableConfig::List(vec![]),
+        }
+    }
+
+    /// Parse creatable columns from JSON value
+    fn parse_creatable_columns(value: Option<&serde_json::Value>) -> cori_core::config::role_definition::CreatableColumns {
+        use cori_core::config::role_definition::{
+            AllColumns, CreatableColumnConstraints, CreatableColumns, ForeignKeyConstraint,
+            ApprovalRequirement,
+        };
+
+        match value {
+            Some(serde_json::Value::String(s)) if s == "*" => {
+                CreatableColumns::All(AllColumns)
+            }
+            Some(serde_json::Value::Object(obj)) => {
+                let mut map = std::collections::HashMap::new();
+                for (col_name, constraints) in obj {
+                    let constraints_obj = constraints.as_object();
+                    let c = if let Some(co) = constraints_obj {
+                        CreatableColumnConstraints {
+                            required: co.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
+                            default: co.get("default").cloned(),
+                            restrict_to: co.get("restrict_to").and_then(|v| {
+                                v.as_array().map(|arr| arr.clone())
+                            }),
+                            requires_approval: co.get("requires_approval").map(|v| {
+                                if v.as_bool() == Some(true) {
+                                    ApprovalRequirement::Simple(true)
+                                } else if let Some(obj) = v.as_object() {
+                                    if let Some(group) = obj.get("group").and_then(|g| g.as_str()) {
+                                        ApprovalRequirement::Detailed(cori_core::config::role_definition::ApprovalConfig {
+                                            group: group.to_string(),
+                                            notify_on_pending: obj.get("notify_on_pending").and_then(|v| v.as_bool()).unwrap_or(true),
+                                            message: obj.get("message").and_then(|v| v.as_str()).map(String::from),
+                                        })
+                                    } else {
+                                        ApprovalRequirement::Simple(true)
+                                    }
+                                } else {
+                                    ApprovalRequirement::Simple(false)
+                                }
+                            }),
+                            guidance: co.get("guidance").and_then(|v| v.as_str()).map(String::from),
+                            foreign_key: co.get("foreign_key").and_then(|v| {
+                                v.as_object().map(|fk| ForeignKeyConstraint {
+                                    verify_with: fk.get("verify_with")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                        .unwrap_or_default(),
+                                })
+                            }),
+                        }
+                    } else {
+                        CreatableColumnConstraints::default()
+                    };
+                    map.insert(col_name.clone(), c);
+                }
+                CreatableColumns::Map(map)
+            }
+            _ => CreatableColumns::Map(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Parse updatable columns from JSON value
+    fn parse_updatable_columns(value: Option<&serde_json::Value>) -> cori_core::config::role_definition::UpdatableColumns {
+        use cori_core::config::role_definition::{
+            AllColumns, UpdatableColumnConstraints, UpdatableColumns, ForeignKeyConstraint,
+            ApprovalRequirement,
+        };
+
+        match value {
+            Some(serde_json::Value::String(s)) if s == "*" => {
+                UpdatableColumns::All(AllColumns)
+            }
+            Some(serde_json::Value::Object(obj)) => {
+                let mut map = std::collections::HashMap::new();
+                for (col_name, constraints) in obj {
+                    let constraints_obj = constraints.as_object();
+                    let c = if let Some(co) = constraints_obj {
+                        UpdatableColumnConstraints {
+                            only_when: co.get("only_when").map(|v| parse_only_when(v)),
+                            requires_approval: co.get("requires_approval").map(|v| {
+                                if v.as_bool() == Some(true) {
+                                    ApprovalRequirement::Simple(true)
+                                } else if let Some(obj) = v.as_object() {
+                                    if let Some(group) = obj.get("group").and_then(|g| g.as_str()) {
+                                        ApprovalRequirement::Detailed(cori_core::config::role_definition::ApprovalConfig {
+                                            group: group.to_string(),
+                                            notify_on_pending: obj.get("notify_on_pending").and_then(|v| v.as_bool()).unwrap_or(true),
+                                            message: obj.get("message").and_then(|v| v.as_str()).map(String::from),
+                                        })
+                                    } else {
+                                        ApprovalRequirement::Simple(true)
+                                    }
+                                } else {
+                                    ApprovalRequirement::Simple(false)
+                                }
+                            }),
+                            guidance: co.get("guidance").and_then(|v| v.as_str()).map(String::from),
+                            foreign_key: co.get("foreign_key").and_then(|v| {
+                                v.as_object().map(|fk| ForeignKeyConstraint {
+                                    verify_with: fk.get("verify_with")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                        .unwrap_or_default(),
+                                })
+                            }),
+                        }
+                    } else {
+                        UpdatableColumnConstraints::default()
+                    };
+                    map.insert(col_name.clone(), c);
+                }
+                UpdatableColumns::Map(map)
+            }
+            _ => UpdatableColumns::Map(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Parse only_when conditions from JSON
+    fn parse_only_when(value: &serde_json::Value) -> cori_core::config::role_definition::OnlyWhen {
+        use cori_core::config::role_definition::{OnlyWhen, ColumnCondition};
+
+        match value {
+            serde_json::Value::Array(arr) => {
+                let conditions: Vec<std::collections::HashMap<String, ColumnCondition>> = arr
+                    .iter()
+                    .filter_map(|v| v.as_object().map(|obj| parse_condition_set(obj)))
+                    .collect();
+                OnlyWhen::Multiple(conditions)
+            }
+            serde_json::Value::Object(obj) => {
+                OnlyWhen::Single(parse_condition_set(obj))
+            }
+            _ => OnlyWhen::Single(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Parse a single condition set from JSON object
+    fn parse_condition_set(obj: &serde_json::Map<String, serde_json::Value>) -> std::collections::HashMap<String, cori_core::config::role_definition::ColumnCondition> {
+        use cori_core::config::role_definition::{ColumnCondition, ComparisonCondition};
+
+        let mut conditions = std::collections::HashMap::new();
+        for (key, value) in obj {
+            let condition = match value {
+                serde_json::Value::Array(arr) => {
+                    ColumnCondition::In(arr.clone())
+                }
+                serde_json::Value::Object(cond_obj) => {
+                    let mut comp = ComparisonCondition::default();
+                    if let Some(v) = cond_obj.get("equals") {
+                        comp.equals = Some(v.clone());
+                    }
+                    if let Some(v) = cond_obj.get("not_equals") {
+                        comp.not_equals = Some(v.clone());
+                    }
+                    if let Some(v) = cond_obj.get("greater_than") {
+                        comp.greater_than = Some(parse_number_or_ref(v));
+                    }
+                    if let Some(v) = cond_obj.get("greater_than_or_equal") {
+                        comp.greater_than_or_equal = Some(parse_number_or_ref(v));
+                    }
+                    if let Some(v) = cond_obj.get("lower_than") {
+                        comp.lower_than = Some(parse_number_or_ref(v));
+                    }
+                    if let Some(v) = cond_obj.get("lower_than_or_equal") {
+                        comp.lower_than_or_equal = Some(parse_number_or_ref(v));
+                    }
+                    if let Some(v) = cond_obj.get("not_null") {
+                        comp.not_null = v.as_bool();
+                    }
+                    if let Some(v) = cond_obj.get("is_null") {
+                        comp.is_null = v.as_bool();
+                    }
+                    if let Some(v) = cond_obj.get("in") {
+                        comp.in_values = v.as_array().cloned();
+                    }
+                    if let Some(v) = cond_obj.get("not_in") {
+                        comp.not_in = v.as_array().cloned();
+                    }
+                    if let Some(v) = cond_obj.get("starts_with") {
+                        comp.starts_with = v.as_str().map(String::from);
+                    }
+                    ColumnCondition::Comparison(comp)
+                }
+                _ => ColumnCondition::Equals(value.clone()),
+            };
+            conditions.insert(key.clone(), condition);
+        }
+        conditions
+    }
+
+    /// Parse a number or column reference
+    fn parse_number_or_ref(value: &serde_json::Value) -> cori_core::config::role_definition::NumberOrColumnRef {
+        use cori_core::config::role_definition::NumberOrColumnRef;
+
+        match value {
+            serde_json::Value::Number(n) => {
+                NumberOrColumnRef::Number(n.as_f64().unwrap_or(0.0))
+            }
+            serde_json::Value::String(s) => {
+                NumberOrColumnRef::ColumnRef(s.clone())
+            }
+            _ => NumberOrColumnRef::Number(0.0),
+        }
+    }
+
+    /// Parse deletable permission from JSON value
+    fn parse_deletable_permission(value: Option<&serde_json::Value>) -> cori_core::config::role_definition::DeletablePermission {
+        use cori_core::config::role_definition::{
+            DeletableConstraints, DeletablePermission, ApprovalRequirement,
+        };
+
+        match value {
+            Some(serde_json::Value::Bool(b)) => DeletablePermission::Allowed(*b),
+            Some(serde_json::Value::Object(obj)) => {
+                let requires_approval = obj.get("requires_approval").map(|v| {
+                    if v.as_bool() == Some(true) {
+                        ApprovalRequirement::Simple(true)
+                    } else if let Some(obj) = v.as_object() {
+                        if let Some(group) = obj.get("group").and_then(|g| g.as_str()) {
+                            ApprovalRequirement::Detailed(cori_core::config::role_definition::ApprovalConfig {
+                                group: group.to_string(),
+                                notify_on_pending: obj.get("notify_on_pending").and_then(|v| v.as_bool()).unwrap_or(true),
+                                message: obj.get("message").and_then(|v| v.as_str()).map(String::from),
+                            })
+                        } else {
+                            ApprovalRequirement::Simple(true)
+                        }
+                    } else {
+                        ApprovalRequirement::Simple(false)
+                    }
+                });
+                let soft_delete = obj.get("soft_delete").and_then(|v| v.as_bool()).unwrap_or(false);
+                let verify_with = obj.get("verify_with")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                DeletablePermission::WithConstraints(DeletableConstraints {
+                    requires_approval,
+                    soft_delete,
+                    verify_with,
+                })
+            }
+            _ => DeletablePermission::Allowed(false),
         }
     }
 

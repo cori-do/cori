@@ -128,6 +128,11 @@ pub struct CoriConfig {
     /// Types definition loaded from schema/types.yaml.
     #[serde(default, skip_serializing)]
     pub types: Option<TypesDefinition>,
+
+    /// Base directory where the config was loaded from.
+    /// Used for saving roles and other files back to disk.
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 
@@ -436,6 +441,9 @@ impl CoriConfig {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
 
+        // Store the base directory for later use (e.g., saving roles)
+        config.config_dir = Some(base_dir.clone());
+
         // Determine schema directory (default: "schema/")
         let schema_dir = config
             .schema_dir
@@ -573,4 +581,56 @@ impl CoriConfig {
         }
         false
     }
-}
+
+    /// Get the roles directory path.
+    pub fn roles_dir(&self) -> Option<PathBuf> {
+        self.config_dir.as_ref().map(|dir| dir.join("roles"))
+    }
+
+    /// Save a role definition to disk.
+    ///
+    /// Writes the role to `roles/<name>.yaml` in the config directory.
+    /// Also updates the in-memory roles map.
+    pub fn save_role(&mut self, name: String, role: RoleDefinition) -> Result<(), ConfigError> {
+        // Get the roles directory
+        let roles_dir = self.roles_dir().ok_or_else(|| {
+            ConfigError::Config("Config directory not set - cannot save role".to_string())
+        })?;
+
+        // Ensure roles directory exists
+        if !roles_dir.exists() {
+            fs::create_dir_all(&roles_dir)?;
+        }
+
+        // Write role to YAML file
+        let role_path = roles_dir.join(format!("{}.yaml", name));
+        let yaml = serde_yaml::to_string(&role)
+            .map_err(|e| ConfigError::Config(format!("Failed to serialize role: {}", e)))?;
+        fs::write(&role_path, yaml)?;
+
+        // Update in-memory map
+        self.roles.insert(name, role);
+
+        Ok(())
+    }
+
+    /// Delete a role definition from disk.
+    ///
+    /// Removes the role file from `roles/<name>.yaml` and updates the in-memory map.
+    pub fn delete_role(&mut self, name: &str) -> Result<Option<RoleDefinition>, ConfigError> {
+        // Get the roles directory
+        let roles_dir = self.roles_dir().ok_or_else(|| {
+            ConfigError::Config("Config directory not set - cannot delete role".to_string())
+        })?;
+
+        // Remove from in-memory map
+        let removed = self.roles.remove(name);
+
+        // Delete file if it exists
+        let role_path = roles_dir.join(format!("{}.yaml", name));
+        if role_path.exists() {
+            fs::remove_file(&role_path)?;
+        }
+
+        Ok(removed)
+    }}

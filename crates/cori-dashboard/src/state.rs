@@ -125,14 +125,28 @@ impl AppState {
         self.inner.config.read().unwrap().roles.get(name).cloned()
     }
 
-    /// Add or update a role.
-    pub fn save_role(&self, name: String, role: RoleDefinition) {
-        self.inner.config.write().unwrap().roles.insert(name, role);
+    /// Add or update a role and persist to disk.
+    ///
+    /// Returns an error if the role cannot be saved to disk.
+    pub fn save_role(&self, name: String, role: RoleDefinition) -> Result<(), String> {
+        self.inner
+            .config
+            .write()
+            .unwrap()
+            .save_role(name, role)
+            .map_err(|e| format!("Failed to save role: {}", e))
     }
 
-    /// Delete a role.
-    pub fn delete_role(&self, name: &str) -> Option<RoleDefinition> {
-        self.inner.config.write().unwrap().roles.remove(name)
+    /// Delete a role and remove from disk.
+    ///
+    /// Returns an error if the role cannot be deleted from disk.
+    pub fn delete_role(&self, name: &str) -> Result<Option<RoleDefinition>, String> {
+        self.inner
+            .config
+            .write()
+            .unwrap()
+            .delete_role(name)
+            .map_err(|e| format!("Failed to delete role: {}", e))
     }
 
     /// Get rules configuration.
