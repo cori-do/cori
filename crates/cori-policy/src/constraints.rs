@@ -38,11 +38,19 @@ impl ConstraintValidator {
     ) -> Result<(), ValidationError> {
         let args = arguments.as_object();
 
+        // Get FK verification column names (e.g., "customer_email" for customer_id.verify_with: [email])
+        let fk_verify_cols = perms.creatable.fk_verification_columns();
+
         // Validate each provided field
         if let Some(obj) = args {
             for (key, value) in obj {
                 // Skip tenant column - it's handled separately
                 if is_tenant_column(key) {
+                    continue;
+                }
+
+                // Skip FK verification columns - they're validated by FK verification logic
+                if fk_verify_cols.contains(key) {
                     continue;
                 }
 
@@ -100,6 +108,9 @@ impl ConstraintValidator {
     ) -> Result<(), ValidationError> {
         let args = arguments.as_object();
 
+        // Get FK verification column names (e.g., "assigned_to_email" for assigned_to_id.verify_with: [email])
+        let fk_verify_cols = perms.updatable.fk_verification_columns();
+
         // Validate each field being updated
         if let Some(obj) = args {
             for (key, value) in obj {
@@ -110,6 +121,11 @@ impl ConstraintValidator {
 
                 // Skip tenant column
                 if is_tenant_column(key) {
+                    continue;
+                }
+
+                // Skip FK verification columns - they're validated by FK verification logic
+                if fk_verify_cols.contains(key) {
                     continue;
                 }
 

@@ -460,6 +460,29 @@ impl CreatableColumns {
             CreatableColumns::Map(cols) => cols.keys().map(|s| s.as_str()).collect(),
         }
     }
+
+    /// Get FK verification column names.
+    ///
+    /// Returns the generated verification column names for all columns with `foreign_key.verify_with`.
+    /// Format: `{fk_column}_{verify_col}` (e.g., `customer_id` + `email` → `customer_email`)
+    pub fn fk_verification_columns(&self) -> Vec<String> {
+        match self {
+            CreatableColumns::All(_) => Vec::new(),
+            CreatableColumns::Map(cols) => {
+                let mut verify_cols = Vec::new();
+                for (col_name, constraints) in cols {
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Strip "_id" suffix from FK column to get base name
+                        let base = col_name.strip_suffix("_id").unwrap_or(col_name);
+                        for verify_col in &fk.verify_with {
+                            verify_cols.push(format!("{}_{}", base, verify_col));
+                        }
+                    }
+                }
+                verify_cols
+            }
+        }
+    }
 }
 
 /// Constraints on a column for INSERT operations.
@@ -484,6 +507,24 @@ pub struct CreatableColumnConstraints {
     /// Instructions for AI agents on how to use this column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<String>,
+
+    /// Foreign key constraint with verification.
+    /// Agent must provide both the FK value and verification columns from the referenced table.
+    /// Cori validates that the referenced record exists AND belongs to the same tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_key: Option<ForeignKeyConstraint>,
+}
+
+/// Foreign key constraint for INSERT/UPDATE validation.
+/// Ensures referential integrity with tenant isolation.
+/// The referenced table is automatically inferred from the database schema's foreign key definitions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ForeignKeyConstraint {
+    /// Columns from the referenced table that the agent must provide for verification.
+    /// These must be columns the agent has read access to.
+    /// Cori will validate: SELECT pk FROM table WHERE pk = <value> AND verify_col1 = <v1> AND ... AND tenant = <tenant>
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify_with: Vec<String>,
 }
 
 /// Updatable columns configuration.
@@ -547,6 +588,29 @@ impl UpdatableColumns {
             UpdatableColumns::Map(cols) => cols.keys().map(|s| s.as_str()).collect(),
         }
     }
+
+    /// Get FK verification column names.
+    ///
+    /// Returns the generated verification column names for all columns with `foreign_key.verify_with`.
+    /// Format: `{fk_column}_{verify_col}` (e.g., `assigned_to_id` + `email` → `assigned_to_email`)
+    pub fn fk_verification_columns(&self) -> Vec<String> {
+        match self {
+            UpdatableColumns::All(_) => Vec::new(),
+            UpdatableColumns::Map(cols) => {
+                let mut verify_cols = Vec::new();
+                for (col_name, constraints) in cols {
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Strip "_id" suffix from FK column to get base name
+                        let base = col_name.strip_suffix("_id").unwrap_or(col_name);
+                        for verify_col in &fk.verify_with {
+                            verify_cols.push(format!("{}_{}", base, verify_col));
+                        }
+                    }
+                }
+                verify_cols
+            }
+        }
+    }
 }
 
 /// Constraints on a column for UPDATE operations.
@@ -564,6 +628,12 @@ pub struct UpdatableColumnConstraints {
     /// Instructions for AI agents on how to use this column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<String>,
+
+    /// Foreign key constraint with verification (for FK columns).
+    /// Agent must provide both the FK value and verification columns from the referenced table.
+    /// Cori validates that the referenced record exists AND belongs to the same tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_key: Option<ForeignKeyConstraint>,
 }
 
 /// Conditions for when an update is allowed.
@@ -768,6 +838,12 @@ pub struct DeletableConstraints {
     /// If true, use soft delete instead of hard delete.
     #[serde(default)]
     pub soft_delete: bool,
+
+    /// Columns from the table that the agent must provide to verify the record being deleted.
+    /// This ensures the agent is deleting the correct record by providing additional identifying info.
+    /// E.g., verify_with: ["email"] means agent must provide the record's email to confirm deletion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify_with: Vec<String>,
 }
 
 /// Approval requirement configuration.
@@ -1040,5 +1116,52 @@ tables:
                 panic!("Expected comparison condition");
             }
         }
+    }
+
+    #[test]
+    fn test_fk_verification_columns() {
+        let yaml = r#"
+name: support_agent
+tables:
+  tickets:
+    readable: [id, customer_id, subject, status]
+    creatable:
+      customer_id:
+        required: true
+        foreign_key:
+          verify_with: [email, name]
+      subject:
+        required: true
+    updatable:
+      assigned_to_id:
+        foreign_key:
+          verify_with: [email]
+"#;
+
+        let role = RoleDefinition::from_yaml(yaml).unwrap();
+        let perms = role.get_table_permissions("tickets").unwrap();
+
+        // Test creatable FK verification columns
+        let creatable_verify_cols = perms.creatable.fk_verification_columns();
+        assert!(
+            creatable_verify_cols.contains(&"customer_email".to_string()),
+            "Expected 'customer_email' in {:?}",
+            creatable_verify_cols
+        );
+        assert!(
+            creatable_verify_cols.contains(&"customer_name".to_string()),
+            "Expected 'customer_name' in {:?}",
+            creatable_verify_cols
+        );
+        assert_eq!(creatable_verify_cols.len(), 2);
+
+        // Test updatable FK verification columns
+        let updatable_verify_cols = perms.updatable.fk_verification_columns();
+        assert!(
+            updatable_verify_cols.contains(&"assigned_to_email".to_string()),
+            "Expected 'assigned_to_email' in {:?}",
+            updatable_verify_cols
+        );
+        assert_eq!(updatable_verify_cols.len(), 1);
     }
 }

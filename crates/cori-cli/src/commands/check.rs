@@ -397,6 +397,10 @@ pub async fn run(config_path: &Path) -> Result<()> {
     println!("  🔑 Checking primary key access for update/delete...");
     results.extend(check_primary_key_access(&config, &base_dir)?);
 
+    // 10. Foreign key verify_with columns must be readable
+    println!("  🔗 Checking foreign key verification columns...");
+    results.extend(check_foreign_key_verify_columns(&config, &base_dir)?);
+
     // Print results
     results.print_summary();
 
@@ -1194,6 +1198,26 @@ fn check_nonnull_columns(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
         None => return Ok(findings),
     };
 
+    // Build map of table -> tenant column (auto-filled from Biscuit token)
+    let tenant_columns: HashMap<&str, &str> = config
+        .rules
+        .as_ref()
+        .map(|rules| {
+            rules
+                .tables
+                .iter()
+                .filter_map(|(table_name, table_rules)| {
+                    match &table_rules.tenant {
+                        Some(cori_core::config::TenantConfig::Direct(col)) => {
+                            Some((table_name.as_str(), col.as_str()))
+                        }
+                        _ => None, // Inherited or global tables don't have direct tenant column
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Build map of table -> non-null columns without defaults
     let mut required_columns: HashMap<&str, HashSet<&str>> = HashMap::new();
 
@@ -1204,7 +1228,14 @@ fn check_nonnull_columns(config: &CoriConfig, _base_dir: &Path) -> Result<Vec<Ch
             if !col.nullable && col.default.is_none() {
                 // Exclude primary key columns (usually auto-generated)
                 if !table.primary_key.contains(&col.name) {
-                    cols.insert(col.name.as_str());
+                    // Exclude tenant columns (auto-filled from Biscuit token)
+                    if tenant_columns
+                        .get(table.name.as_str())
+                        .map(|tc| *tc != col.name.as_str())
+                        .unwrap_or(true)
+                    {
+                        cols.insert(col.name.as_str());
+                    }
                 }
             }
         }
@@ -1349,6 +1380,270 @@ fn check_primary_key_access(config: &CoriConfig, _base_dir: &Path) -> Result<Vec
                             .with_file(format!("roles/{}.yaml", role_name))
                             .with_location(format!("tables.{}.readable", table_name)),
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+// ============================================================================
+// Check 10: Foreign Key verify_with Columns Must Be Readable
+// ============================================================================
+
+fn check_foreign_key_verify_columns(
+    config: &CoriConfig,
+    _base_dir: &Path,
+) -> Result<Vec<CheckFinding>> {
+    let mut findings = Vec::new();
+
+    // Get schema for FK lookup
+    let schema = match &config.schema {
+        Some(s) => s,
+        None => return Ok(findings), // No schema, skip check
+    };
+
+    // Build a map of (table_name, column_name) -> referenced_table
+    let mut fk_references: HashMap<(&str, &str), &str> = HashMap::new();
+    for table in &schema.tables {
+        for fk in &table.foreign_keys {
+            for col in &fk.columns {
+                fk_references.insert((table.name.as_str(), col.as_str()), fk.references.table.as_str());
+            }
+        }
+    }
+
+    // Helper to get readable columns for a table in a role
+    fn get_readable_columns<'a>(
+        role: &'a cori_core::config::RoleDefinition,
+        table: &str,
+    ) -> Option<HashSet<&'a str>> {
+        match role.tables.get(table) {
+            Some(perms) => match &perms.readable {
+                ReadableConfig::All(_) => None, // None means "all readable"
+                ReadableConfig::List(cols) => {
+                    Some(cols.iter().map(|c| c.as_str()).collect())
+                }
+                ReadableConfig::Config(cfg) => match &cfg.columns {
+                    cori_core::config::ColumnList::All(_) => None,
+                    cori_core::config::ColumnList::List(cols) => {
+                        Some(cols.iter().map(|c| c.as_str()).collect())
+                    }
+                },
+            },
+            None => Some(HashSet::new()), // Empty means table not accessible
+        }
+    }
+
+    // Check each role
+    for (role_name, role) in &config.roles {
+        for (table_name, perms) in &role.tables {
+            // 1. Check creatable columns for foreign_key constraints
+            if let Some(map) = perms.creatable.as_map() {
+                for (col_name, constraints) in map {
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Look up the referenced table from schema
+                        let ref_table = match fk_references.get(&(table_name.as_str(), col_name.as_str())) {
+                            Some(t) => *t,
+                            None => {
+                                // Column has foreign_key constraint but isn't an FK in schema
+                                findings.push(
+                                    CheckFinding::error(
+                                        "foreign-key-verify",
+                                        format!(
+                                            "Role '{}' has foreign_key constraint on '{}.{}', \
+                                             but this column is not a foreign key in the database schema.",
+                                            role_name, table_name, col_name
+                                        ),
+                                    )
+                                    .with_file(format!("roles/{}.yaml", role_name))
+                                    .with_location(format!(
+                                        "tables.{}.creatable.{}.foreign_key",
+                                        table_name, col_name
+                                    )),
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Skip verify_with check if no verification columns specified
+                        if fk.verify_with.is_empty() {
+                            continue;
+                        }
+
+                        let ref_readable = get_readable_columns(role, ref_table);
+
+                        // None means all columns readable, skip check
+                        if ref_readable.is_none() {
+                            continue;
+                        }
+                        let ref_readable = ref_readable.unwrap();
+
+                        // Empty means table not accessible
+                        if ref_readable.is_empty() && !role.tables.contains_key(ref_table) {
+                            findings.push(
+                                CheckFinding::error(
+                                    "foreign-key-verify",
+                                    format!(
+                                        "Role '{}' has foreign key on '{}.{}' referencing table '{}', \
+                                         but that table is not accessible to this role.",
+                                        role_name, table_name, col_name, ref_table
+                                    ),
+                                )
+                                .with_file(format!("roles/{}.yaml", role_name))
+                                .with_location(format!(
+                                    "tables.{}.creatable.{}.foreign_key",
+                                    table_name, col_name
+                                )),
+                            );
+                            continue;
+                        }
+
+                        // Check each verify_with column is readable
+                        for verify_col in &fk.verify_with {
+                            if !ref_readable.contains(verify_col.as_str()) {
+                                findings.push(
+                                    CheckFinding::error(
+                                        "foreign-key-verify",
+                                        format!(
+                                            "Role '{}' uses verify_with column '{}' from table '{}' for FK '{}.{}', \
+                                             but that column is not readable. Add '{}' to {}.readable.",
+                                            role_name, verify_col, ref_table, table_name, col_name,
+                                            verify_col, ref_table
+                                        ),
+                                    )
+                                    .with_file(format!("roles/{}.yaml", role_name))
+                                    .with_location(format!(
+                                        "tables.{}.creatable.{}.foreign_key.verify_with",
+                                        table_name, col_name
+                                    )),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Check updatable columns for foreign_key constraints
+            if let Some(map) = perms.updatable.as_map() {
+                for (col_name, constraints) in map {
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Look up the referenced table from schema
+                        let ref_table = match fk_references.get(&(table_name.as_str(), col_name.as_str())) {
+                            Some(t) => *t,
+                            None => {
+                                // Column has foreign_key constraint but isn't an FK in schema
+                                findings.push(
+                                    CheckFinding::error(
+                                        "foreign-key-verify",
+                                        format!(
+                                            "Role '{}' has foreign_key constraint on '{}.{}' (updatable), \
+                                             but this column is not a foreign key in the database schema.",
+                                            role_name, table_name, col_name
+                                        ),
+                                    )
+                                    .with_file(format!("roles/{}.yaml", role_name))
+                                    .with_location(format!(
+                                        "tables.{}.updatable.{}.foreign_key",
+                                        table_name, col_name
+                                    )),
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Skip verify_with check if no verification columns specified
+                        if fk.verify_with.is_empty() {
+                            continue;
+                        }
+
+                        let ref_readable = get_readable_columns(role, ref_table);
+
+                        // None means all columns readable, skip check
+                        if ref_readable.is_none() {
+                            continue;
+                        }
+                        let ref_readable = ref_readable.unwrap();
+
+                        // Empty means table not accessible
+                        if ref_readable.is_empty() && !role.tables.contains_key(ref_table) {
+                            findings.push(
+                                CheckFinding::error(
+                                    "foreign-key-verify",
+                                    format!(
+                                        "Role '{}' has foreign key on '{}.{}' (updatable) referencing table '{}', \
+                                         but that table is not accessible to this role.",
+                                        role_name, table_name, col_name, ref_table
+                                    ),
+                                )
+                                .with_file(format!("roles/{}.yaml", role_name))
+                                .with_location(format!(
+                                    "tables.{}.updatable.{}.foreign_key",
+                                    table_name, col_name
+                                )),
+                            );
+                            continue;
+                        }
+
+                        // Check each verify_with column is readable
+                        for verify_col in &fk.verify_with {
+                            if !ref_readable.contains(verify_col.as_str()) {
+                                findings.push(
+                                    CheckFinding::error(
+                                        "foreign-key-verify",
+                                        format!(
+                                            "Role '{}' uses verify_with column '{}' from table '{}' for updatable FK '{}.{}', \
+                                             but that column is not readable. Add '{}' to {}.readable.",
+                                            role_name, verify_col, ref_table, table_name, col_name,
+                                            verify_col, ref_table
+                                        ),
+                                    )
+                                    .with_file(format!("roles/{}.yaml", role_name))
+                                    .with_location(format!(
+                                        "tables.{}.updatable.{}.foreign_key.verify_with",
+                                        table_name, col_name
+                                    )),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Check deletable verify_with columns (must be readable in the SAME table)
+            if let cori_core::config::DeletablePermission::WithConstraints(constraints) =
+                &perms.deletable
+            {
+                if !constraints.verify_with.is_empty() {
+                    // For deletable verify_with, the columns must be readable in the SAME table
+                    let self_readable = get_readable_columns(role, table_name);
+
+                    // None means all columns readable, skip check
+                    if self_readable.is_none() {
+                        continue;
+                    }
+                    let self_readable = self_readable.unwrap();
+
+                    for verify_col in &constraints.verify_with {
+                        if !self_readable.contains(verify_col.as_str()) {
+                            findings.push(
+                                CheckFinding::error(
+                                    "foreign-key-verify",
+                                    format!(
+                                        "Role '{}' uses verify_with column '{}' for deletable on table '{}', \
+                                         but that column is not readable. Add '{}' to {}.readable.",
+                                        role_name, verify_col, table_name, verify_col, table_name
+                                    ),
+                                )
+                                .with_file(format!("roles/{}.yaml", role_name))
+                                .with_location(format!(
+                                    "tables.{}.deletable.verify_with",
+                                    table_name
+                                )),
+                            );
+                        }
                     }
                 }
             }

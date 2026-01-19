@@ -45,6 +45,32 @@ tables:
 
   tickets:
     readable: [ticket_id, organization_id, customer_id, assigned_to, ticket_number, subject, description, status, priority, category, resolved_at, created_at, updated_at]
+    creatable:
+      # Foreign key with verification - agent provides customer_id AND verifiable info
+      # Cori validates: customer exists, matches email, AND belongs to same tenant
+      # The referenced table is inferred from the database schema's foreign key definitions
+      customer_id:
+        required: true
+        foreign_key:
+          verify_with: [email]
+        guidance: "Provide customer_id and customer_email for verification"
+      # Ticket number - agent must provide a unique identifier
+      ticket_number:
+        required: true
+        guidance: "Provide a unique ticket number (e.g., 'TICKET-001')"
+      # User-provided fields
+      subject:
+        required: true
+        guidance: "Use a clear, concise subject that summarizes the customer's issue"
+      description:
+        guidance: "Detailed description of the issue"
+      priority:
+        default: "medium"
+        restrict_to: ["low", "medium", "high"]
+        guidance: "Set to 'high' only for production-blocking issues"
+      category:
+        restrict_to: ["billing", "technical", "general", "feature_request"]
+      # Note: organization_id is auto-filled from Biscuit token (detected from rules.yaml)
     updatable:
       status:
         only_when:

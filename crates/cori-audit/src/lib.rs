@@ -46,6 +46,7 @@
 //!     "listOrders",
 //!     Some("SELECT * FROM orders WHERE tenant_id = 'client_a'"),
 //!     false,
+//!     None, // correlation_id
 //! ).await?;
 //!
 //! // Log an approval request
@@ -54,6 +55,7 @@
 //!     "client_a",
 //!     "deleteOrder",
 //!     "apr_123",
+//!     None, // correlation_id
 //! ).await?;
 //! # Ok(())
 //! # }
