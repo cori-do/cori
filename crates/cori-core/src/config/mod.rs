@@ -38,8 +38,8 @@ pub use mcp::{McpConfig, Transport};
 pub use role_definition::{
     AllColumns, ApprovalConfig, ApprovalRequirement, ColumnCondition, ColumnList,
     ComparisonCondition, CreatableColumnConstraints, CreatableColumns, DeletableConstraints,
-    DeletablePermission, ReadableConfig, ReadableConfigFull, RoleDefinition, TablePermissions,
-    UpdatableColumnConstraints, UpdatableColumns,
+    DeletablePermission, ForeignKeyConstraint, ReadableConfig, ReadableConfigFull, RoleDefinition,
+    TablePermissions, UpdatableColumnConstraints, UpdatableColumns,
 };
 pub use rules_definition::{
     ColumnRules, InheritedTenant, RulesDefinition, SoftDeleteConfig, SoftDeleteValue, TableRules,

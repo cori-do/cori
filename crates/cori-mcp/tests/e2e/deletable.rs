@@ -236,6 +236,7 @@ pub async fn test_delete_requires_approval(_ctx: &TestContext) {
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
                 requires_approval: Some(ApprovalRequirement::Simple(true)),
                 soft_delete: false,
+                verify_with: vec![],
             }),
         },
     );
@@ -274,6 +275,7 @@ pub async fn test_delete_requires_approval_with_group(_ctx: &TestContext) {
                     message: Some("Delete requires manager approval".to_string()),
                 })),
                 soft_delete: false,
+                verify_with: vec![],
             }),
         },
     );
@@ -323,6 +325,7 @@ pub async fn test_delete_soft_delete_flag(_ctx: &TestContext) {
             deletable: DeletablePermission::WithConstraints(DeletableConstraints {
                 requires_approval: None,
                 soft_delete: true,
+                verify_with: vec![],
             }),
         },
     );
@@ -360,6 +363,7 @@ pub async fn test_delete_soft_delete_and_approval(_ctx: &TestContext) {
                     ),
                 })),
                 soft_delete: true,
+                verify_with: vec![],
             }),
         },
     );
@@ -418,6 +422,7 @@ pub async fn test_deletable_requires_approval_helper(_ctx: &TestContext) {
     let config_no_approval = DeletablePermission::WithConstraints(DeletableConstraints {
         requires_approval: None,
         soft_delete: false,
+        verify_with: vec![],
     });
     assert!(!config_no_approval.requires_approval());
 
@@ -425,6 +430,7 @@ pub async fn test_deletable_requires_approval_helper(_ctx: &TestContext) {
     let config_simple = DeletablePermission::WithConstraints(DeletableConstraints {
         requires_approval: Some(ApprovalRequirement::Simple(true)),
         soft_delete: false,
+        verify_with: vec![],
     });
     assert!(config_simple.requires_approval());
 
@@ -432,6 +438,7 @@ pub async fn test_deletable_requires_approval_helper(_ctx: &TestContext) {
     let config_false = DeletablePermission::WithConstraints(DeletableConstraints {
         requires_approval: Some(ApprovalRequirement::Simple(false)),
         soft_delete: false,
+        verify_with: vec![],
     });
     assert!(!config_false.requires_approval());
 
@@ -443,6 +450,7 @@ pub async fn test_deletable_requires_approval_helper(_ctx: &TestContext) {
             message: None,
         })),
         soft_delete: false,
+        verify_with: vec![],
     });
     assert!(config_detailed.requires_approval());
 
@@ -463,6 +471,7 @@ pub async fn test_deletable_is_soft_delete_helper(_ctx: &TestContext) {
     let config_hard = DeletablePermission::WithConstraints(DeletableConstraints {
         requires_approval: None,
         soft_delete: false,
+        verify_with: vec![],
     });
     assert!(!config_hard.is_soft_delete());
 
@@ -470,6 +479,7 @@ pub async fn test_deletable_is_soft_delete_helper(_ctx: &TestContext) {
     let config_soft = DeletablePermission::WithConstraints(DeletableConstraints {
         requires_approval: None,
         soft_delete: true,
+        verify_with: vec![],
     });
     assert!(config_soft.is_soft_delete());
 

@@ -326,10 +326,33 @@ impl ToolGenerator {
             );
         }
 
-        let pk_desc = if pk_names.len() == 1 {
-            pk_names[0].to_string()
+        // Add verify_with columns for deletable constraints (optional verification)
+        let required_fields: Vec<String> = pk_names.iter().map(|s| s.to_string()).collect();
+        if let Some(perms) = self.role.tables.get(table_name) {
+            if let cori_core::DeletablePermission::WithConstraints(constraints) = &perms.deletable {
+                for verify_col in &constraints.verify_with {
+                    // Get the column schema from the same table for type info
+                    let col_type = table_schema
+                        .get_column(verify_col)
+                        .map(|c| c.json_schema_type())
+                        .unwrap_or("string");
+
+                    properties.insert(
+                        verify_col.clone(),
+                        json!({
+                            "type": col_type,
+                            "description": format!("Optional verification column '{}' to confirm the record being deleted", verify_col)
+                        }),
+                    );
+                    // verify_with columns are optional for delete (not added to required_fields)
+                }
+            }
+        }
+
+        let pk_desc = if required_fields.len() == 1 {
+            required_fields[0].to_string()
         } else {
-            pk_names.join(", ")
+            required_fields.join(", ")
         };
 
         ToolDefinition {
@@ -425,6 +448,20 @@ impl ToolGenerator {
                             required.push(col_name.clone());
                         }
                     }
+
+                    // Add verify_with columns for foreign key constraints
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Look up the referenced table from schema
+                        if let Some(ref_table) = self.get_fk_referenced_table(&table_schema.name, col_name) {
+                            self.add_verify_with_columns(
+                                col_name,
+                                &ref_table,
+                                &fk.verify_with,
+                                properties,
+                                required,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -460,6 +497,22 @@ impl ToolGenerator {
                             col_name.clone(),
                             self.updatable_constraints_to_basic_json_schema(constraints, col_name),
                         );
+                    }
+
+                    // Add verify_with columns for foreign key constraints
+                    if let Some(fk) = &constraints.foreign_key {
+                        // Look up the referenced table from schema
+                        if let Some(ref_table) = self.get_fk_referenced_table(&table_schema.name, col_name) {
+                            // For updates, verify_with columns are not required (only FK column update is optional)
+                            let mut dummy_required = Vec::new();
+                            self.add_verify_with_columns(
+                                col_name,
+                                &ref_table,
+                                &fk.verify_with,
+                                properties,
+                                &mut dummy_required,
+                            );
+                        }
                     }
                 }
             }
@@ -529,6 +582,77 @@ impl ToolGenerator {
         } else {
             json!({ "type": "string" })
         }
+    }
+
+    /// Add verify_with columns to the JSON schema for foreign key verification.
+    ///
+    /// For a FK column like `customer_id` with `verify_with: [email]`, this adds
+    /// a property `customer_email` (stripping `_id` suffix and prefixing verify column).
+    fn add_verify_with_columns(
+        &self,
+        fk_col_name: &str,
+        ref_table: &str,
+        verify_with: &[String],
+        properties: &mut serde_json::Map<String, Value>,
+        required: &mut Vec<String>,
+    ) {
+        if verify_with.is_empty() {
+            return;
+        }
+
+        // Get the prefix from the FK column name (e.g., "customer_id" -> "customer")
+        let prefix = fk_col_name
+            .strip_suffix("_id")
+            .unwrap_or(fk_col_name);
+
+        // Get the referenced table's schema for type info
+        let ref_table_schema = self.schema.get_table(ref_table);
+
+        for verify_col in verify_with {
+            // Create property name like "customer_email" from FK "customer_id" and verify_with "email"
+            let prop_name = format!("{}_{}", prefix, verify_col);
+
+            // Get type from the referenced table's column schema
+            let col_type = ref_table_schema
+                .and_then(|t| t.get_column(verify_col))
+                .map(|c| c.json_schema_type())
+                .unwrap_or("string");
+
+            let col_format = ref_table_schema
+                .and_then(|t| t.get_column(verify_col))
+                .and_then(|c| c.json_schema_format());
+
+            let mut prop = json!({
+                "type": col_type,
+                "description": format!(
+                    "Verification value for '{}' column from '{}' table (must match the referenced record)",
+                    verify_col, ref_table
+                )
+            });
+
+            if let Some(format) = col_format {
+                prop["format"] = json!(format);
+            }
+
+            properties.insert(prop_name.clone(), prop);
+            // verify_with columns are required when the FK column is provided
+            required.push(prop_name);
+        }
+    }
+
+    /// Get the referenced table for a foreign key column from schema.
+    /// Returns None if no FK is found.
+    fn get_fk_referenced_table(&self, table: &str, column: &str) -> Option<String> {
+        let table_schema = self.schema.get_table(table)?;
+        
+        for fk in &table_schema.foreign_keys {
+            for fk_col in &fk.columns {
+                if fk_col.column == column {
+                    return Some(fk_col.foreign_table.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Convert creatable column constraints to JSON Schema.
@@ -776,6 +900,7 @@ mod tests {
                 only_when: Some(OnlyWhen::Single(status_conditions)),
                 requires_approval: None,
                 guidance: None,
+                foreign_key: None,
             },
         );
         updatable.insert(

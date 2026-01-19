@@ -130,6 +130,15 @@
               "type": "boolean",
               "description": "If true, deletion is performed as a soft delete (e.g., setting a deleted_at column) instead of a hard delete. Defaults to false (hard delete).",
               "default": false
+            },
+            "verify_with": {
+              "type": "array",
+              "description": "Columns from the table that the agent must provide to verify the record being deleted. This ensures the agent is deleting the correct record by providing additional identifying info (e.g., email to confirm which customer to delete).",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true,
+              "examples": [["email"], ["name", "created_at"]]
             }
           },
           "additionalProperties": false
@@ -142,7 +151,9 @@
         { "requires_approval": true },
         { "requires_approval": { "group": "data_stewards" } },
         { "soft_delete": true },
-        { "requires_approval": true, "soft_delete": true }
+        { "requires_approval": true, "soft_delete": true },
+        { "verify_with": ["email"] },
+        { "requires_approval": true, "verify_with": ["email", "name"] }
       ]
     },
     "CreatableColumns": {
@@ -202,6 +213,26 @@
             "Set to 'high' only for production-blocking issues affecting multiple users",
             "Format as 'YYYY-MM-DD' for consistency"
           ]
+        },
+        "foreign_key": {
+          "$ref": "#/$defs/ForeignKeyConstraint",
+          "description": "Foreign key constraint with verification. Agent must provide both the FK value and verification columns from the referenced table. Cori validates the referenced record exists AND belongs to the same tenant."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ForeignKeyConstraint": {
+      "type": "object",
+      "description": "Foreign key constraint for INSERT/UPDATE validation. Ensures referential integrity with tenant isolation. The referenced table is automatically inferred from the database schema's foreign key definitions.",
+      "properties": {
+        "verify_with": {
+          "type": "array",
+          "description": "Columns from the referenced table that the agent must provide for verification. These must be columns the agent has read access to. Cori validates: the FK exists AND matches the provided values AND belongs to the same tenant.",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "examples": [["email"], ["first_name", "last_name"], ["name"]]
         }
       },
       "additionalProperties": false
@@ -268,6 +299,10 @@
             "Append resolution notes with timestamp and action taken",
             "Escalate to 'critical' only if SLA breach is imminent"
           ]
+        },
+        "foreign_key": {
+          "$ref": "#/$defs/ForeignKeyConstraint",
+          "description": "Foreign key constraint with verification (for FK columns). Agent must provide both the FK value and verification columns from the referenced table. Cori validates the referenced record exists AND belongs to the same tenant."
         }
       },
       "additionalProperties": false

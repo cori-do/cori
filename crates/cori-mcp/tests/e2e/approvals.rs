@@ -144,6 +144,7 @@ pub async fn test_creatable_requires_approval(_ctx: &TestContext) {
             restrict_to: None,
             requires_approval: Some(ApprovalRequirement::Simple(true)),
             guidance: Some("Creating sensitive data requires approval".to_string()),
+            foreign_key: None,
         },
     );
 
@@ -239,6 +240,7 @@ pub async fn test_deletable_requires_approval(_ctx: &TestContext) {
                     ),
                 })),
                 soft_delete: false,
+                verify_with: vec![],
             }),
         },
     );

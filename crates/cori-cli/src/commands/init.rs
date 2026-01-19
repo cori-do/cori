@@ -1329,18 +1329,10 @@ fn generate_support_role(tables: &[&TableInfo]) -> String {
                     .any(|p| t.name.to_lowercase().contains(p));
 
                 if is_ticket && t.columns.iter().any(|c| c.name == "status") {
-                    // Ticket table with status - allow creating and updating
+                    // Ticket table with status - allow updating
                     format!(
                         r#"  {}:
     readable: [{}]
-    creatable:
-      subject:
-        required: true
-        guidance: "Use a clear, concise subject that summarizes the customer's issue"
-      priority:
-        default: low
-        restrict_to: [low, medium, high]
-        guidance: "Set to 'high' only for production-blocking issues"
     updatable:
       status:
         only_when:

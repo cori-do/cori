@@ -249,6 +249,23 @@ impl ToolExecutor {
         Ok(())
     }
 
+    /// Convert a JSON value to a SQL literal for use in queries.
+    fn value_to_sql_literal(&self, value: &Value) -> String {
+        if let Some(s) = value.as_str() {
+            format!("'{}'", s.replace("'", "''"))
+        } else if let Some(n) = value.as_i64() {
+            n.to_string()
+        } else if let Some(f) = value.as_f64() {
+            f.to_string()
+        } else if let Some(b) = value.as_bool() {
+            b.to_string()
+        } else if value.is_null() {
+            "NULL".to_string()
+        } else {
+            format!("'{}'", value.to_string().replace("'", "''"))
+        }
+    }
+
     /// Get the primary key columns for a table from schema.
     /// Returns empty vector if no primary key is defined in the schema.
     fn get_primary_key_columns(&self, table: &str) -> Vec<String> {
@@ -258,6 +275,22 @@ impl ToolExecutor {
             }
         // No schema or table not found - return empty (no PK)
         Vec::new()
+    }
+
+    /// Get the referenced table for a foreign key column from schema.
+    /// Returns None if no FK is found or schema is not available.
+    fn get_fk_referenced_table(&self, table: &str, column: &str) -> Option<String> {
+        let schema = self.schema.as_ref()?;
+        let table_schema = schema.get_table(table)?;
+        
+        for fk in &table_schema.foreign_keys {
+            for fk_col in &fk.columns {
+                if fk_col.column == column {
+                    return Some(fk_col.foreign_table.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Check if a role has old.* constraints for a table that require fetching current row.
@@ -1195,14 +1228,6 @@ impl ToolExecutor {
             });
         }
 
-        // Execute actual insert
-        let pool = match &self.pool {
-            Some(p) => p,
-            None => {
-                return ExecutionResult::error("Database connection not configured");
-            }
-        };
-
         // Build INSERT statement from arguments
         let empty_map = serde_json::Map::new();
         let obj = arguments.as_object().unwrap_or(&empty_map);
@@ -1214,6 +1239,9 @@ impl ToolExecutor {
             final_args.remove(tc);
         }
 
+        // Collect foreign key columns that need validation: (column_name, fk_constraint, referenced_table)
+        let mut fk_columns: Vec<(String, cori_core::config::ForeignKeyConstraint, String)> = Vec::new();
+
         // Validate required fields and apply default values from role's creatable column constraints
         if let Some(creatable) = self.role.get_creatable_columns(table)
             && let Some(constraints_map) = creatable.as_map() {
@@ -1223,6 +1251,15 @@ impl ToolExecutor {
                         && col_name == tc {
                             continue;
                         }
+
+                    // Collect foreign key constraints for later validation
+                    if let Some(fk_constraint) = &constraints.foreign_key {
+                        // Look up the referenced table from schema
+                        if let Some(ref_table) = self.get_fk_referenced_table(table, col_name) {
+                            fk_columns.push((col_name.clone(), fk_constraint.clone(), ref_table));
+                        }
+                        // If not found in schema, skip FK validation (will be caught by DB constraints)
+                    }
 
                     let has_value = final_args.contains_key(col_name);
 
@@ -1241,6 +1278,121 @@ impl ToolExecutor {
                         }
                 }
             }
+
+        // Validate foreign keys with tenant isolation
+        let pool = match &self.pool {
+            Some(p) => p,
+            None => {
+                return ExecutionResult::error("Database connection not configured");
+            }
+        };
+
+        // Track verification keys to remove after FK validation
+        let mut verify_keys_to_remove: Vec<String> = Vec::new();
+
+        for (fk_col, fk_constraint, ref_table) in &fk_columns {
+            let fk_value = match final_args.get(fk_col) {
+                Some(v) => v.clone(),
+                None => continue, // FK not provided, will be caught by required check or is optional
+            };
+
+            // Get tenant column for the referenced table
+            let ref_tenant_col = self.tenant_column_for_table(ref_table);
+
+            // Determine the primary key column of the referenced table
+            let ref_pk = self.get_primary_key_columns(ref_table);
+            let pk_col = ref_pk.first().cloned().unwrap_or_else(|| {
+                // Fallback: assume <table>_id pattern (customers -> customer_id)
+                format!(
+                    "{}_id",
+                    ref_table.trim_end_matches('s')
+                )
+            });
+
+            // Build validation query
+            // SELECT 1 FROM <table> WHERE <pk> = <fk_value> AND <verify_cols match> AND <tenant> = <tenant_id>
+            let mut conditions = vec![format!(
+                "{} = {}",
+                pk_col,
+                self.value_to_sql_literal(&fk_value)
+            )];
+
+            // Add tenant condition for the referenced table
+            if let Some(tc) = &ref_tenant_col {
+                let tenant_literal = if context.tenant_id.parse::<i64>().is_ok() {
+                    context.tenant_id.clone()
+                } else {
+                    format!("'{}'", context.tenant_id.replace("'", "''"))
+                };
+                conditions.push(format!("{} = {}", tc, tenant_literal));
+            }
+
+            // Add verify_with conditions
+            for verify_col in &fk_constraint.verify_with {
+                // The agent provides verification values with a prefix, e.g., "customer_email" for verifying customer
+                let verify_key = format!(
+                    "{}_{}",
+                    ref_table.trim_end_matches('s'), // customers -> customer
+                    verify_col
+                );
+                if let Some(verify_value) = final_args.get(&verify_key) {
+                    conditions.push(format!(
+                        "{} = {}",
+                        verify_col,
+                        self.value_to_sql_literal(verify_value)
+                    ));
+                    // Track for removal after validation
+                    verify_keys_to_remove.push(verify_key);
+                } else if let Some(verify_value) = obj.get(&verify_key) {
+                    // Also check original args in case it was removed
+                    conditions.push(format!(
+                        "{} = {}",
+                        verify_col,
+                        self.value_to_sql_literal(verify_value)
+                    ));
+                }
+            }
+
+            let validation_query = format!(
+                "SELECT 1 FROM {} WHERE {}",
+                ref_table,
+                conditions.join(" AND ")
+            );
+
+            tracing::debug!("Validating FK: {}", validation_query);
+
+            match sqlx::query(&validation_query).fetch_optional(pool).await {
+                Ok(Some(_)) => {
+                    // FK is valid and belongs to the same tenant
+                }
+                Ok(None) => {
+                    let verify_hint = if !fk_constraint.verify_with.is_empty() {
+                        format!(
+                            " with {} matching",
+                            fk_constraint.verify_with.join(", ")
+                        )
+                    } else {
+                        String::new()
+                    };
+                    return ExecutionResult::error(format!(
+                        "Referenced {} not found{} (or belongs to a different tenant)",
+                        ref_table.trim_end_matches('s'),
+                        verify_hint
+                    ));
+                }
+                Err(e) => {
+                    return ExecutionResult::error(format!(
+                        "Failed to validate foreign key: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Remove verification columns from final_args (they're not part of the target table)
+        for key in verify_keys_to_remove {
+            final_args.remove(&key);
+        }
 
         // Start with tenant column (if table is tenant-scoped)
         // SECURITY: Tenant value ALWAYS comes from the Biscuit token, never from user input
