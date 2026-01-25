@@ -383,7 +383,7 @@ Agents get tools like `getCustomer`, `listTickets`, `updateTicket` — automatic
 If you prefer to build Cori from source:
 
 ```sh
-git clone https://github.com/cori-do/cori.git
+git clone https://github.com/cori-do/cori-kernel.git
 cd cori
 cargo install --path crates/cori-cli
 ```
@@ -412,6 +412,6 @@ Apache 2.0 — Use it, fork it, build on it.
 
 **Cori: Because AI agents shouldn't have `sudo` on your database.**
 
-[Get Started](#-quick-start) • [Star on GitHub ⭐](https://github.com/cori-do/cori)
+[Get Started](#-quick-start) • [Star on GitHub ⭐](https://github.com/cori-do/cori-kernel)
 
 </div>
