@@ -5,6 +5,9 @@
 tokens/*.token
 tokens/*.biscuit
 
+# Approvals
+approvals/*.log
+
 # Environment files with secrets
 .env
 .env.*

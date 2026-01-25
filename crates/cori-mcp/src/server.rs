@@ -429,6 +429,7 @@ impl McpServer {
                 tracing::debug!("Received notifications/initialized notification");
                 None
             }
+            "ping" => Some(self.handle_ping(id)),
             "tools/list" => Some(self.handle_list_tools(id)),
             "tools/call" => Some(self.handle_call_tool(id, request.params).await),
             "shutdown" => Some(self.handle_shutdown(id)),
@@ -783,6 +784,11 @@ impl McpServer {
         tracing::info!("MCP server shutdown requested");
         JsonRpcResponse::success(id, json!(null))
     }
+
+    fn handle_ping(&self, id: Option<Value>) -> JsonRpcResponse {
+        tracing::debug!("MCP ping received");
+        JsonRpcResponse::success(id, json!({}))
+    }
 }
 
 #[cfg(test)]
@@ -859,5 +865,24 @@ mod tests {
             response.is_none(),
             "Notifications should not return a response"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ping() {
+        let server = McpServer::new(McpConfig::default());
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "ping".to_string(),
+            params: None,
+        };
+
+        let response = server
+            .handle_request(request)
+            .await
+            .expect("Should return response for ping");
+        assert!(response.result.is_some());
+        assert!(response.error.is_none());
+        assert_eq!(response.result.unwrap(), json!({}));
     }
 }

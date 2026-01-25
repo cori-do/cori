@@ -1944,7 +1944,7 @@ pub fn role_detail_page(role: &RoleDefinition, mcp_tools: Option<&[serde_json::V
                         <i class="fas {icon} mt-0.5"></i>
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center gap-2 flex-wrap">
-                                <code class="font-semibold text-gray-900 dark:text-white">{name}</code>
+                                <code class="font-semibold text-sm text-gray-900 dark:text-white">{name}</code>
                                 {badges}
                             </div>
                             <p class="text-sm text-gray-500 dark:text-gray-400 truncate">{desc}</p>
