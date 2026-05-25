@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cori</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900 min-h-screen">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
+        <a href="#/" class="flex items-center gap-2">
+          <img src="https://assets.cori.do/cori-logo.png" alt="Cori" class="h-7 w-auto" />
+          <span class="sr-only">Cori</span>
+        </a>
+        <span class="text-sm text-slate-500">local dev UI</span>
+      </div>
+    </header>
+    <main id="app" class="max-w-5xl mx-auto px-6 py-6"></main>
+
+    <script>
+      const app = document.getElementById("app");
+      const esc = (s) =>
+        String(s ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        }[c]));
+
+      async function api(path, opts) {
+        const r = await fetch(path, opts);
+        if (!r.ok) {
+          let msg = `${r.status} ${r.statusText}`;
+          try { const b = await r.json(); if (b.error) msg = b.error; } catch {}
+          throw new Error(msg);
+        }
+        return r.json();
+      }
+
+      // --- routing -----------------------------------------------------
+      function parseHash() {
+        const h = location.hash.replace(/^#/, "") || "/";
+        const parts = h.split("/").filter(Boolean);
+        if (parts.length === 0) return { view: "workflows" };
+        if (parts[0] === "workflows" && parts[1]) return { view: "workflow", id: parts[1] };
+        if (parts[0] === "runs" && parts[1]) return { view: "run", id: parts[1] };
+        return { view: "workflows" };
+      }
+      window.addEventListener("hashchange", render);
+
+      // --- views -------------------------------------------------------
+      async function render() {
+        const route = parseHash();
+        app.innerHTML = `<div class="text-slate-500 text-sm">loading…</div>`;
+        try {
+          if (route.view === "workflows") return renderWorkflows();
+          if (route.view === "workflow") return renderWorkflow(route.id);
+          if (route.view === "run") return renderRun(route.id);
+        } catch (e) {
+          app.innerHTML = `<div class="p-4 rounded bg-red-50 border border-red-200 text-red-800">${esc(e.message)}</div>`;
+        }
+      }
+
+      async function renderWorkflows() {
+        const [workflows, runs] = await Promise.all([
+          api("/api/workflows"),
+          api("/api/runs?limit=10"),
+        ]);
+        app.innerHTML = `
+          <section>
+            <h2 class="text-base font-semibold mb-3">Workflows</h2>
+            ${workflows.length === 0 ? `
+              <div class="text-sm text-slate-500 p-4 bg-white border border-slate-200 rounded">
+                No workflows registered. Try <code class="mono bg-slate-100 px-1 rounded">cori workflows register &lt;path&gt;</code>.
+              </div>
+            ` : `
+              <ul class="divide-y divide-slate-200 bg-white border border-slate-200 rounded">
+                ${workflows.map(w => `
+                  <li class="px-4 py-3 flex items-center justify-between">
+                    <div>
+                      <a href="#/workflows/${esc(w.id)}" class="font-medium hover:underline">${esc(w.name)}</a>
+                      <span class="ml-2 text-xs text-slate-500 mono">${esc(w.id)} · v${w.version}</span>
+                      <div class="text-sm text-slate-600 mt-0.5">${esc(w.description)}</div>
+                    </div>
+                    <button data-run="${esc(w.id)}" class="text-sm px-3 py-1.5 rounded bg-slate-900 text-white hover:bg-slate-700">Run</button>
+                  </li>
+                `).join("")}
+              </ul>
+            `}
+          </section>
+          <section class="mt-8">
+            <h2 class="text-base font-semibold mb-3">Recent runs</h2>
+            ${runs.length === 0 ? `
+              <div class="text-sm text-slate-500">No runs yet.</div>
+            ` : `
+              <ul class="divide-y divide-slate-200 bg-white border border-slate-200 rounded">
+                ${runs.map(r => `
+                  <li class="px-4 py-2 text-sm flex items-center justify-between">
+                    <a href="#/runs/${esc(r.run_id)}" class="mono hover:underline">${esc(r.run_id)}</a>
+                    <span class="text-slate-500">${esc(r.workflow_id)}</span>
+                    <span>${statusBadge(r.status)}</span>
+                  </li>
+                `).join("")}
+              </ul>
+            `}
+          </section>
+        `;
+        for (const btn of app.querySelectorAll("[data-run]")) {
+          btn.addEventListener("click", () => quickRun(btn.dataset.run));
+        }
+      }
+
+      async function renderWorkflow(id) {
+        const [wf, runs] = await Promise.all([
+          api(`/api/workflows/${encodeURIComponent(id)}`),
+          api(`/api/runs?workflow_id=${encodeURIComponent(id)}&limit=20`),
+        ]);
+        const params = wf.compiled?.manifest?.parameters ?? [];
+        const steps = wf.compiled?.steps ?? [];
+        app.innerHTML = `
+          <a href="#/" class="text-sm text-slate-500 hover:underline">← workflows</a>
+          <header class="mt-2 mb-6">
+            <h2 class="text-xl font-semibold">${esc(wf.compiled?.manifest?.name ?? id)}</h2>
+            <div class="text-sm text-slate-500 mono">${esc(wf.id)} · v${wf.version}</div>
+            <p class="text-sm text-slate-700 mt-1">${esc(wf.compiled?.manifest?.description ?? "")}</p>
+          </header>
+
+          <section class="bg-white border border-slate-200 rounded p-4 mb-6">
+            <h3 class="font-semibold mb-3">Run</h3>
+            <form id="run-form" class="space-y-3">
+              ${params.length === 0 ? `<div class="text-sm text-slate-500">No parameters.</div>` : params.map(renderParamField).join("")}
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" name="__dry_run" /> Dry run
+              </label>
+              <button type="submit" class="px-3 py-1.5 rounded bg-slate-900 text-white text-sm hover:bg-slate-700">Run workflow</button>
+            </form>
+          </section>
+
+          <section class="mb-6">
+            <h3 class="font-semibold mb-3">Steps</h3>
+            <ol class="bg-white border border-slate-200 rounded divide-y divide-slate-200">
+              ${steps.map(s => `
+                <li class="px-4 py-2 text-sm flex items-center gap-3">
+                  <span class="text-slate-400 mono w-6 text-right">${s.index + 1}</span>
+                  <span class="font-medium">${esc(s.name)}</span>
+                  <span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 mono">${esc(s.kind)}</span>
+                </li>
+              `).join("")}
+            </ol>
+          </section>
+
+          <section>
+            <h3 class="font-semibold mb-3">Recent runs</h3>
+            ${runs.length === 0 ? `<div class="text-sm text-slate-500">No runs yet.</div>` : `
+              <ul class="divide-y divide-slate-200 bg-white border border-slate-200 rounded">
+                ${runs.map(r => `
+                  <li class="px-4 py-2 text-sm flex items-center justify-between">
+                    <a href="#/runs/${esc(r.run_id)}" class="mono hover:underline">${esc(r.run_id)}</a>
+                    <span class="text-slate-500">${esc(r.started_at)}</span>
+                    <span>${statusBadge(r.status)}</span>
+                  </li>
+                `).join("")}
+              </ul>
+            `}
+          </section>
+        `;
+        app.querySelector("#run-form").addEventListener("submit", (e) => {
+          e.preventDefault();
+          submitRun(id, e.currentTarget, params);
+        });
+      }
+
+      function renderParamField(p) {
+        const desc = p.description ? `<div class="text-xs text-slate-500">${esc(p.description)}</div>` : "";
+        let input;
+        if (p.type === "boolean") {
+          input = `<input type="checkbox" name="${esc(p.name)}" ${p.default ? "checked" : ""} class="mt-1" />`;
+        } else if (p.type === "enum") {
+          input = `<select name="${esc(p.name)}" class="mt-1 block w-full border border-slate-300 rounded px-2 py-1 text-sm">
+            ${(p.values ?? []).map(v => `<option value="${esc(v)}" ${v === p.default ? "selected" : ""}>${esc(v)}</option>`).join("")}
+          </select>`;
+        } else {
+          const t = p.type === "number" ? "number" : "text";
+          input = `<input type="${t}" name="${esc(p.name)}" value="${esc(p.default ?? "")}" class="mt-1 block w-full border border-slate-300 rounded px-2 py-1 text-sm mono" />`;
+        }
+        return `<div>
+          <label class="text-sm font-medium">${esc(p.name)} <span class="text-xs text-slate-400 mono">${esc(p.type)}</span></label>
+          ${desc}
+          ${input}
+        </div>`;
+      }
+
+      async function submitRun(id, form, params) {
+        const data = new FormData(form);
+        const out = {};
+        for (const p of params) {
+          if (p.type === "boolean") {
+            out[p.name] = form.elements[p.name]?.checked ?? false;
+          } else if (p.type === "number") {
+            const v = data.get(p.name);
+            if (v !== null && v !== "") out[p.name] = Number(v);
+          } else {
+            const v = data.get(p.name);
+            if (v !== null && v !== "") out[p.name] = v;
+          }
+        }
+        const dry_run = form.elements["__dry_run"]?.checked ?? false;
+        const r = await api(`/api/workflows/${encodeURIComponent(id)}/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ params: out, dry_run }),
+        });
+        location.hash = `#/runs/${r.run_id}`;
+      }
+
+      async function quickRun(id) {
+        const wf = await api(`/api/workflows/${encodeURIComponent(id)}`);
+        const params = wf.compiled?.manifest?.parameters ?? [];
+        if (params.length > 0) {
+          location.hash = `#/workflows/${id}`;
+          return;
+        }
+        const r = await api(`/api/workflows/${encodeURIComponent(id)}/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        location.hash = `#/runs/${r.run_id}`;
+      }
+
+      let pollHandle = null;
+      async function renderRun(runId) {
+        if (pollHandle) clearTimeout(pollHandle);
+        const draw = async () => {
+          let run;
+          try {
+            run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+          } catch (e) {
+            app.innerHTML = `<div class="p-4 rounded bg-red-50 border border-red-200 text-red-800">${esc(e.message)}</div>`;
+            return;
+          }
+          const trace = run.trace ?? {};
+          const activities = trace.activities ?? [];
+          const cost = trace.cost?.total_eur;
+          app.innerHTML = `
+            <a href="#/" class="text-sm text-slate-500 hover:underline">← workflows</a>
+            <header class="mt-2 mb-4">
+              <h2 class="text-xl font-semibold mono">${esc(run.run_id)}</h2>
+              <div class="text-sm text-slate-600 mt-1 flex items-center gap-3">
+                <span>workflow <a href="#/workflows/${esc(run.workflow_id)}" class="mono hover:underline">${esc(run.workflow_id)}</a></span>
+                <span>${statusBadge(run.status)}</span>
+                ${trace.dry_run ? `<span class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">dry run</span>` : ""}
+                ${typeof cost === "number" ? `<span class="text-xs text-slate-500">€${cost.toFixed(4)}</span>` : ""}
+              </div>
+              <div class="text-xs text-slate-500 mt-1">started ${esc(run.started_at)} ${run.ended_at ? `· ended ${esc(run.ended_at)}` : ""}</div>
+            </header>
+            <ol class="bg-white border border-slate-200 rounded divide-y divide-slate-200">
+              ${activities.length === 0 ? `<li class="px-4 py-3 text-sm text-slate-500">waiting for first step…</li>` : activities.map(a => `
+                <li class="px-4 py-3 text-sm">
+                  <div class="flex items-center gap-3">
+                    <span class="font-medium">${esc(a.step_name)}</span>
+                    <span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 mono">${esc(a.kind)}</span>
+                    <span>${statusBadge(a.status)}</span>
+                    <span class="ml-auto text-xs text-slate-500">${a.duration_ms ?? 0} ms${typeof a.cost_eur === "number" ? ` · €${a.cost_eur.toFixed(4)}` : ""}</span>
+                  </div>
+                  ${a.error ? `<pre class="mt-2 text-xs text-red-700 bg-red-50 p-2 rounded whitespace-pre-wrap">${esc(a.error)}</pre>` : ""}
+                  ${a.notes ? `<div class="mt-1 text-xs text-slate-500">${esc(a.notes)}</div>` : ""}
+                </li>
+              `).join("")}
+            </ol>
+            ${trace.error ? `<pre class="mt-4 text-xs text-red-700 bg-red-50 p-3 rounded whitespace-pre-wrap">${esc(trace.error)}</pre>` : ""}
+          `;
+          if (run.status === "running") {
+            pollHandle = setTimeout(draw, 500);
+          }
+        };
+        draw();
+      }
+
+      function statusBadge(s) {
+        const cls = {
+          running: "bg-blue-100 text-blue-800",
+          succeeded: "bg-emerald-100 text-emerald-800",
+          ok: "bg-emerald-100 text-emerald-800",
+          failed: "bg-red-100 text-red-800",
+          skipped: "bg-slate-100 text-slate-600",
+        }[s] || "bg-slate-100 text-slate-700";
+        return `<span class="text-xs px-1.5 py-0.5 rounded ${cls}">${esc(s)}</span>`;
+      }
+
+      render();
+    </script>
+  </body>
+</html>

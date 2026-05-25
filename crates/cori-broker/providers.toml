@@ -1,0 +1,53 @@
+# LLM model pricing (EUR per 1M tokens).
+#
+# Approximate, converted from each provider's published USD rates at
+# ~1.08 USD/EUR. Update when prices drift. Models not listed in this file
+# still run — we just can't report a cost.
+
+[models."gpt-4o"]
+input_per_mtok_eur = 2.30
+output_per_mtok_eur = 9.20
+
+[models."gpt-4o-mini"]
+input_per_mtok_eur = 0.14
+output_per_mtok_eur = 0.55
+
+[models."gpt-4-turbo"]
+input_per_mtok_eur = 9.20
+output_per_mtok_eur = 27.70
+
+[models."o1"]
+input_per_mtok_eur = 13.80
+output_per_mtok_eur = 55.50
+
+[models."o1-mini"]
+input_per_mtok_eur = 2.80
+output_per_mtok_eur = 11.10
+
+[models."o3-mini"]
+input_per_mtok_eur = 1.00
+output_per_mtok_eur = 4.05
+
+[models."claude-3-5-sonnet-20241022"]
+input_per_mtok_eur = 2.78
+output_per_mtok_eur = 13.90
+
+[models."claude-3-5-haiku-20241022"]
+input_per_mtok_eur = 0.92
+output_per_mtok_eur = 3.70
+
+[models."claude-3-opus-20240229"]
+input_per_mtok_eur = 13.90
+output_per_mtok_eur = 69.40
+
+[models."gemini-1.5-pro"]
+input_per_mtok_eur = 1.16
+output_per_mtok_eur = 4.63
+
+[models."gemini-1.5-flash"]
+input_per_mtok_eur = 0.07
+output_per_mtok_eur = 0.28
+
+[models."gemini-2.0-flash"]
+input_per_mtok_eur = 0.09
+output_per_mtok_eur = 0.37

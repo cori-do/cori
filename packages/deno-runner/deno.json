@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@cori/sdk": "./sdk/index.ts",
+    "zod": "npm:zod@^3.23.0"
+  },
+  "lock": false,
+  "nodeModulesDir": "auto"
+}

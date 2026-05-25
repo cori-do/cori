@@ -1,0 +1,18 @@
+{
+  "name": "@cori/deno-runner",
+  "version": "0.1.0-dev",
+  "description": "Deno-based runner that hosts Cori `code` activities in a sandboxed subprocess.",
+  "license": "Apache-2.0",
+  "private": true,
+  "files": [
+    "runner.ts",
+    "deno.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "echo \"no build step — runner.ts ships as source\"",
+    "lint": "echo \"no lint — Deno typechecks at run time\"",
+    "typecheck": "echo \"no typecheck — Deno typechecks at run time\"",
+    "test": "echo \"no tests yet\""
+  }
+}

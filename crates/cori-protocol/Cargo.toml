@@ -1,0 +1,13 @@
+[package]
+name = "cori-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Wire types shared between the CLI, worker, and Deno runner."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+cori-manifest.workspace = true

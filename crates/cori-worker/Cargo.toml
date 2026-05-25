@@ -1,0 +1,43 @@
+[package]
+name = "cori-worker"
+version.workspace = true
+# temporalio-sdk requires edition 2024; this crate opts in independently
+# of the rest of the workspace (which stays on 2021).
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Temporal worker + ephemeral runtime that executes Cori activities."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+notify.workspace = true
+ctrlc.workspace = true
+crossbeam-channel.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+futures.workspace = true
+futures-util = "0.3"
+prost-wkt-types = "0.7"
+
+# Temporal Rust SDK (v0.4.x).
+temporalio-sdk.workspace = true
+temporalio-sdk-core.workspace = true
+temporalio-client.workspace = true
+temporalio-common.workspace = true
+temporalio-macros.workspace = true
+
+cori-broker.workspace = true
+cori-compiler.workspace = true
+cori-ledger.workspace = true
+cori-manifest.workspace = true
+cori-protocol.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

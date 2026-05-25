@@ -1,0 +1,9 @@
+[temporal_cli]
+version = "1.4.1"
+
+[temporal_cli.checksums]
+linux_x86_64 = "abc123..."
+linux_arm64 = "def456..."
+darwin_x86_64 = "..."
+darwin_arm64 = "..."
+windows_x86_64 = "..."

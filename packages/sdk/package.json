@@ -1,0 +1,32 @@
+{
+  "name": "@cori/sdk",
+  "version": "0.1.0-dev",
+  "description": "TypeScript SDK for authoring Cori workflow steps.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no tests yet\""
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  },
+  "peerDependencies": {
+    "zod": "^3.23.0"
+  }
+}

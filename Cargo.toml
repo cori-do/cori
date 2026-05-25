@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cori-cli",
+    "crates/cori-worker",
+    "crates/cori-compiler",
+    "crates/cori-broker",
+    "crates/cori-ledger",
+    "crates/cori-manifest",
+    "crates/cori-protocol",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/cori-do/cori"
+# Bumped from 1.78 to 1.94 to satisfy temporalio-sdk v0.4.x (edition 2024).
+# cori-worker overrides `edition = "2024"` locally; other crates stay on 2021.
+rust-version = "1.94"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+cron = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono-tz = "0.9"
+regex = "1"
+walkdir = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+dirs = "5"
+toml = "0.8"
+comfy-table = { version = "7", default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+chrono-humanize = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+ctrlc = { version = "3", features = ["termination"] }
+crossbeam-channel = "0.5"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Temporal Rust SDK — pinned to v0.4.x.
+# These are pre-1.0; the workspace pins exact versions and `cargo update -p`
+# is required to bump them deliberately.
+temporalio-sdk = "0.4"
+temporalio-sdk-core = "0.4"
+temporalio-client = "0.4"
+temporalio-common = "0.4"
+temporalio-macros = "0.4"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+
+cori-broker = { path = "crates/cori-broker" }
+cori-compiler = { path = "crates/cori-compiler" }
+cori-ledger = { path = "crates/cori-ledger" }
+cori-manifest = { path = "crates/cori-manifest" }
+cori-protocol = { path = "crates/cori-protocol" }
+cori-worker = { path = "crates/cori-worker" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

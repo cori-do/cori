@@ -1,0 +1,18 @@
+[package]
+name = "cori-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Manifest schema, parser, and shared workflow types."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+cron.workspace = true
+regex.workspace = true

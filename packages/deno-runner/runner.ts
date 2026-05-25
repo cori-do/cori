@@ -1,0 +1,416 @@
+// runner.ts — host process for Cori activities.
+//
+// Invoked as:
+//
+//   deno run [permission flags] --config <runtime>/deno.json \
+//     <runtime>/runner.ts <step-file> <mode>
+//
+// Modes (Phase 3 + Phase 4 + Phase 5):
+//
+//   code         — call stepDef.run(input); return its output.
+//   cli_command  — call stepDef.command(input); return { command, env }.
+//   cli_parse    — call stepDef.parse(stdout, { stderr, exitCode }) or
+//                  JSON.parse(stdout) when no parse fn is declared.
+//   mcp_args     — call stepDef.args(input); return { server, tool, args }.
+//   llm_prompt   — call stepDef.prompt(input); return
+//                  { model, prompt, batch, outputSchema, hasOutputSchema }.
+//
+// Protocol (every mode):
+//   stdin  : JSON object — `{ "input": <value>, ... mode-specific extras }`.
+//            Empty stdin is treated as `{}`.
+//   stdout : exactly one JSON envelope, written as the last line and prefixed
+//            with ENVELOPE_PREFIX so the broker can tolerate stray user logs.
+//   stderr : free-form Deno diagnostics; never parsed by the broker.
+//
+// Envelope shape (success):  { "ok": true, "output": <value> }
+// Envelope shape (failure):  { "ok": false, "error": { "message", "stack"? } }
+
+const ENVELOPE_PREFIX = "\u001ECORI_RUNNER\u001E";
+
+const stepPath = Deno.args[0];
+const mode = Deno.args[1] ?? "code";
+
+function emit(envelope: unknown): void {
+  const line = ENVELOPE_PREFIX + JSON.stringify(envelope) + "\n";
+  Deno.stdout.writeSync(new TextEncoder().encode(line));
+}
+
+function fail(message: string, err?: unknown): never {
+  const stack = err instanceof Error ? err.stack : undefined;
+  emit({ ok: false, error: { message, stack } });
+  Deno.exit(1);
+}
+
+if (!stepPath) {
+  fail("missing step file path (argv[0])");
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  for await (const c of Deno.stdin.readable) chunks.push(c);
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const buf = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) {
+    buf.set(c, o);
+    o += c.length;
+  }
+  return new TextDecoder().decode(buf);
+}
+
+const stdinText = await readStdin();
+let payload: Record<string, unknown>;
+try {
+  payload = stdinText.trim() ? JSON.parse(stdinText) : {};
+} catch (e) {
+  fail("could not parse stdin as JSON", e);
+}
+
+const url = stepPath.startsWith("file:")
+  ? new URL(stepPath)
+  : new URL("file://" + stepPath);
+
+let mod: { default?: unknown };
+try {
+  mod = await import(url.href);
+} catch (e) {
+  fail(
+    `could not import step file (${stepPath}): ${
+      e instanceof Error ? e.message : String(e)
+    }`,
+    e,
+  );
+}
+
+// deno-lint-ignore no-explicit-any
+const stepDef: any = (mod as { default?: unknown }).default;
+if (!stepDef || stepDef.__cori_step !== true) {
+  fail(
+    `step file's default export is not a Cori step (expected an object with __cori_step === true; got ${typeof stepDef})`,
+  );
+}
+
+function expectKind(want: string): void {
+  if (stepDef.kind !== want) {
+    fail(
+      `step kind mismatch: runner invoked in mode '${mode}' expects '${want}' but step declares '${stepDef.kind}'`,
+    );
+  }
+}
+
+try {
+  switch (mode) {
+    case "code": {
+      expectKind("code");
+      if (typeof stepDef.run !== "function") {
+        fail("code step is missing a `run` function");
+      }
+      const out = await stepDef.run(payload.input);
+      emit({ ok: true, output: out ?? null });
+      break;
+    }
+
+    case "cli_command": {
+      expectKind("cli");
+      if (typeof stepDef.command !== "function") {
+        fail("cli step is missing a `command` function");
+      }
+      const argv = await stepDef.command(payload.input);
+      if (!Array.isArray(argv) || argv.some((x) => typeof x !== "string")) {
+        fail(
+          "cli step `command` must return an array of strings (no single string, no nested arrays)",
+        );
+      }
+      if (argv.length === 0) {
+        fail("cli step `command` returned an empty array");
+      }
+      emit({
+        ok: true,
+        output: {
+          command: argv,
+          env: stepDef.env ?? null,
+        },
+      });
+      break;
+    }
+
+    case "cli_parse": {
+      expectKind("cli");
+      // deno-lint-ignore no-explicit-any
+      const ctx: any = payload.parseCtx ?? {};
+      const stdout = String(ctx.stdout ?? "");
+      const stderr = String(ctx.stderr ?? "");
+      const exitCode = Number(ctx.exitCode ?? 0);
+      let parsed: unknown;
+      if (typeof stepDef.parse === "function") {
+        parsed = await stepDef.parse(stdout, { stderr, exitCode });
+      } else {
+        const trimmed = stdout.trim();
+        parsed = trimmed.length ? JSON.parse(trimmed) : null;
+      }
+      emit({ ok: true, output: parsed ?? null });
+      break;
+    }
+
+    case "mcp_args": {
+      expectKind("mcp_tool");
+      if (typeof stepDef.args !== "function") {
+        fail("mcp_tool step is missing an `args` function");
+      }
+      const args = await stepDef.args(payload.input);
+      emit({
+        ok: true,
+        output: {
+          server: stepDef.server,
+          tool: stepDef.tool,
+          args: args ?? {},
+        },
+      });
+      break;
+    }
+
+    case "llm_prompt": {
+      expectKind("llm");
+      if (typeof stepDef.prompt !== "function") {
+        fail("llm step is missing a `prompt` function");
+      }
+      const prompt = await stepDef.prompt(payload.input);
+      const schema = stepDef.output;
+      const hasSchema = !!(schema && typeof schema === "object" && schema._def);
+      emit({
+        ok: true,
+        output: {
+          model: stepDef.model,
+          prompt: String(prompt ?? ""),
+          batch: stepDef.batch ?? null,
+          outputSchema: hasSchema ? jsonSchemaFromZod(schema) : null,
+          hasOutputSchema: hasSchema,
+        },
+      });
+      break;
+    }
+
+    case "llm_stub": {
+      expectKind("llm");
+      // Retained for backward compatibility; Phase 5 uses real providers
+      // but the stub is still useful for `--dry-run` (Phase 6).
+      const schema = stepDef.output;
+      const stub = schema && typeof schema === "object" && schema._def
+        ? defaultFromZod(schema)
+        : { mocked: true };
+      emit({ ok: true, output: stub });
+      break;
+    }
+
+    default:
+      fail(`unknown runner mode: '${mode}'`);
+  }
+} catch (e) {
+  fail(
+    `runner failed in mode '${mode}': ${
+      e instanceof Error ? e.message : String(e)
+    }`,
+    e,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// zod default helper
+// ---------------------------------------------------------------------------
+//
+// We do not import zod here (the runner runs against whatever zod the
+// step file pulls in). We introspect `_def.typeName`, which is stable
+// across zod 3.x. Returns a minimal value: empty arrays/strings/objects,
+// `null` for nullable/unknown, the declared `.default()` if present.
+
+// deno-lint-ignore no-explicit-any
+function defaultFromZod(schema: any): unknown {
+  if (!schema || typeof schema !== "object" || !schema._def) {
+    return null;
+  }
+  const def = schema._def;
+  if (def.typeName === "ZodDefault") {
+    try {
+      return def.defaultValue();
+    } catch {
+      return defaultFromZod(def.innerType);
+    }
+  }
+  switch (def.typeName) {
+    case "ZodString":
+      return "";
+    case "ZodNumber":
+    case "ZodBigInt":
+      return 0;
+    case "ZodBoolean":
+      return false;
+    case "ZodDate":
+      return new Date(0).toISOString();
+    case "ZodNull":
+    case "ZodNullable":
+      return null;
+    case "ZodUndefined":
+    case "ZodVoid":
+    case "ZodAny":
+    case "ZodUnknown":
+      return null;
+    case "ZodOptional":
+      return defaultFromZod(def.innerType);
+    case "ZodArray":
+      return [];
+    case "ZodTuple":
+      return (def.items ?? []).map((s: unknown) => defaultFromZod(s));
+    case "ZodEnum":
+      return def.values?.[0] ?? null;
+    case "ZodNativeEnum": {
+      const v = def.values && Object.values(def.values)[0];
+      return v ?? null;
+    }
+    case "ZodLiteral":
+      return def.value ?? null;
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion": {
+      const opts = def.options ?? [];
+      return opts.length ? defaultFromZod(opts[0]) : null;
+    }
+    case "ZodIntersection":
+      return {
+        ...((defaultFromZod(def.left) as object) ?? {}),
+        ...((defaultFromZod(def.right) as object) ?? {}),
+      };
+    case "ZodRecord":
+    case "ZodMap":
+      return {};
+    case "ZodObject": {
+      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(shape ?? {})) {
+        out[k] = defaultFromZod(shape[k]);
+      }
+      return out;
+    }
+    case "ZodEffects":
+    case "ZodBranded":
+    case "ZodCatch":
+    case "ZodPipeline":
+    case "ZodLazy":
+      return defaultFromZod(def.schema ?? def.innerType ?? def.in);
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// zod -> JSON Schema converter (minimal)
+// ---------------------------------------------------------------------------
+//
+// Used by `llm_prompt` mode to materialise a JSON Schema describing the
+// step's `output` zod schema, which LLM providers can enforce via
+// structured-output / response_format APIs. Mirrors `defaultFromZod`'s
+// strategy: introspect `_def.typeName`, walk the tree, emit Draft-07-
+// compatible JSON Schema with `additionalProperties: false` everywhere
+// (which is what OpenAI's structured outputs require).
+
+// deno-lint-ignore no-explicit-any
+function jsonSchemaFromZod(schema: any): Record<string, unknown> {
+  if (!schema || typeof schema !== "object" || !schema._def) {
+    return {};
+  }
+  const def = schema._def;
+  switch (def.typeName) {
+    case "ZodString":
+      return { type: "string" };
+    case "ZodNumber":
+      return { type: "number" };
+    case "ZodBigInt":
+      return { type: "integer" };
+    case "ZodBoolean":
+      return { type: "boolean" };
+    case "ZodDate":
+      return { type: "string", format: "date-time" };
+    case "ZodNull":
+      return { type: "null" };
+    case "ZodAny":
+    case "ZodUnknown":
+      return {};
+    case "ZodUndefined":
+    case "ZodVoid":
+      return { type: "null" };
+    case "ZodLiteral":
+      return { const: def.value };
+    case "ZodEnum":
+      return { type: "string", enum: def.values ?? [] };
+    case "ZodNativeEnum":
+      return { enum: Object.values(def.values ?? {}) };
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+    case "ZodCatch":
+    case "ZodBranded":
+    case "ZodReadonly":
+      return jsonSchemaFromZod(def.innerType);
+    case "ZodEffects":
+      return jsonSchemaFromZod(def.schema);
+    case "ZodPipeline":
+      return jsonSchemaFromZod(def.out ?? def.in);
+    case "ZodLazy":
+      try {
+        return jsonSchemaFromZod(def.getter ? def.getter() : null);
+      } catch {
+        return {};
+      }
+    case "ZodArray":
+      return { type: "array", items: jsonSchemaFromZod(def.type) };
+    case "ZodTuple":
+      return {
+        type: "array",
+        items: (def.items ?? []).map((s: unknown) => jsonSchemaFromZod(s)),
+        minItems: (def.items ?? []).length,
+        maxItems: (def.items ?? []).length,
+      };
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return {
+        anyOf: (def.options ?? []).map((s: unknown) => jsonSchemaFromZod(s)),
+      };
+    case "ZodIntersection":
+      return {
+        allOf: [
+          jsonSchemaFromZod(def.left),
+          jsonSchemaFromZod(def.right),
+        ],
+      };
+    case "ZodRecord":
+      return {
+        type: "object",
+        additionalProperties: jsonSchemaFromZod(def.valueType),
+      };
+    case "ZodMap":
+      return { type: "object" };
+    case "ZodObject": {
+      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
+      for (const k of Object.keys(shape ?? {})) {
+        const child = shape[k];
+        properties[k] = jsonSchemaFromZod(child);
+        // A field is optional only if its outermost wrapper is
+        // ZodOptional / ZodDefault.
+        const inner = child?._def?.typeName;
+        if (inner !== "ZodOptional" && inner !== "ZodDefault") {
+          required.push(k);
+        }
+      }
+      const out: Record<string, unknown> = {
+        type: "object",
+        properties,
+        additionalProperties: false,
+      };
+      if (required.length) out.required = required;
+      return out;
+    }
+    default:
+      return {};
+  }
+}

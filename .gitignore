@@ -1,0 +1,18 @@
+# Build outputs
+target/
+dist/
+node_modules/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Runtime
+.cori/
