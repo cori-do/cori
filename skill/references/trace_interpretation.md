@@ -19,7 +19,7 @@ The trace is for *you* (the agent) to reason about. Your job is to synthesize it
   "duration_ms": 3284,
   "trigger": {
     "source": "cli",
-    "user": "adrien@veepee.com",
+    "user": "adrien@my_org.com",
     "params": { "spreadsheet_id": "ABC123", "dry_run": false }
   },
   "cost": {

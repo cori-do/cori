@@ -13,7 +13,7 @@
 //!   "servers": {
 //!     "slack": {
 //!       "command": ["slack-mcp-server"],
-//!       "args": ["--workspace", "veepee"],
+//!       "args": ["--workspace", "my_org"],
 //!       "env": { "SLACK_TOKEN": "xoxb-..." }
 //!     }
 //!   }
