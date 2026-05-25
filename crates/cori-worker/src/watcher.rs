@@ -104,7 +104,8 @@ fn flush_ready(
     let now = Instant::now();
     let ready: Vec<PathBuf> = pending
         .iter()
-        .filter_map(|(p, t)| (now.duration_since(*t) >= debounce).then(|| p.clone()))
+        .filter(|(_, t)| now.duration_since(**t) >= debounce)
+        .map(|(p, _)| p.clone())
         .collect();
     for p in ready {
         pending.remove(&p);

@@ -322,12 +322,12 @@ fn locate_temporal_binary() -> Option<PathBuf> {
         }
     }
     // 2. Sibling of the current executable.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let cand = parent.join(exe_name);
-            if cand.is_file() {
-                return Some(cand);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let cand = parent.join(exe_name);
+        if cand.is_file() {
+            return Some(cand);
         }
     }
     None
