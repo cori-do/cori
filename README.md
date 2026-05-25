@@ -53,4 +53,4 @@ Override the Temporal target via `CORI_TEMPORAL_TARGET` (defaults to
 
 ## License
 
-Apache-2.0.
+MIT License
