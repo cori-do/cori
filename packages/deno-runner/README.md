@@ -2,7 +2,7 @@
 
 The Deno script that hosts Cori `code` activities at runtime.
 
-Phase 3 scope:
+Current scope:
 
 - Accepts a step file path on argv
 - Reads `{ "input": <value> }` as a JSON object from stdin
@@ -36,8 +36,7 @@ This means user step files can `import { step } from "@cori/sdk"` and
 
 ## Permissions
 
-Phase 3 invokes Deno with `--allow-read` only (the runner has to read the
-step file and the bundled SDK; user `code` steps are pure functions so they
-need no other permissions). The roadmap upgrades this to `--allow-none`
-once we can pass the step source over stdin instead of by path — tracked
-for Phase 4+.
+The runner currently invokes Deno with `--allow-read` only (it has to read
+the step file and the bundled SDK; user `code` steps are pure functions so
+they need no other permissions). This can tighten to `--allow-none` once we
+can pass the step source over stdin instead of by path.

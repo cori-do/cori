@@ -1,9 +1,9 @@
 //! Supervise the bundled Temporal CLI as a child process.
 //!
-//! Phase 6 §6.2: the Cori binary ships alongside the `temporal` CLI binary
-//! (an external sibling, not embedded) and `cori worker start` is
-//! responsible for spawning `temporal server start-dev` when no external
-//! cluster is configured.
+//! The current install layout assumes the Cori binary ships alongside the
+//! `temporal` CLI binary (an external sibling, not embedded) and
+//! `cori worker start` is responsible for spawning `temporal server
+//! start-dev` when no external cluster is configured.
 //!
 //! The supervisor:
 //!
@@ -21,7 +21,7 @@
 //!
 //! Real workflow execution against Temporal (registering workflow types,
 //! polling activity tasks via `temporal-sdk-core`) lands on top of this
-//! supervisor in a follow-up — the Phase 6 milestone is the supervision
+//! supervisor in a follow-up — the current milestone is the supervision
 //! contract.
 
 use std::net::{SocketAddr, TcpStream};

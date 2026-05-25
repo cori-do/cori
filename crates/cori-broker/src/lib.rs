@@ -7,8 +7,8 @@
 //! spawns external processes, which gives us one place to enforce
 //! capability declarations.
 //!
-//! Phase 3 implemented the `code` kind. Phase 4 adds `cli`, `mcp_tool`,
-//! and a stubbed `llm` (replaced by real providers in Phase 5).
+//! This crate currently handles `code`, `cli`, `mcp_tool`, and `llm`
+//! dispatch.
 //!
 //! All public entry points return [`ActivityOutcome`] so the run loop in
 //! `cori-cli` can record a uniform trace regardless of which kind ran.
@@ -17,10 +17,10 @@
 //!
 //! - [`runtime`] resolves the Deno binary and the bundled runner script.
 //! - [`dispatch`] is the generic Deno-runner subprocess wrapper.
-//! - [`code`] runs `code` activities (Phase 3).
-//! - [`cli`] runs `cli` activities (Phase 4).
-//! - [`mcp`] runs `mcp_tool` activities (Phase 4).
-//! - [`llm`] runs `llm` activities — stub in Phase 4, real in Phase 5.
+//! - [`code`] runs `code` activities.
+//! - [`cli`] runs `cli` activities.
+//! - [`mcp`] runs `mcp_tool` activities.
+//! - [`llm`] runs `llm` activities.
 //! - [`capabilities`] discovers worker capabilities at startup.
 
 pub mod capabilities;
@@ -174,7 +174,7 @@ pub enum BrokerError {
 
 /// What invoked the run. v1 supports only `Cli`; the enum exists so the
 /// LLM broker can pick the right provider strategy (org-configured vs.
-/// MCP-sampling vs. scheduled) in later phases.
+/// MCP-sampling vs. scheduled) in later execution modes.
 #[derive(Debug, Clone, Copy)]
 pub enum TriggerContext {
     Cli,

@@ -1,11 +1,10 @@
 //! Dispatch an `mcp_tool` step.
 //!
-//! Phase 4 keeps the MCP client deliberately minimal: for each
-//! `mcp_tool` step we spawn the configured server as a stdio child,
-//! perform the standard MCP `initialize` handshake, send one
-//! `tools/call`, and shut the child down. A long-lived connection is
-//! deferred to Phase 6 (the worker process holds connections across
-//! runs).
+//! The MCP client is deliberately minimal: for each `mcp_tool` step we
+//! spawn the configured server as a stdio child, perform the standard MCP
+//! `initialize` handshake, send one `tools/call`, and shut the child down.
+//! A long-lived connection is deferred to the worker daemon, which can
+//! hold connections across runs.
 //!
 //! Server configuration lives in `~/.cori/mcp-servers.json`:
 //!

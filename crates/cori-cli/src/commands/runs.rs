@@ -1,4 +1,4 @@
-//! `cori runs list|show` — Phase 6.
+//! `cori runs list|show`.
 //!
 //! Inspects rows in the local `runs` SQLite table. The trace JSON is
 //! whatever the run loop stored (see [`crate::commands::run`]).

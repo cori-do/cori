@@ -1,8 +1,8 @@
 //! SQLite-backed registry of compiled workflows and runs.
 //!
-//! Phase 2 only needs the `workflows` table; the `runs` table is created
-//! eagerly because Phase 3 already starts writing trace rows into it and we
-//! want to avoid a schema migration between phases.
+//! The registry currently needs the `workflows` table; the `runs` table is
+//! created eagerly because the run loop already writes trace rows into it
+//! and we want to avoid a later schema migration.
 //!
 //! The on-disk file lives at [`crate::paths::registry_db`] and is opened
 //! lazily — every command that touches the registry calls [`open`] which
@@ -249,7 +249,7 @@ impl Registry {
 
     /// Append (or replace) a run row. The trace JSON is opaque to the
     /// registry — the CLI's `run` command builds it and round-trips it
-    /// back out via `cori runs show` in a later phase.
+    /// back out via `cori runs show` in a later command update.
     pub fn record_run(
         &mut self,
         run_id: &str,

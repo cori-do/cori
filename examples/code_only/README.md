@@ -1,6 +1,6 @@
 # code_only
 
-Two-step demo workflow used as the Phase 3 acceptance fixture.
+Two-step demo workflow used as the code execution acceptance fixture.
 
 ```sh
 cori init --local
@@ -15,4 +15,4 @@ network access. Step 1 squares its input; step 2 receives step 1's output
 as its input and renders it as a string.
 
 Requires Deno to be installed (or `CORI_DENO` pointing at a Deno binary)
-until Phase 3.2 auto-downloads it.
+until automatic runtime download is implemented.

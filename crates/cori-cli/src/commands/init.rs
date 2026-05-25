@@ -7,7 +7,7 @@ use crate::{paths, runtime};
 pub fn run(local: bool) -> Result<()> {
     if !local {
         // v1 only supports `--local`. Surface a clear error instead of doing
-        // something surprising. Future phases may add cloud-attached modes.
+        // something surprising. Future versions may add cloud-attached modes.
         anyhow::bail!("cori init currently requires `--local`. Re-run as `cori init --local`.");
     }
 

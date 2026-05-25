@@ -1,7 +1,7 @@
 //! Runbook compiler: parses manifest + steps and emits a
 //! [`CompiledWorkflow`].
 //!
-//! Phase 1 compiler responsibilities:
+//! Compiler responsibilities:
 //!
 //! 1. Parse `manifest.md` via [`cori_manifest`].
 //! 2. Enumerate `steps/*.ts`, validate gapless numeric prefixes, and sort.
@@ -13,14 +13,14 @@
 //!    `tools_required`; every MCP server is in `mcp_servers`; `code` steps
 //!    must not import `node:*` modules.
 //!
-//! Static parsing is intentionally regex-based for Phase 1. The roadmap
-//! notes a future migration to a full AST parser (swc/oxc) once builder
-//! evaluation lands in Phase 4. Until then we accept the constraint that
+//! Static parsing is intentionally regex-based for now. The implementation
+//! will eventually migrate to a full AST parser (swc/oxc) once builder
+//! evaluation lands. Until then we accept the constraint that
 //! step files use the canonical SDK call pattern.
 //!
-//! Note on `tsc --noEmit`: the roadmap calls for a bundled TypeScript
-//! compiler. That is wired in a later phase (a vendored `tsc` ships with the
-//! Cori binary). For Phase 1 the compiler is purely structural — type
+//! Note on `tsc --noEmit`: the long-term plan calls for a bundled TypeScript
+//! compiler. That is wired in a later update (a vendored `tsc` ships with the
+//! Cori binary). For now the compiler is purely structural — type
 //! checking is deferred to that work.
 
 mod step_parser;

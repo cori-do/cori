@@ -1,6 +1,6 @@
 //! Golden integration test against the canonical example runbook.
 //!
-//! Acceptance criteria for Phase 1 (from `cori-v1-roadmap.md`): the compiler
+//! Acceptance criteria for the current compiler fixture: the compiler
 //! invoked against `examples/translate_product_sheets_fr/` produces a
 //! `CompiledWorkflow` with 5 steps in the right order, correct kinds, and a
 //! single routing decision per step.

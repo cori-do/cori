@@ -1,4 +1,4 @@
-//! `cori serve start` — Phase 7.
+//! `cori serve start`.
 //!
 //! Boots a local HTTP server on `127.0.0.1:7510` that exposes the
 //! registry as a JSON API and serves a minimal embedded web UI. This is

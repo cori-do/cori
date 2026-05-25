@@ -1,11 +1,11 @@
 //! Dry-run support: synthesize a mock [`ActivityOutcome`] without spawning
 //! anything external.
 //!
-//! Phase 6 §6.3. `cori run --dry-run` exercises the entire pipeline —
-//! capability discovery, schema/route validation, the per-step trace
-//! shape — except that every step that would touch the outside world
-//! returns a placeholder annotated with `mocked: true`. `code` and
-//! `builtin` steps still run for real (they're pure).
+//! `cori run --dry-run` exercises the entire pipeline — capability
+//! discovery, schema/route validation, the per-step trace shape — except
+//! that every step that would touch the outside world returns a placeholder
+//! annotated with `mocked: true`. `code` and `builtin` steps still run for
+//! real (they're pure).
 //!
 //! The mocked output is a JSON object with a single `mocked: true` field
 //! plus a kind-specific summary so the trace remains readable. The

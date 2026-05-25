@@ -6,7 +6,7 @@
 //! ~/.cori/
 //! ├── config.toml      # CLI config (LLM providers, temporal.host, ...)
 //! ├── registry.db      # SQLite registry (workflows, runs)
-//! ├── runbooks/        # cached copies of registered runbooks (Phase 6+)
+//! ├── runbooks/        # cached copies of registered runbooks
 //! ├── state/           # transient state (locks, pids, ...)
 //! └── logs/            # worker/serve log files
 //! ```
@@ -52,9 +52,10 @@ pub fn config_file() -> Result<PathBuf> {
 
 /// Root of the bundled Deno runtime (`~/.cori/runtime/`).
 ///
-/// Phase 3 populates this with the runner script, its `deno.json` import
-/// map, and a copy of `@cori/sdk`. The Deno binary itself is either picked
-/// up from `PATH` or installed into this directory in a later phase (see
+/// The current runtime populates this with the runner script, its
+/// `deno.json` import map, and a copy of `@cori/sdk`. The Deno binary is
+/// either picked up from `PATH` or installed into this directory in a
+/// future update (see
 /// `cori-broker::runtime`).
 pub fn runtime_dir() -> Result<PathBuf> {
     Ok(home()?.join("runtime"))

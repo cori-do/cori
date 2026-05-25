@@ -1,7 +1,7 @@
 //! Static parser for SDK step files.
 //!
-//! Phase 1 takes a conservative, regex-based approach: we expect step files
-//! to follow the canonical SDK pattern documented in
+//! The parser takes a conservative, regex-based approach: we expect step
+//! files to follow the canonical SDK pattern documented in
 //! `skill/references/activity_kinds.md`:
 //!
 //! ```ts
@@ -17,7 +17,7 @@
 //! `description` string literal from the top-level options object, and
 //! kind-specific scalar metadata (CLI binary name, MCP server/tool,
 //! `route`). Complex builder expressions are not evaluated here — the Rust
-//! worker will fall back to a Deno subprocess for those in Phase 4.
+//! worker will fall back to a Deno subprocess for those cases.
 //!
 //! This deliberately rejects step files whose call structure deviates from
 //! the canonical pattern. A future swc/oxc-based parser will relax this.

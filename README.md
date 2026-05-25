@@ -2,7 +2,7 @@
 
 Author and run typed TypeScript workflows from your terminal.
 
-> **Status:** v0.1.0-dev — Phase 0 scaffold. See [cori-v1-roadmap.md](cori-v1-roadmap.md) for the implementation plan.
+> **Status:** v0.1.0-dev
 
 ## Repo layout
 

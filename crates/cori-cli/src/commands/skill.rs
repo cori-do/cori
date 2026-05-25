@@ -1,4 +1,4 @@
-//! `cori skill install --agent <name>` — Phase 8.
+//! `cori skill install --agent <name>`.
 //!
 //! Extracts the embedded `skill/` tree (see `build.rs`) into the target
 //! agent's local skill directory. v1 supports a small set of agents whose

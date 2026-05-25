@@ -1,4 +1,4 @@
-//! `cori demo` — Phase 8.
+//! `cori demo`.
 //!
 //! Materialises the embedded `hello_world` runbook under
 //! `~/.cori/runbooks/hello_world/`, (re-)registers it, and runs it. The
@@ -10,7 +10,7 @@
 //! 1. `cori workflows show hello_world` / `cori runs show ...` after the
 //!    demo should print something useful; that means the runbook source
 //!    has to live where the registry can keep pointing at it.
-//! 2. The roadmap explicitly says runbooks live at
+//! 2. By convention, runbooks live at
 //!    `~/.cori/runbooks/<id>/` — the demo is a runbook like any other.
 
 use anyhow::{Context, Result};

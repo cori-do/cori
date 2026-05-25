@@ -1,6 +1,6 @@
 //! Dispatch an `llm` step.
 //!
-//! Phase 5 replaces the Phase 4 stub with real provider calls:
+//! The LLM dispatch path follows this flow:
 //!
 //! 1. Invoke the runner in `llm_prompt` mode to materialise the prompt
 //!    string, the model name, the (optional) batch config, and the

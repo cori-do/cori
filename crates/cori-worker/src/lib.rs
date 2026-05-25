@@ -1,6 +1,6 @@
 //! Long-running Cori worker.
 //!
-//! Phase 6 ships:
+//! This crate currently ships:
 //!
 //! - [`temporal`]: spawn and supervise the bundled `temporal server
 //!   start-dev` as a child process, with a TCP health check and graceful

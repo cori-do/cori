@@ -9,7 +9,7 @@
 //!
 //! 1. The `CORI_DENO` environment variable.
 //! 2. `<runtime>/deno` (where `cori init` would download the pinned binary
-//!    in a future phase — see roadmap §3.2).
+//!    in a future update).
 //! 3. `deno` on `PATH`.
 //!
 //! If none resolve, dispatch fails with [`BrokerError::RuntimeUnavailable`]

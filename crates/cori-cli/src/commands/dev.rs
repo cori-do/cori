@@ -1,4 +1,4 @@
-//! `cori dev` — Phase 6 / Phase 7.
+//! `cori dev`.
 //!
 //! Boots the worker daemon and the local HTTP server (`cori serve start`)
 //! together so workflow authors only need to keep one terminal open. The

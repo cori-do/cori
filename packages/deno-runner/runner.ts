@@ -5,7 +5,7 @@
 //   deno run [permission flags] --config <runtime>/deno.json \
 //     <runtime>/runner.ts <step-file> <mode>
 //
-// Modes (Phase 3 + Phase 4 + Phase 5):
+// Supported modes:
 //
 //   code         — call stepDef.run(input); return its output.
 //   cli_command  — call stepDef.command(input); return { command, env }.
@@ -193,8 +193,8 @@ try {
 
     case "llm_stub": {
       expectKind("llm");
-      // Retained for backward compatibility; Phase 5 uses real providers
-      // but the stub is still useful for `--dry-run` (Phase 6).
+      // Retained for backward compatibility; the live provider path uses
+      // `llm_prompt`, but the stub is still useful for `--dry-run`.
       const schema = stepDef.output;
       const stub = schema && typeof schema === "object" && schema._def
         ? defaultFromZod(schema)

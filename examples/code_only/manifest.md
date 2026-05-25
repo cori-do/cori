@@ -1,7 +1,7 @@
 ---
 id: code_only
 name: Code-only demo (square then stringify)
-description: Two-step workflow used as the Phase 3 acceptance fixture — pure code, no external tools.
+description: Two-step workflow used as the code execution acceptance fixture — pure code, no external tools.
 created: 2026-05-25
 version: 1
 parameters:
@@ -11,7 +11,7 @@ parameters:
     description: Number to square
 tools_required: []
 mcp_servers: []
-tags: [demo, phase3]
+tags: [demo, code]
 ---
 
 # Code-only demo

@@ -1,8 +1,8 @@
 /**
  * @cori/sdk — TypeScript SDK for authoring Cori workflow steps.
  *
- * Phase 1: the SDK exposes the typed `step.<kind>(...)` constructors used
- * by every step file. The runtime is intentionally inert — each
+ * The SDK exposes the typed `step.<kind>(...)` constructors used by every
+ * step file. The runtime is intentionally inert — each
  * constructor returns a plain `StepDef` object describing the step. The
  * Rust worker statically parses step files and dispatches the actual work;
  * the SDK exists to give the agent (and the user's editor) strong type

@@ -1,4 +1,4 @@
-//! `cori login` — Phase 8.
+//! `cori login`.
 //!
 //! v1 ships an OSS-first product: every command works without login.
 //! `cori login` exists so users can opt into the (future) Cori cloud

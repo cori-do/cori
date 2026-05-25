@@ -1,6 +1,6 @@
 //! Build script for the `cori` binary.
 //!
-//! Phase 8 — embeds two file trees into the binary:
+//! Embeds two file trees into the binary:
 //!
 //! 1. `skill/` — the Cori agent skill, extracted by
 //!    `cori skill install --agent <name>` to the agent's local skill

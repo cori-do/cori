@@ -1,9 +1,8 @@
 //! Wire types shared between the CLI, worker, and Deno runner.
 //!
-//! Phase 1 introduces [`CompiledWorkflow`] — the canonical representation a
-//! validated runbook is compiled to. The CLI stores it (Phase 2), the worker
-//! executes it (Phase 6), and the trace recorder references its `activity_id`
-//! values.
+//! [`CompiledWorkflow`] is the canonical representation a validated runbook
+//! compiles to. The CLI stores it, the worker executes it, and the trace
+//! recorder references its `activity_id` values.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,9 +55,9 @@ pub struct CompiledStep {
     pub name: String,
     pub description: String,
     pub route: Option<String>,
-    /// Activity IDs this step depends on. For Phase 1 the DAG is purely
-    /// linear: `steps[i]` depends on `steps[i-1]`. Builtins reshape this in
-    /// later phases.
+    /// Activity IDs this step depends on. The initial DAG is purely
+    /// linear: `steps[i]` depends on `steps[i-1]`. Builtins reshape this
+    /// later.
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Free-form metadata the static parser extracted (e.g. `server` and

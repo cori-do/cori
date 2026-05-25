@@ -5,9 +5,8 @@
 //! `install()` writes them to the runtime root, overwriting any existing
 //! copies so a binary upgrade automatically refreshes the runtime files.
 //!
-//! The Deno binary itself is not bundled in Phase 3 — see the roadmap
-//! §3.2 for the planned download. The broker falls back to `deno` on
-//! `PATH` until then.
+//! The Deno binary itself is not bundled yet. The broker falls back to
+//! `deno` on `PATH` until that changes.
 
 use std::fs;
 use std::path::Path;

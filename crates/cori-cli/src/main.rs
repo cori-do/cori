@@ -1,6 +1,6 @@
 //! The `cori` command-line interface.
 //!
-//! Phase 2 wires up `init --local`, `workflows register|list|show`, and
+//! Currently wires up `init --local`, `workflows register|list|show`, and
 //! `config get|set`. Every other verb still prints a "not implemented"
 //! notice so `--help` is accurate.
 

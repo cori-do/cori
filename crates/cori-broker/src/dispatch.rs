@@ -1,8 +1,8 @@
 //! Generic Deno runner dispatch.
 //!
-//! All Phase 3/4 step kinds that need to evaluate user-authored JavaScript
-//! (the `code` step's `run`, the `cli` step's `command`/`parse`, etc.)
-//! go through this module. It spawns the bundled Deno runner with a
+//! All current step kinds that need to evaluate user-authored JavaScript
+//! (the `code` step's `run`, the `cli` step's `command`/`parse`, etc.) go
+//! through this module. It spawns the bundled Deno runner with a
 //! `mode` argv, writes a JSON payload to stdin, and parses one envelope
 //! line from stdout.
 //!

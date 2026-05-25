@@ -1,14 +1,14 @@
-//! `cori run <id> [--dry-run] [<param>=<value>...]` — Phase 6.
+//! `cori run <id> [--dry-run] [<param>=<value>...]`.
 //!
 //! Executes a registered workflow step-by-step. `code`, `cli`, `mcp_tool`,
 //! and `llm` steps are dispatched via the broker; `builtin` steps remain
 //! unimplemented (deferred) and short-circuit with a clear notice.
 //!
-//! `--dry-run` (Phase 6 §6.3): the entire pipeline runs except that every
-//! step that would touch the outside world returns a placeholder annotated
-//! with `mocked: true`. `code` and `builtin` steps still execute for real
-//! since they have no external side effects. The trace marks the run with
-//! a top-level `dry_run: true` field and every mocked activity status is
+//! `--dry-run`: the entire pipeline runs except that every step that would
+//! touch the outside world returns a placeholder annotated with
+//! `mocked: true`. `code` and `builtin` steps still execute for real since
+//! they have no external side effects. The trace marks the run with a
+//! top-level `dry_run: true` field and every mocked activity status is
 //! `skipped`.
 //!
 //! Parameter resolution:

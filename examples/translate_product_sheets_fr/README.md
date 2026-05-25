@@ -1,6 +1,6 @@
 # `translate_product_sheets_fr` — example runbook
 
-The canonical Phase 1 worked example. Used as the golden fixture for the
+The canonical worked example. Used as the golden fixture for the
 `cori-compiler` integration test.
 
 5 steps:

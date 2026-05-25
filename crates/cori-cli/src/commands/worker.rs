@@ -1,4 +1,4 @@
-//! `cori worker start` — Phase 6.
+//! `cori worker start`.
 //!
 //! Boots the long-running worker daemon: supervises a bundled Temporal
 //! (or attaches to one declared via `temporal.host`), discovers

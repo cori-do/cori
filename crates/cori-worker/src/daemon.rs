@@ -4,7 +4,7 @@
 //! [`crate::watcher`] (filesystem coalescing) and a small SIGINT/SIGTERM
 //! handler. The actual workflow execution — dispatching Temporal activity
 //! tasks to the broker — is layered on top of this scaffolding in a
-//! subsequent change; Phase 6's milestone is the supervision contract +
+//! subsequent change; the current focus is the supervision contract +
 //! capability banner + hot-reload pipeline.
 
 use std::path::PathBuf;

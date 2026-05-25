@@ -23,8 +23,7 @@ pub struct Capabilities {
     pub cli_binaries: BTreeMap<String, PathBuf>,
     /// Server name → connection config.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    /// Provider names with usable credentials (always contains the stub
-    /// provider in Phase 4).
+    /// Provider names with usable credentials.
     pub llm_providers: BTreeSet<String>,
 }
 
