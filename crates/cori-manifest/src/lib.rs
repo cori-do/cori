@@ -240,26 +240,26 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
         errors.push(ManifestError::new("version", "must be >= 1"));
     }
 
-    if let Some(cron_str) = &m.schedule {
-        if cron_str.parse::<CronSchedule>().is_err() {
-            // The `cron` crate requires 6 or 7 fields. Accept the standard
-            // 5-field POSIX form by prefixing a seconds field.
-            let augmented = format!("0 {cron_str}");
-            if augmented.parse::<CronSchedule>().is_err() {
-                errors.push(ManifestError::new(
-                    "schedule",
-                    format!("invalid cron expression: `{cron_str}`"),
-                ));
-            }
-        }
-    }
-    if let Some(tz) = &m.schedule_tz {
-        if tz.parse::<chrono_tz::Tz>().is_err() {
+    if let Some(cron_str) = &m.schedule
+        && cron_str.parse::<CronSchedule>().is_err()
+    {
+        // The `cron` crate requires 6 or 7 fields. Accept the standard
+        // 5-field POSIX form by prefixing a seconds field.
+        let augmented = format!("0 {cron_str}");
+        if augmented.parse::<CronSchedule>().is_err() {
             errors.push(ManifestError::new(
-                "schedule_tz",
-                format!("unknown IANA timezone: `{tz}`"),
+                "schedule",
+                format!("invalid cron expression: `{cron_str}`"),
             ));
         }
+    }
+    if let Some(tz) = &m.schedule_tz
+        && tz.parse::<chrono_tz::Tz>().is_err()
+    {
+        errors.push(ManifestError::new(
+            "schedule_tz",
+            format!("unknown IANA timezone: `{tz}`"),
+        ));
     }
 
     let mut seen = HashSet::new();
@@ -309,13 +309,13 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
             }
         }
 
-        if let (Some(min), Some(max)) = (p.min, p.max) {
-            if min > max {
-                errors.push(ManifestError::new(
-                    format!("{prefix}.min"),
-                    format!("min ({min}) is greater than max ({max})"),
-                ));
-            }
+        if let (Some(min), Some(max)) = (p.min, p.max)
+            && min > max
+        {
+            errors.push(ManifestError::new(
+                format!("{prefix}.min"),
+                format!("min ({min}) is greater than max ({max})"),
+            ));
         }
     }
 
@@ -362,13 +362,13 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
             "schedule_tz",
         ];
         for key in map.keys() {
-            if let YamlValue::String(k) = key {
-                if !KNOWN.contains(&k.as_str()) {
-                    errors.push(ManifestError::new(
-                        format!("frontmatter.{k}"),
-                        "unknown manifest field",
-                    ));
-                }
+            if let YamlValue::String(k) = key
+                && !KNOWN.contains(&k.as_str())
+            {
+                errors.push(ManifestError::new(
+                    format!("frontmatter.{k}"),
+                    "unknown manifest field",
+                ));
             }
         }
     }
@@ -442,9 +442,10 @@ mod tests {
             "---\nid: {long}\nname: x\ndescription: y\ncreated: 2026-05-25\nversion: 1\n---\n"
         );
         let errs = parse_manifest(&src).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| e.field == "id" && e.reason.contains("64")));
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "id" && e.reason.contains("64"))
+        );
     }
 
     #[test]

@@ -12,41 +12,41 @@ members = [
 
 [workspace.package]
 version = "0.1.0-dev"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/cori-do/cori"
-# Bumped from 1.78 to 1.94 to satisfy temporalio-sdk v0.4.x (edition 2024).
-# cori-worker overrides `edition = "2024"` locally; other crates stay on 2021.
+# Edition 2024 requires Rust 1.85+; we stay on 1.94 (already required by
+# temporalio-sdk v0.4.x).
 rust-version = "1.94"
 
 [workspace.dependencies]
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-cron = "0.12"
+cron = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-chrono-tz = "0.9"
+chrono-tz = "0.10"
 regex = "1"
 walkdir = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-dirs = "5"
-toml = "0.8"
+rusqlite = { version = "0.40", features = ["bundled"] }
+dirs = "6"
+toml = "1"
 comfy-table = { version = "7", default-features = false }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 chrono-humanize = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 ctrlc = { version = "3", features = ["termination"] }
 crossbeam-channel = "0.5"
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 # Temporal Rust SDK — pinned to v0.4.x.
 # These are pre-1.0; the workspace pins exact versions and `cargo update -p`

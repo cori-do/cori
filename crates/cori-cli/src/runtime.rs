@@ -61,10 +61,10 @@ pub fn install_at(root: &Path) -> Result<InstallReport> {
 
 /// Returns `true` if the file was created or its contents changed.
 fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
-    if let Ok(existing) = fs::read_to_string(path) {
-        if existing == contents {
-            return Ok(false);
-        }
+    if let Ok(existing) = fs::read_to_string(path)
+        && existing == contents
+    {
+        return Ok(false);
     }
     fs::write(path, contents)
         .with_context(|| format!("writing runtime file `{}`", path.display()))?;

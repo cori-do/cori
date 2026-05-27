@@ -3,8 +3,8 @@
 //! Inspects rows in the local `runs` SQLite table. The trace JSON is
 //! whatever the run loop stored (see [`crate::commands::run`]).
 
-use anyhow::{bail, Result};
-use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
+use anyhow::{Result, bail};
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
 use serde_json::Value as JsonValue;
 
 use crate::registry;
@@ -58,12 +58,11 @@ pub fn show(run_id: &str, activity: Option<&str>, full: bool, json: bool) -> Res
         let Some(mut found) = found else {
             bail!("no activity `{act_id}` in run `{run_id}`");
         };
-        if !full {
-            if let JsonValue::Object(m) = &mut found {
-                if let Some(o) = m.get_mut("output") {
-                    *o = summarize(o);
-                }
-            }
+        if !full
+            && let JsonValue::Object(m) = &mut found
+            && let Some(o) = m.get_mut("output")
+        {
+            *o = summarize(o);
         }
         println!("{}", serde_json::to_string_pretty(&found)?);
         return Ok(());
@@ -82,10 +81,10 @@ pub fn show(run_id: &str, activity: Option<&str>, full: bool, json: bool) -> Res
     if let Some(t) = detail.ended_at {
         println!("  ended:    {t}");
     }
-    if let Some(dry) = trace.get("dry_run").and_then(|v| v.as_bool()) {
-        if dry {
-            println!("  mode:     DRY RUN — no external calls");
-        }
+    if let Some(dry) = trace.get("dry_run").and_then(|v| v.as_bool())
+        && dry
+    {
+        println!("  mode:     DRY RUN — no external calls");
     }
     if let Some(cost) = trace.get("cost").and_then(|c| c.get("total_eur")) {
         println!("  cost:     €{cost}");

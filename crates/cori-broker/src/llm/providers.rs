@@ -7,7 +7,7 @@
 //!
 //! Providers are picked by model-name prefix in [`super::dispatch`].
 
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::{BrokerError, Result, TokenUsage};
 

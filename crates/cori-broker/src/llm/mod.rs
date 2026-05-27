@@ -239,24 +239,26 @@ fn fan_out(
         for _ in 0..concurrency {
             let results = results.clone();
             let next_idx = next_idx.clone();
-            scope.spawn(move || loop {
-                let i = {
-                    let mut g = next_idx.lock().unwrap();
-                    if *g >= prompts.len() {
-                        return;
-                    }
-                    let i = *g;
-                    *g += 1;
-                    i
-                };
-                let req = providers::LlmRequest {
-                    model,
-                    prompt: &prompts[i],
-                    output_schema,
-                    strict_retry: false,
-                };
-                let r = call_with_schema_retry(provider, &req);
-                results.lock().unwrap()[i] = Some(r);
+            scope.spawn(move || {
+                loop {
+                    let i = {
+                        let mut g = next_idx.lock().unwrap();
+                        if *g >= prompts.len() {
+                            return;
+                        }
+                        let i = *g;
+                        *g += 1;
+                        i
+                    };
+                    let req = providers::LlmRequest {
+                        model,
+                        prompt: &prompts[i],
+                        output_schema,
+                        strict_retry: false,
+                    };
+                    let r = call_with_schema_retry(provider, &req);
+                    results.lock().unwrap()[i] = Some(r);
+                }
             });
         }
     });

@@ -1,9 +1,7 @@
 [package]
 name = "cori-worker"
 version.workspace = true
-# temporalio-sdk requires edition 2024; this crate opts in independently
-# of the rest of the workspace (which stays on 2021).
-edition = "2024"
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true

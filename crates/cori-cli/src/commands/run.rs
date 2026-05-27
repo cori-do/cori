@@ -26,17 +26,17 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use cori_broker::capabilities::{self, Capabilities};
 use cori_broker::llm::{LlmCredentials, LlmOptions};
-use cori_broker::{runtime, TokenUsage, TriggerContext};
+use cori_broker::{TokenUsage, TriggerContext, runtime};
 use cori_protocol::{CompiledWorkflow, StepKind};
-use cori_worker::broker_ctx::{set_broker_ctx, BrokerCtx};
+use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
 use cori_worker::runner::run_workflow_once;
 use cori_worker::runtime::{
-    preflight_check, CoriTemporalRuntime, DEFAULT_NAMESPACE, DEFAULT_TASK_QUEUE,
-    DEFAULT_TEMPORAL_TARGET,
+    CoriTemporalRuntime, DEFAULT_NAMESPACE, DEFAULT_TASK_QUEUE, DEFAULT_TEMPORAL_TARGET,
+    preflight_check,
 };
 use cori_worker::workflow::{WorkflowInput, WorkflowOutput};
 use serde::Serialize;
@@ -391,10 +391,9 @@ pub(crate) fn execute_workflow(
         Some(ended_at),
         run_status,
         &trace_json,
-    ) {
-        if verbose {
-            eprintln!("warning: could not store run trace: {e}");
-        }
+    ) && verbose
+    {
+        eprintln!("warning: could not store run trace: {e}");
     }
 
     if verbose {

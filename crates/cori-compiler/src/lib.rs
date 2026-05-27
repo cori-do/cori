@@ -27,7 +27,7 @@ mod step_parser;
 
 use std::path::{Path, PathBuf};
 
-use cori_manifest::{parse_manifest, ManifestError};
+use cori_manifest::{ManifestError, parse_manifest};
 use cori_protocol::{CompiledStep, CompiledWorkflow, StepKind};
 use regex::Regex;
 use serde::Serialize;
@@ -524,9 +524,10 @@ mod tests {
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| e.reason.contains("kubectl") && e.reason.contains("tools_required")));
+        assert!(
+            errs.iter()
+                .any(|e| e.reason.contains("kubectl") && e.reason.contains("tools_required"))
+        );
     }
 
     #[test]

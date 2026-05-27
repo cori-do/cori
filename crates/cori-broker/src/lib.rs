@@ -89,7 +89,9 @@ pub enum ActivityStatus {
 /// CLI-friendly diagnostics; the broker itself never prints.
 #[derive(Debug, Error)]
 pub enum BrokerError {
-    #[error("Deno runtime is not available: {0}\n\nInstall Deno from https://deno.land or set CORI_DENO to a Deno binary.")]
+    #[error(
+        "Deno runtime is not available: {0}\n\nInstall Deno from https://deno.land or set CORI_DENO to a Deno binary."
+    )]
     RuntimeUnavailable(String),
 
     #[error("runner subprocess failed to spawn: {0}")]
@@ -145,10 +147,14 @@ pub enum BrokerError {
     #[error("MCP protocol error: {0}")]
     McpProtocol(String),
 
-    #[error("no LLM provider matches model `{model}` — supported model prefixes: gpt-/o1-/o3-/o4- (OpenAI), claude- (Anthropic), gemini- (Gemini)")]
+    #[error(
+        "no LLM provider matches model `{model}` — supported model prefixes: gpt-/o1-/o3-/o4- (OpenAI), claude- (Anthropic), gemini- (Gemini)"
+    )]
     LlmUnknownModel { model: String },
 
-    #[error("LLM credentials missing for provider `{provider}` — set the {env_var} environment variable, or run `cori config set llm.{provider}.api_key <key>`")]
+    #[error(
+        "LLM credentials missing for provider `{provider}` — set the {env_var} environment variable, or run `cori config set llm.{provider}.api_key <key>`"
+    )]
     LlmMissingCredentials {
         provider: &'static str,
         env_var: &'static str,
@@ -164,7 +170,9 @@ pub enum BrokerError {
         body: String,
     },
 
-    #[error("LLM provider `{provider}` returned a response that did not match the requested schema after {attempts} attempt(s): {reason}")]
+    #[error(
+        "LLM provider `{provider}` returned a response that did not match the requested schema after {attempts} attempt(s): {reason}"
+    )]
     LlmSchemaMismatch {
         provider: &'static str,
         attempts: u32,

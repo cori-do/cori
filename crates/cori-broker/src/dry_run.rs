@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::dispatch::{self, RunnerMode};
 use crate::runtime::Runtime;

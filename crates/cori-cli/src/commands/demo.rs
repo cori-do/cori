@@ -50,7 +50,11 @@ pub fn run() -> Result<()> {
     commands::workflows::register(&dest).context("registering hello_world")?;
 
     // [3/4] -----------------------------------------------------------
-    header(3, "Starting Temporal + worker", "cori start --local --no-ui");
+    header(
+        3,
+        "Starting Temporal + worker",
+        "cori start --local --no-ui",
+    );
     let cfg = Config::load().ok();
     let temporal_host = cfg
         .as_ref()
@@ -102,9 +106,8 @@ pub fn run() -> Result<()> {
 
     // [4/4] -----------------------------------------------------------
     header(4, "Executing hello_world", "cori run hello_world");
-    let run_result =
-        commands::run::execute_workflow("hello_world", json!({}), false, true, None)
-            .context("running hello_world");
+    let run_result = commands::run::execute_workflow("hello_world", json!({}), false, true, None)
+        .context("running hello_world");
 
     // Tear down the worker. Best-effort — the demo's exit code reflects
     // the workflow result, not the shutdown.

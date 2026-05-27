@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::capabilities::Capabilities;
 use crate::dispatch::{self, RunnerMode};

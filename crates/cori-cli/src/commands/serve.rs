@@ -19,13 +19,13 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -86,13 +86,13 @@ async fn shutdown_signal() {
 fn router() -> Router {
     Router::new()
         .route("/", get(serve_index))
-        .route("/workflows/:id", get(serve_index))
-        .route("/runs/:run_id", get(serve_index))
+        .route("/workflows/{id}", get(serve_index))
+        .route("/runs/{run_id}", get(serve_index))
         .route("/api/workflows", get(list_workflows))
-        .route("/api/workflows/:id", get(get_workflow))
-        .route("/api/workflows/:id/run", post(post_run))
+        .route("/api/workflows/{id}", get(get_workflow))
+        .route("/api/workflows/{id}/run", post(post_run))
         .route("/api/runs", get(list_runs))
-        .route("/api/runs/:run_id", get(get_run))
+        .route("/api/runs/{run_id}", get(get_run))
         .with_state(())
 }
 

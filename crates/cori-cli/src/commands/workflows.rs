@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
+use anyhow::{Context, Result, bail};
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
 
 use crate::registry::{self, RegisterOutcome, WorkflowDetail};
 
@@ -147,11 +147,7 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
             out.push('\n');
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn truncate(s: &str, max: usize) -> String {

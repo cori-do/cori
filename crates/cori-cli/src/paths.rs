@@ -21,10 +21,10 @@ use anyhow::{Context, Result};
 /// Root Cori state directory. Honours `$CORI_HOME` if set, otherwise
 /// `$HOME/.cori`.
 pub fn home() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("CORI_HOME") {
-        if !p.is_empty() {
-            return Ok(PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var("CORI_HOME")
+        && !p.is_empty()
+    {
+        return Ok(PathBuf::from(p));
     }
     let home = dirs::home_dir().context("could not resolve user home directory ($HOME unset?)")?;
     Ok(home.join(".cori"))

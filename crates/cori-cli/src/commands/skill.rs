@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::embedded;
 
@@ -61,10 +61,10 @@ pub fn install(agent: Option<String>, path: Option<PathBuf>) -> Result<()> {
 
 /// Honour `$CORI_AGENT_HOME` for tests; fall back to the real home.
 fn home_dir() -> Result<PathBuf> {
-    if let Ok(h) = std::env::var("CORI_AGENT_HOME") {
-        if !h.is_empty() {
-            return Ok(PathBuf::from(h));
-        }
+    if let Ok(h) = std::env::var("CORI_AGENT_HOME")
+        && !h.is_empty()
+    {
+        return Ok(PathBuf::from(h));
     }
     // The CLI already uses `paths::home()` for `~/.cori`. For skills we
     // want the *actual* user home, not `~/.cori` — the agent doesn't live

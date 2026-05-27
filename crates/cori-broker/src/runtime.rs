@@ -57,17 +57,17 @@ impl Runtime {
 }
 
 fn locate_deno(runtime_root: &Path) -> crate::Result<PathBuf> {
-    if let Ok(env) = std::env::var("CORI_DENO") {
-        if !env.is_empty() {
-            let p = PathBuf::from(env);
-            if p.is_file() {
-                return Ok(p);
-            }
-            return Err(BrokerError::RuntimeUnavailable(format!(
-                "$CORI_DENO is set to `{}` but no file exists there",
-                p.display()
-            )));
+    if let Ok(env) = std::env::var("CORI_DENO")
+        && !env.is_empty()
+    {
+        let p = PathBuf::from(env);
+        if p.is_file() {
+            return Ok(p);
         }
+        return Err(BrokerError::RuntimeUnavailable(format!(
+            "$CORI_DENO is set to `{}` but no file exists there",
+            p.display()
+        )));
     }
 
     let bundled = runtime_root.join(if cfg!(windows) { "deno.exe" } else { "deno" });
