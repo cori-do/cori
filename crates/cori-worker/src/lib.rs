@@ -8,7 +8,7 @@
 //! - [`watcher`]: a debounced filesystem watcher that emits one event per
 //!   runbook directory regardless of how noisy the editor's save burst was.
 //! - [`daemon`]: composes the two into the worker loop that `cori worker
-//!   start` (and `cori dev`) launch.
+//!   start --local` launches.
 //!
 //! Actual Temporal-driven activity polling and execution will plug into
 //! this scaffolding in a follow-up — the broker keeps doing the work; the
@@ -23,5 +23,5 @@ pub mod temporal;
 pub mod watcher;
 pub mod workflow;
 
-pub use daemon::{RegisterFn, RegisterOutcome, WorkerConfig, run};
+pub use daemon::{RegisterFn, RegisterOutcome, WorkerConfig, WorkerReady, run};
 pub use temporal::{Source as TemporalSource, Supervisor as TemporalSupervisor};

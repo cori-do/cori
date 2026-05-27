@@ -82,7 +82,7 @@ fn friendly_connect_error(target: &str) -> String {
     format!(
         "could not connect to Temporal at `{target}`. \
          Start one locally with:\n  temporal server start-dev\n\
-         or run `cori worker start` (which supervises a bundled Temporal)."
+         or run `cori start --local` (which supervises a bundled Temporal)."
     )
 }
 

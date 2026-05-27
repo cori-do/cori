@@ -72,10 +72,6 @@ pub fn start(bind: Option<String>, insecure: bool) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("binding {addr}"))?;
-        let actual = listener.local_addr().unwrap_or(addr);
-        eprintln!("Cori serve");
-        eprintln!("  HTTP API + UI: http://{actual}");
-        eprintln!("  Press Ctrl-C to stop.");
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await
@@ -85,8 +81,6 @@ pub fn start(bind: Option<String>, insecure: bool) -> Result<()> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!();
-    eprintln!("shutdown signal received — stopping");
 }
 
 fn router() -> Router {

@@ -3,7 +3,7 @@
 //! `cori run` spawns a fresh worker for each invocation: register the
 //! single workflow type + the four activities, start polling, start the
 //! workflow, wait for the result, tear down. This keeps the CLI
-//! self-contained and lets the long-running `cori worker start` daemon
+//! self-contained and lets the long-running `cori start --local` daemon
 //! reuse the same module for the workflows it picks up from the
 //! filesystem watcher.
 //!

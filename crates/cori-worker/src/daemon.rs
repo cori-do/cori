@@ -33,6 +33,18 @@ pub struct RegisterOutcome {
     pub note: &'static str,
 }
 
+/// Snapshot of the worker's runtime state, sent through
+/// [`WorkerConfig::ready_signal`] once Temporal is up and the initial
+/// registration sweep has finished. Lets the CLI print a single unified
+/// "Cori is ready" banner without having to scrape log lines.
+#[derive(Debug, Clone)]
+pub struct WorkerReady {
+    pub temporal_endpoint: String,
+    pub temporal_source: Source,
+    pub temporal_ui_url: Option<String>,
+    pub runbooks_dir: PathBuf,
+}
+
 /// Daemon configuration. Anything that comes from CLI config / paths goes
 /// here so this crate stays unaware of `~/.cori/config.toml`.
 pub struct WorkerConfig {
@@ -46,17 +58,22 @@ pub struct WorkerConfig {
     /// Callback invoked once at startup for every existing runbook, then
     /// again whenever a runbook's files change on disk.
     pub register: RegisterFn,
-    /// Human-readable lines about discovered capabilities. Printed once at
-    /// startup so operators see what's available.
+    /// Human-readable lines about discovered capabilities. Used by the
+    /// daemon's fallback banner when [`ready_signal`] is `None`.
     pub capability_banner: Vec<String>,
+    /// If set, the daemon fires it once Temporal is up and skips its own
+    /// banner — the caller is responsible for telling the user what's
+    /// going on. Used by `cori start --local` to render a single unified
+    /// banner instead of the worker's per-component one.
+    ///
+    /// [`ready_signal`]: WorkerConfig::ready_signal
+    pub ready_signal: Option<std::sync::mpsc::SyncSender<WorkerReady>>,
 }
 
 /// Run the daemon until SIGINT/SIGTERM.
 pub fn run(config: WorkerConfig) -> Result<()> {
     let mut supervisor =
         Supervisor::start(config.temporal_host.as_deref(), &config.temporal_state_dir)?;
-
-    print_startup_banner(&supervisor, &config);
 
     // Initial registration sweep — pick up everything already on disk.
     if config.runbooks_dir.is_dir() {
@@ -68,6 +85,22 @@ pub fn run(config: WorkerConfig) -> Result<()> {
             dir = %config.runbooks_dir.display(),
             "runbooks directory does not exist yet — it will be created on first `cori workflows register`",
         );
+    }
+
+    // Hand off readiness info to the caller — or print our own banner if
+    // nobody is listening.
+    if let Some(tx) = &config.ready_signal {
+        let ready = WorkerReady {
+            temporal_endpoint: supervisor.endpoint(),
+            temporal_source: supervisor.source,
+            temporal_ui_url: supervisor.ui_url(),
+            runbooks_dir: config.runbooks_dir.clone(),
+        };
+        if tx.send(ready).is_err() {
+            warn!("ready_signal receiver dropped before worker was ready");
+        }
+    } else {
+        print_startup_banner(&supervisor, &config);
     }
 
     // Filesystem watcher.
@@ -92,7 +125,9 @@ pub fn run(config: WorkerConfig) -> Result<()> {
     }
     let tick_rx = tick(Duration::from_millis(200));
 
-    info!("worker is running — press Ctrl-C to stop");
+    if config.ready_signal.is_none() {
+        info!("worker is running — press Ctrl-C to stop");
+    }
 
     loop {
         if shutdown.load(Ordering::SeqCst) {

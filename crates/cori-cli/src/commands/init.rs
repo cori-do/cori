@@ -4,7 +4,19 @@ use anyhow::{Context, Result};
 
 use crate::{paths, runtime};
 
+/// Verbose entrypoint used by the `cori init` CLI verb.
 pub fn run(local: bool) -> Result<()> {
+    run_inner(local, true)
+}
+
+/// Silent variant called by `cori start --local`. Skips the per-path
+/// status block and the "Already initialised" trailer so the start
+/// banner isn't drowned in `(already present)` lines on every boot.
+pub fn ensure(local: bool) -> Result<()> {
+    run_inner(local, false)
+}
+
+fn run_inner(local: bool, verbose: bool) -> Result<()> {
     if !local {
         // v1 only supports `--local`. Surface a clear error instead of doing
         // something surprising. Future versions may add cloud-attached modes.
@@ -33,6 +45,10 @@ pub fn run(local: bool) -> Result<()> {
     // refresh stale copies.
     let runtime_report =
         runtime::install().context("installing Deno runtime files under `runtime/`")?;
+
+    if !verbose {
+        return Ok(());
+    }
 
     println!("✓ Cori home: {}", home.display());
     print_status("  runbooks/", created_runbooks);

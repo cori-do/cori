@@ -2,7 +2,7 @@
 //!
 //! The current install layout assumes the Cori binary ships alongside the
 //! `temporal` CLI binary (an external sibling, not embedded) and
-//! `cori worker start` is responsible for spawning `temporal server
+//! `cori start --local` is responsible for spawning `temporal server
 //! start-dev` when no external cluster is configured.
 //!
 //! The supervisor:
@@ -10,7 +10,7 @@
 //! 1. Reads `temporal.host` from CLI config; if set, skips spawning and
 //!    just connects to the external endpoint.
 //! 2. Probes the default local port to detect an already-running server
-//!    (so a second `cori worker start` doesn't fight the first one for
+//!    (so a second `cori start --local` doesn't fight the first one for
 //!    7233).
 //! 3. Locates a `temporal` binary — first on `PATH`, then as a sibling of
 //!    the running `cori` binary (the install layout).
@@ -33,7 +33,7 @@ use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
 pub const DEFAULT_GRPC_PORT: u16 = 7233;
-pub const DEFAULT_UI_PORT: u16 = 7234;
+pub const DEFAULT_UI_PORT: u16 = 8233;
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -82,7 +82,7 @@ impl Supervisor {
 
         // 2. Already running locally?
         if probe_port("127.0.0.1", DEFAULT_GRPC_PORT) {
-            info!(
+            debug!(
                 port = DEFAULT_GRPC_PORT,
                 "attaching to existing Temporal server on 127.0.0.1"
             );
@@ -178,7 +178,7 @@ impl Supervisor {
             );
         }
 
-        info!(
+        debug!(
             pid,
             host = sup.host,
             port = sup.grpc_port,

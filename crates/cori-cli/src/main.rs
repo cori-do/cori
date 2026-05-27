@@ -63,18 +63,16 @@ enum Command {
         #[command(subcommand)]
         command: RunsCommand,
     },
-    /// Start the long-running Cori worker process.
-    Worker {
+    /// Run the local Cori stack (Temporal + worker + HTTP server/UI).
+    ///
+    /// This is the entrypoint a solo user runs in one terminal: it
+    /// ensures Temporal is up (spawning a bundled `temporal server
+    /// start-dev` when no external cluster is configured), boots the
+    /// worker daemon, and serves the local HTTP API + web UI.
+    Start {
         #[command(subcommand)]
-        command: WorkerCommand,
+        command: StartCommand,
     },
-    /// Start the local HTTP server and web UI.
-    Serve {
-        #[command(subcommand)]
-        command: ServeCommand,
-    },
-    /// Run the worker and server together for local development.
-    Dev,
     /// Initialise the local Cori state directory at `~/.cori/`.
     Init {
         /// Required in v1; reserves the flag namespace for future modes.
@@ -134,10 +132,25 @@ enum WorkflowsCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum WorkerCommand {
-    /// Start the long-running worker daemon (supervises Temporal and
-    /// hot-reloads workflows from `~/.cori/runbooks/`).
-    Start,
+enum StartCommand {
+    /// Run everything locally on this machine. The only mode in v1.
+    ///
+    /// Boots a bundled Temporal (or attaches to an external one declared
+    /// via `temporal.host`), starts the worker daemon, and — unless
+    /// `--no-ui` is set — also serves the HTTP API + web UI on
+    /// `127.0.0.1:7510`. Stops cleanly on Ctrl-C.
+    Local {
+        /// HTTP/UI bind address. Defaults to `127.0.0.1:7510`.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Allow binding to a non-loopback address. There is no auth in
+        /// v1 — only set this if you understand what you're exposing.
+        #[arg(long)]
+        insecure: bool,
+        /// Run only the worker; do not start the embedded HTTP server.
+        #[arg(long)]
+        no_ui: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -164,20 +177,6 @@ enum RunsCommand {
         full: bool,
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ServeCommand {
-    /// Start the local HTTP server + web UI (default bind `127.0.0.1:7510`).
-    Start {
-        /// Bind address, e.g. `0.0.0.0:7510`. Defaults to `127.0.0.1:7510`.
-        #[arg(long)]
-        bind: Option<String>,
-        /// Allow binding to a non-loopback address. There is no auth in
-        /// v1 — only set this if you understand what you're exposing.
-        #[arg(long)]
-        insecure: bool,
     },
 }
 
@@ -231,13 +230,13 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             params,
         }) => commands::run::run(&id, params, json, dry_run),
-        Some(Command::Worker { command }) => match command {
-            WorkerCommand::Start => commands::worker::start(),
+        Some(Command::Start { command }) => match command {
+            StartCommand::Local {
+                bind,
+                insecure,
+                no_ui,
+            } => commands::start::local(bind, insecure, no_ui),
         },
-        Some(Command::Serve { command }) => match command {
-            ServeCommand::Start { bind, insecure } => commands::serve::start(bind, insecure),
-        },
-        Some(Command::Dev) => commands::dev::run(),
         Some(Command::Demo) => commands::demo::run(),
         Some(Command::Login) => commands::login::run(),
         Some(Command::Skill { command }) => match command {
@@ -267,9 +266,7 @@ fn main() -> anyhow::Result<()> {
                 | Command::Runs { .. }
                 | Command::Workflows { .. }
                 | Command::Config { .. }
-                | Command::Worker { .. }
-                | Command::Serve { .. }
-                | Command::Dev => {
+                | Command::Start { .. } => {
                     unreachable!()
                 }
             };
