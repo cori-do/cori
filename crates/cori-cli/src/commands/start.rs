@@ -101,6 +101,7 @@ pub fn local(bind: Option<String>, insecure: bool, no_ui: bool) -> Result<()> {
         register: Arc::new(register_runbook),
         capability_banner: Vec::new(),
         ready_signal: Some(ready_tx),
+        shutdown_signal: None,
     };
 
     eprintln!();
@@ -256,7 +257,7 @@ impl Style {
     }
 }
 
-fn register_runbook(path: &Path) -> Result<RegisterOutcome> {
+pub(crate) fn register_runbook(path: &Path) -> Result<RegisterOutcome> {
     let abs = path
         .canonicalize()
         .with_context(|| format!("resolving runbook path `{}`", path.display()))?;

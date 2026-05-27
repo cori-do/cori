@@ -68,6 +68,10 @@ pub struct WorkerConfig {
     ///
     /// [`ready_signal`]: WorkerConfig::ready_signal
     pub ready_signal: Option<std::sync::mpsc::SyncSender<WorkerReady>>,
+    /// If set, receiving anything on this channel triggers a graceful
+    /// shutdown the same way Ctrl-C does. Used by `cori demo` to stop
+    /// the worker once the demo workflow has run to completion.
+    pub shutdown_signal: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Run the daemon until SIGINT/SIGTERM.
@@ -132,6 +136,14 @@ pub fn run(config: WorkerConfig) -> Result<()> {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             info!("shutdown signal received — stopping");
+            break;
+        }
+        // Programmatic shutdown signal (used by `cori demo`). Non-blocking:
+        // we just peek and let the main `select!` below do the waiting.
+        if let Some(rx) = &config.shutdown_signal
+            && rx.try_recv().is_ok()
+        {
+            info!("programmatic shutdown signal received — stopping");
             break;
         }
         match &events_rx {
