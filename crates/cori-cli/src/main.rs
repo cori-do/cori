@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Cori — author and run typed TypeScript workflows from your terminal.
+/// Cori — Turn one-off agent conversations into deterministic, re-runnable workflows.
 #[derive(Debug, Parser)]
 #[command(name = "cori", version = env!("CARGO_PKG_VERSION"), propagate_version = true)]
 struct Cli {

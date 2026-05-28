@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Cori installer.
 #
-# Downloads the `cori` binary and the pinned Temporal CLI binary from the
-# matching GitHub Releases, verifies checksums, and installs both into
-# the first writable location on `PATH` (preferring `/usr/local/bin/`,
-# falling back to `~/.local/bin/`).
+# Downloads the `cori` binary and the pinned Temporal CLI binary from
+# their GitHub Releases, verifies sha256 checksums, and installs both
+# into the first writable location on `PATH` (preferring
+# `/usr/local/bin`, falling back to `~/.local/bin`).
 #
 # Usage:
 #   curl -fsSL https://cli.cori.do/install.sh | bash
-#   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --version 0.2.0
+#   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --version v0.1.0
 #   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --prefix ~/bin
 #
 # Environment overrides:
 #   CORI_VERSION       Specific Cori release tag (default: latest)
 #   CORI_INSTALL_DIR   Override install directory
+#   CORI_REPO          Override GitHub repo (default: cori-do/cori)
 #   TEMPORAL_VERSION   Pin Temporal CLI to a specific version
 set -euo pipefail
 
@@ -21,14 +22,15 @@ set -euo pipefail
 # Defaults
 # ---------------------------------------------------------------------------
 
-CORI_REPO="cori-do/cori"
-TEMPORAL_REPO="temporalio/cli"
-# Pinned default — kept in sync with `temporal-versions.toml` in the repo.
-DEFAULT_TEMPORAL_VERSION="1.1.1"
-
+CORI_REPO="${CORI_REPO:-cori-do/cori}"
 CORI_VERSION="${CORI_VERSION:-latest}"
-TEMPORAL_VERSION="${TEMPORAL_VERSION:-$DEFAULT_TEMPORAL_VERSION}"
 CORI_INSTALL_DIR="${CORI_INSTALL_DIR:-}"
+BIN_NAME="cori"
+
+TEMPORAL_REPO="temporalio/cli"
+DEFAULT_TEMPORAL_VERSION="1.7.0"
+TEMPORAL_VERSION="${TEMPORAL_VERSION:-}"
+TEMPORAL_MANIFEST_URL="${TEMPORAL_MANIFEST_URL:-https://cli.cori.do/temporal-versions.toml}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,20 +40,29 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-detect_platform() {
+detect_target() {
   local os arch
-  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  os="$(uname -s)"
   arch="$(uname -m)"
   case "$os" in
-    linux)  CORI_OS="linux"  TEMPORAL_OS="linux"  ;;
-    darwin) CORI_OS="darwin" TEMPORAL_OS="darwin" ;;
-    *)      die "unsupported OS: $os (Windows users: please use WSL2)" ;;
+    Linux)  os_part="unknown-linux-gnu" ;;
+    Darwin) os_part="apple-darwin" ;;
+    CYGWIN*|MINGW*|MSYS*) os_part="pc-windows-msvc" ;;
+    *) die "unsupported OS: $os" ;;
   esac
   case "$arch" in
-    x86_64|amd64)  CORI_ARCH="x86_64" TEMPORAL_ARCH="amd64" ;;
-    arm64|aarch64) CORI_ARCH="aarch64" TEMPORAL_ARCH="arm64" ;;
+    x86_64|amd64)  arch_part="x86_64" ;;
+    arm64|aarch64) arch_part="aarch64" ;;
     *) die "unsupported architecture: $arch" ;;
   esac
+  TARGET="${arch_part}-${os_part}"
+  if [[ "$os_part" == "pc-windows-msvc" ]]; then
+    ARCHIVE_EXT="zip"
+    BIN_FILE="${BIN_NAME}.exe"
+  else
+    ARCHIVE_EXT="tar.gz"
+    BIN_FILE="${BIN_NAME}"
+  fi
 }
 
 pick_install_dir() {
@@ -61,7 +72,7 @@ pick_install_dir() {
     return
   fi
   for candidate in /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
-    if [[ -w "$candidate" ]] || mkdir -p "$candidate" 2>/dev/null && [[ -w "$candidate" ]]; then
+    if { [[ -w "$candidate" ]] || mkdir -p "$candidate" 2>/dev/null; } && [[ -w "$candidate" ]]; then
       INSTALL_DIR="$candidate"
       return
     fi
@@ -69,23 +80,39 @@ pick_install_dir() {
   die "no writable install directory found. Re-run with sudo or set CORI_INSTALL_DIR."
 }
 
-resolve_cori_version() {
+resolve_version() {
   if [[ "$CORI_VERSION" != "latest" ]]; then
     CORI_TAG="$CORI_VERSION"
     return
   fi
   log "Resolving latest Cori release tag…"
-  CORI_TAG="$(
-    curl -fsSL "https://api.github.com/repos/${CORI_REPO}/releases/latest" |
-      grep -m1 '"tag_name"' |
-      sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-  )"
-  [[ -n "$CORI_TAG" ]] || die "could not determine latest Cori release"
+
+  local api_url="https://api.github.com/repos/${CORI_REPO}/releases/latest"
+  local body http_code curl_args=(-sSL -w '\n%{http_code}' -H 'Accept: application/vnd.github+json')
+  [[ -n "${GITHUB_TOKEN:-}" ]] && curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+  # Don't pipe curl directly — `set -o pipefail` would mask the HTTP status
+  # and a transient 403/404 would exit the script silently.
+  if ! body="$(curl "${curl_args[@]}" "$api_url")"; then
+    die "could not reach GitHub API ($api_url). Check your network."
+  fi
+  http_code="${body##*$'\n'}"
+  body="${body%$'\n'*}"
+
+  if [[ "$http_code" != "200" ]]; then
+    warn "GitHub API returned HTTP $http_code for $api_url"
+    [[ -n "$body" ]] && printf '%s\n' "$body" >&2
+    die "could not determine latest Cori release (set CORI_VERSION=vX.Y.Z to pin a tag, or export GITHUB_TOKEN if rate-limited)"
+  fi
+
+  CORI_TAG="$(printf '%s' "$body" | grep -m1 '"tag_name"' \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+  [[ -n "$CORI_TAG" ]] || die "could not parse tag_name from GitHub API response"
+  log "Latest release: $CORI_TAG"
 }
 
 download() {
   local url="$1" dest="$2"
-  log "Downloading $(basename "$dest")…"
   if command -v curl >/dev/null; then
     curl -fL --progress-bar -o "$dest" "$url"
   elif command -v wget >/dev/null; then
@@ -97,10 +124,6 @@ download() {
 
 verify_sha256() {
   local file="$1" expected="$2"
-  if [[ -z "$expected" ]]; then
-    warn "no checksum supplied for $(basename "$file") — skipping verification"
-    return
-  fi
   local actual
   if command -v sha256sum >/dev/null; then
     actual="$(sha256sum "$file" | awk '{print $1}')"
@@ -115,22 +138,73 @@ verify_sha256() {
   fi
 }
 
+# Minimal TOML reader: prints the string value of `<key>` inside section
+# `[<section>]`. Supports plain `key = "value"` lines only — enough for the
+# temporal manifest. Returns empty string if not found.
+parse_toml_value() {
+  local file="$1" section="$2" key="$3"
+  awk -v section="[$section]" -v key="$key" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ {
+      hdr = $0
+      sub(/[[:space:]]*#.*$/, "", hdr)
+      gsub(/[[:space:]]/, "", hdr)
+      in_section = (hdr == section)
+      next
+    }
+    in_section {
+      line = $0
+      sub(/[[:space:]]*#.*$/, "", line)
+      eq = index(line, "=")
+      if (eq == 0) next
+      k = trim(substr(line, 1, eq - 1))
+      v = trim(substr(line, eq + 1))
+      if (k != key) next
+      if (substr(v, 1, 1) == "\"") {
+        end = index(substr(v, 2), "\"")
+        if (end > 0) { print substr(v, 2, end - 1); exit }
+      }
+    }
+  ' "$file" 2>/dev/null
+}
+
 install_cori() {
-  local archive="$WORK_DIR/cori.tar.gz"
-  local url="https://github.com/${CORI_REPO}/releases/download/${CORI_TAG}/cori-${CORI_TAG}-${CORI_OS}-${CORI_ARCH}.tar.gz"
-  download "$url" "$archive"
-  # Best-effort checksum fetch (no hard failure if the release doesn't
-  # ship a SHASUMS file yet — the project may be pre-1.0).
-  local checksums="$WORK_DIR/cori.SHA256SUMS"
-  if curl -fsSL -o "$checksums" \
-      "https://github.com/${CORI_REPO}/releases/download/${CORI_TAG}/SHA256SUMS" 2>/dev/null; then
+  local stem="${BIN_NAME}-${CORI_TAG}-${TARGET}"
+  local archive_name="${stem}.${ARCHIVE_EXT}"
+  local base_url="https://github.com/${CORI_REPO}/releases/download/${CORI_TAG}"
+  local archive="$WORK_DIR/$archive_name"
+  local sums="$WORK_DIR/${archive_name}.sha256"
+
+  log "Downloading $archive_name"
+  download "${base_url}/${archive_name}" "$archive"
+
+  if download "${base_url}/${archive_name}.sha256" "$sums" 2>/dev/null; then
     local expected
-    expected="$(grep "cori-${CORI_TAG}-${CORI_OS}-${CORI_ARCH}.tar.gz" "$checksums" | awk '{print $1}')"
+    expected="$(awk '{print $1}' "$sums" | head -n1)"
     verify_sha256 "$archive" "$expected"
+  else
+    warn "no checksum file published for ${archive_name} — skipping verification"
   fi
-  tar -xzf "$archive" -C "$WORK_DIR"
-  install -m 0755 "$WORK_DIR/cori" "$INSTALL_DIR/cori"
-  log "Installed cori $CORI_TAG → $INSTALL_DIR/cori"
+
+  local extract_dir="$WORK_DIR/extract"
+  mkdir -p "$extract_dir"
+  if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+    command -v unzip >/dev/null || die "unzip is required to extract $archive_name"
+    unzip -q "$archive" -d "$extract_dir"
+  else
+    tar -xzf "$archive" -C "$extract_dir"
+  fi
+
+  # Release archives stage the binary under `dist/<stem>/`; on extraction
+  # the layout is either `<stem>/<bin>` (unix tar) or `<bin>` at the root
+  # (Windows zip — Compress-Archive packs the contents directly).
+  local found
+  found="$(find "$extract_dir" -type f -name "$BIN_FILE" -print -quit)"
+  [[ -n "$found" ]] || die "could not find $BIN_FILE inside $archive_name"
+
+  install -m 0755 "$found" "$INSTALL_DIR/$BIN_FILE"
+  log "Installed ${BIN_NAME} ${CORI_TAG} → $INSTALL_DIR/$BIN_FILE"
 }
 
 install_temporal() {
@@ -138,12 +212,59 @@ install_temporal() {
     log "temporal already on PATH ($(command -v temporal)) — skipping"
     return
   fi
+  local temporal_os temporal_arch
+  case "$(uname -s)" in
+    Linux)  temporal_os="linux" ;;
+    Darwin) temporal_os="darwin" ;;
+    CYGWIN*|MINGW*|MSYS*)
+      warn "Temporal CLI auto-install is not supported on Windows — install it manually from https://github.com/${TEMPORAL_REPO}/releases"
+      return
+      ;;
+    *) warn "unsupported OS for temporal install — skipping"; return ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  temporal_arch="amd64" ;;
+    arm64|aarch64) temporal_arch="arm64" ;;
+    *) warn "unsupported architecture for temporal install — skipping"; return ;;
+  esac
+
+  local manifest="$WORK_DIR/temporal-versions.toml"
+  local manifest_ok=0
+  if download "$TEMPORAL_MANIFEST_URL" "$manifest" 2>/dev/null; then
+    manifest_ok=1
+  else
+    warn "could not fetch temporal manifest from $TEMPORAL_MANIFEST_URL — falling back to defaults"
+  fi
+
+  local resolved_version="$TEMPORAL_VERSION"
+  if [[ -z "$resolved_version" && $manifest_ok -eq 1 ]]; then
+    resolved_version="$(parse_toml_value "$manifest" 'temporal_cli' 'version')"
+  fi
+  [[ -n "$resolved_version" ]] || resolved_version="$DEFAULT_TEMPORAL_VERSION"
+
+  local expected_sha=""
+  if [[ $manifest_ok -eq 1 ]]; then
+    local manifest_version
+    manifest_version="$(parse_toml_value "$manifest" 'temporal_cli' 'version')"
+    if [[ -n "$manifest_version" && "$manifest_version" == "$resolved_version" ]]; then
+      expected_sha="$(parse_toml_value "$manifest" 'temporal_cli.checksums' "${temporal_os}_${temporal_arch}")"
+    else
+      warn "temporal manifest pins ${manifest_version:-<unknown>} but installing ${resolved_version} — skipping checksum verification"
+    fi
+  fi
+
   local archive="$WORK_DIR/temporal.tar.gz"
-  local url="https://github.com/${TEMPORAL_REPO}/releases/download/v${TEMPORAL_VERSION}/temporal_cli_${TEMPORAL_VERSION}_${TEMPORAL_OS}_${TEMPORAL_ARCH}.tar.gz"
+  local url="https://github.com/${TEMPORAL_REPO}/releases/download/v${resolved_version}/temporal_cli_${resolved_version}_${temporal_os}_${temporal_arch}.tar.gz"
+  log "Downloading temporal CLI v${resolved_version}"
   download "$url" "$archive"
+  if [[ -n "$expected_sha" ]]; then
+    verify_sha256 "$archive" "$expected_sha"
+  else
+    warn "no checksum available for temporal_cli ${temporal_os}_${temporal_arch} — skipping verification"
+  fi
   tar -xzf "$archive" -C "$WORK_DIR"
   install -m 0755 "$WORK_DIR/temporal" "$INSTALL_DIR/temporal"
-  log "Installed temporal $TEMPORAL_VERSION → $INSTALL_DIR/temporal"
+  log "Installed temporal ${resolved_version} → $INSTALL_DIR/temporal"
 }
 
 ensure_path() {
@@ -161,8 +282,9 @@ ensure_path() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version)         CORI_VERSION="$2"; shift 2 ;;
-    --prefix|--dir)    CORI_INSTALL_DIR="$2"; shift 2 ;;
+    --version)          CORI_VERSION="$2"; shift 2 ;;
+    --prefix|--dir)     CORI_INSTALL_DIR="$2"; shift 2 ;;
+    --repo)             CORI_REPO="$2"; shift 2 ;;
     --temporal-version) TEMPORAL_VERSION="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^set -euo pipefail/p' "$0" | sed -n 's/^# \{0,1\}//p' | sed '$d'
@@ -176,9 +298,9 @@ done
 # Main
 # ---------------------------------------------------------------------------
 
-detect_platform
+detect_target
 pick_install_dir
-resolve_cori_version
+resolve_version
 
 WORK_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t cori-install)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -188,6 +310,4 @@ install_temporal
 ensure_path
 
 log "Done. Try:"
-printf '    cori init --local\n'
-printf '    cori demo\n'
-printf '    cori skill install --agent claude-code\n'
+printf '    cori run cori-do/workflows/code_only\n'
