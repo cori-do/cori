@@ -16,10 +16,10 @@ full trace of what happened.**
 
 ```bash
 cori run ./translate_product_sheets_fr
-cori run github.com/corido/workflows/code_only
+cori run cori-do/workflows/code_only
 ```
 
-> Status: `v0.2.0-dev` — APIs may change.
+> Status: `v0.2.1-dev` — APIs may change.
 
 ---
 

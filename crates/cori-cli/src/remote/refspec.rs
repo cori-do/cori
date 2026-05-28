@@ -159,11 +159,17 @@ pub fn parse_remote_ref(arg: &str) -> Result<RemoteRef> {
             (h.to_string(), p.to_string())
         }
         Transport::Https => {
-            // body == "host/path"
+            // body == "host/path", or — as a shorthand — `owner/repo[/sub]`
+            // with no host, which defaults to `github.com`.
             let (h, p) = body.split_once('/').ok_or_else(|| {
                 anyhow::anyhow!("malformed ref `{arg}` (expected `host/owner/repo`)")
             })?;
-            (h.to_string(), p.to_string())
+            if looks_like_host(h) {
+                (h.to_string(), p.to_string())
+            } else {
+                // Shorthand form: `<owner>/<repo>[/sub]` → `github.com/<owner>/<repo>[/sub]`.
+                ("github.com".to_string(), body.clone())
+            }
         }
     };
     if host.is_empty() || !looks_like_host(&host) {
@@ -427,6 +433,22 @@ mod tests {
     #[test]
     fn rejects_unrecognised_arg() {
         assert!(parse_remote_ref("nothost").is_err());
+    }
+
+    #[test]
+    fn parses_github_shorthand() {
+        let r = parse_remote_ref("cori-do/workflows/code_only").unwrap();
+        assert_eq!(r.host, "github.com");
+        assert_eq!(r.repo, "cori-do/workflows");
+        assert_eq!(r.subpath, "code_only");
+        assert!(r.ref_str.is_empty());
+        assert!(matches!(r.transport, Transport::Https));
+
+        let r2 = parse_remote_ref("cori-do/workflows/code_only@v1").unwrap();
+        assert_eq!(r2.host, "github.com");
+        assert_eq!(r2.repo, "cori-do/workflows");
+        assert_eq!(r2.subpath, "code_only");
+        assert!(matches!(r2.kind, RemoteRefKind::SemverPrefix(_)));
     }
 
     #[test]
