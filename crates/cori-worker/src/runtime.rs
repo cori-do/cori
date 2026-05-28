@@ -1,12 +1,11 @@
 //! Temporal runtime bootstrap.
 //!
 //! Wraps `CoreRuntime` + `Client` + `Connection` setup so callers (the CLI
-//! and the long-running worker daemon) just call [`CoriTemporalRuntime::connect`]
-//! to get a fully-wired handle.
+//! and, in later phases, the `cori work` daemon) just call
+//! [`CoriTemporalRuntime::connect`] to get a fully-wired handle.
 //!
 //! The runtime is a per-process singleton in practice: each `cori run`
-//! spawns one, runs one workflow, and drops it. The long-running `cori
-//! worker start` daemon owns a single runtime for its whole lifetime.
+//! spawns one, runs one workflow, and drops it.
 
 use std::sync::Arc;
 
@@ -14,9 +13,6 @@ use anyhow::{Context, Result};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions, Url};
-
-/// Default Temporal task queue Cori uses for workflows and activities.
-pub const DEFAULT_TASK_QUEUE: &str = "cori-default";
 
 /// Default Temporal namespace Cori uses.
 pub const DEFAULT_NAMESPACE: &str = "default";
@@ -81,8 +77,7 @@ impl CoriTemporalRuntime {
 fn friendly_connect_error(target: &str) -> String {
     format!(
         "could not connect to Temporal at `{target}`. \
-         Start one locally with:\n  temporal server start-dev\n\
-         or run `cori start --local` (which supervises a bundled Temporal)."
+         Start one locally with:\n  temporal server start-dev"
     )
 }
 

@@ -35,6 +35,20 @@ use cori_protocol::StepKind;
 
 use crate::broker_ctx::broker_ctx;
 
+/// Typed payload attached to a `NeedsReauth` [`ApplicationFailure`].
+///
+/// Carried on the activity-failure boundary so the workflow side can
+/// decide which capability to wait for without re-parsing strings.
+/// Phase 6's dispatch loop suspends the step until a matching
+/// `reauth_completed` signal arrives or the wait times out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedsReauthDetails {
+    pub server_id: String,
+    pub user_id: String,
+    pub auth_kind: String,
+    pub hint: String,
+}
+
 /// Per-activity input. The workflow builds this from its in-memory step
 /// outputs and passes it through Temporal as a JSON payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,16 +59,21 @@ pub struct ActivityInput {
     pub step_name: String,
     /// Step kind — informational; the workflow already dispatched on it.
     pub step_kind: StepKind,
-    /// Relative source path under the runbook root.
+    /// Relative source path under the workflow root.
     pub source_path: PathBuf,
     /// Optional route key (for diagnostics).
     pub route: Option<String>,
     /// Resolved input object for this step.
     pub input: JsonValue,
-    /// Cori workflow id (the registered runbook id, not a Temporal type name).
+    /// Cori workflow id (the registered workflow id, not a Temporal type name).
     pub workflow_id: String,
     /// Cori run id (== Temporal workflow execution id).
     pub run_id: String,
+    /// Stable id of the user who originated this run. Used by the
+    /// broker to scope credential / OAuth-token lookup. Empty string
+    /// for legacy traces that predate Phase 4.
+    #[serde(default)]
+    pub user_id: String,
     /// When true, this activity should return a mocked outcome without
     /// touching the outside world.
     pub dry_run: bool,
@@ -143,18 +162,29 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
     let absolute_path = ctx.source_root.join(&input.source_path);
     let dry_run = input.dry_run;
     let step_input = input.input.clone();
+    let user_id = input.user_id.clone();
+    let credentials_dir = ctx.credentials_dir.clone();
     let started_at = Utc::now();
 
     let outcome: Result<ActivityOutcome, BrokerError> =
         tokio::task::spawn_blocking(move || match (kind, dry_run) {
             (BrokerKind::Code, _) => code::run(&ctx.runtime, &absolute_path, &step_input),
-            (BrokerKind::Cli, false) => {
-                cli_broker::run(&ctx.runtime, &ctx.caps, &absolute_path, &step_input)
-            }
+            (BrokerKind::Cli, false) => cli_broker::run(
+                &ctx.runtime,
+                &ctx.caps,
+                &absolute_path,
+                &step_input,
+                &user_id,
+            ),
             (BrokerKind::Cli, true) => dry_run::cli(&ctx.runtime, &absolute_path, &step_input),
-            (BrokerKind::Mcp, false) => {
-                mcp::run(&ctx.runtime, &ctx.caps, &absolute_path, &step_input)
-            }
+            (BrokerKind::Mcp, false) => mcp::run(
+                &ctx.runtime,
+                &ctx.caps,
+                &absolute_path,
+                &step_input,
+                &user_id,
+                &credentials_dir,
+            ),
             (BrokerKind::Mcp, true) => dry_run::mcp(&ctx.runtime, &absolute_path, &step_input),
             (BrokerKind::Llm, false) => {
                 llm::run(&ctx.runtime, &absolute_path, &step_input, &ctx.llm_opts)
@@ -213,10 +243,31 @@ fn broker_error_to_activity_error(err: BrokerError) -> ActivityError {
         Category::Retryable { type_name } => (type_name, false),
         Category::NonRetryable { type_name } => (type_name, true),
     };
-    let af = ApplicationFailure::builder(anyhow::Error::new(err))
+    // Phase 6: NeedsReauth carries a typed payload the workflow side
+    // decodes via `ApplicationFailure::details::<NeedsReauthDetails>()`.
+    // Extract before moving `err` into the source chain.
+    let reauth_details = match &err {
+        BrokerError::NeedsReauth {
+            server_id,
+            owner_id,
+            auth_kind,
+            hint,
+            ..
+        } => Some(NeedsReauthDetails {
+            server_id: server_id.clone(),
+            user_id: owner_id.clone(),
+            auth_kind: (*auth_kind).to_string(),
+            hint: hint.clone(),
+        }),
+        _ => None,
+    };
+    let builder = ApplicationFailure::builder(anyhow::Error::new(err))
         .type_name(type_name.to_string())
-        .non_retryable(non_retryable)
-        .build();
+        .non_retryable(non_retryable);
+    let af = match reauth_details {
+        Some(details) => builder.details(details).build(),
+        None => builder.build(),
+    };
     ActivityError::application(af)
 }
 
@@ -231,6 +282,13 @@ fn classify(err: &BrokerError) -> Category {
         // Permanent — never retryable, all four kinds.
         CapabilityDenied { .. } => Category::NonRetryable {
             type_name: "MissingCapabilityError",
+        },
+        // Phase 5: missing/expired OAuth or CLI auth. Surfaced as a
+        // distinct type_name so Phase 6's workflow-side signal handler
+        // can catch it specifically and suspend the run instead of
+        // failing it outright.
+        NeedsReauth { .. } => Category::NonRetryable {
+            type_name: "NeedsReauth",
         },
         LlmMissingCredentials { .. } => Category::NonRetryable {
             type_name: "AuthenticationError",

@@ -36,6 +36,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::capabilities::Capabilities;
 use crate::dispatch::{self, RunnerMode};
+use crate::oauth::{self, McpOAuthConfig, Owner, TokenForError, TokenKey, default_store};
 use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
 
@@ -47,6 +48,14 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Optional OAuth configuration. When present, the broker resolves
+    /// an access token from the token store before spawning the server
+    /// and injects it into the spawn environment via the configured
+    /// `token_env_var`. Servers without this block continue to use
+    /// only the static `env` map (e.g. for personal access tokens
+    /// pasted via `cori login`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +71,8 @@ pub fn run(
     capabilities: &Capabilities,
     step_file_path: &Path,
     input: &JsonValue,
+    user_id: &str,
+    credentials_dir: &Path,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -85,8 +96,12 @@ pub fn run(
         }
     })?;
 
-    // 2. Spawn + call.
-    let output = call_tool(server_cfg, &spec.tool, &spec.args)?;
+    // 2. Resolve OAuth token (if this server is OAuth-configured) and
+    //    build the per-spawn environment.
+    let extra_env = resolve_oauth_env(server_cfg, &spec.server, user_id, credentials_dir)?;
+
+    // 3. Spawn + call.
+    let output = call_tool(server_cfg, &spec.tool, &spec.args, &extra_env)?;
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
@@ -98,9 +113,53 @@ pub fn run(
     })
 }
 
+/// Look up an OAuth token in the per-user store and return the extra
+/// env-var injection the spawn should include. Returns an empty map
+/// when this server isn't OAuth-configured.
+fn resolve_oauth_env(
+    server_cfg: &McpServerConfig,
+    server_id: &str,
+    user_id: &str,
+    credentials_dir: &Path,
+) -> Result<HashMap<String, String>> {
+    let Some(oauth_cfg) = &server_cfg.oauth else {
+        return Ok(HashMap::new());
+    };
+    let owner = Owner::User(user_id.to_string());
+    let store = default_store(credentials_dir.to_path_buf());
+    let key = TokenKey::new(server_id, owner.clone());
+    let token = oauth::token_for(&store, &key).map_err(|e| match e {
+        TokenForError::NeedsReauth {
+            hint, auth_kind, ..
+        } => BrokerError::NeedsReauth {
+            server_id: server_id.to_string(),
+            owner_kind: "user",
+            owner_id: user_id.to_string(),
+            auth_kind: match auth_kind {
+                oauth::AuthKind::Pkce => "pkce",
+                oauth::AuthKind::ClientCredentials => "client_credentials",
+                oauth::AuthKind::Device => "device",
+                oauth::AuthKind::StaticToken => "static_token",
+            },
+            hint,
+        },
+        TokenForError::Store(e) => BrokerError::McpProtocol(format!(
+            "token store error while resolving OAuth credential for `{server_id}`: {e}"
+        )),
+    })?;
+    let mut env = HashMap::new();
+    env.insert(oauth_cfg.token_env_var.clone(), token.access_token);
+    Ok(env)
+}
+
 /// Spawn one MCP server, perform `initialize`, call one tool, return its
 /// result. Best-effort termination of the child at the end.
-fn call_tool(cfg: &McpServerConfig, tool: &str, args: &JsonValue) -> Result<JsonValue> {
+fn call_tool(
+    cfg: &McpServerConfig,
+    tool: &str,
+    args: &JsonValue,
+    extra_env: &HashMap<String, String>,
+) -> Result<JsonValue> {
     let bin = cfg.command.first().ok_or_else(|| BrokerError::StepFailed {
         message: "MCP server config has an empty `command`".to_string(),
         stack: None,
@@ -113,6 +172,10 @@ fn call_tool(cfg: &McpServerConfig, tool: &str, args: &JsonValue) -> Result<Json
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in &cfg.env {
+        cmd.env(k, v);
+    }
+    // OAuth-resolved env wins over the static `env` map.
+    for (k, v) in extra_env {
         cmd.env(k, v);
     }
 

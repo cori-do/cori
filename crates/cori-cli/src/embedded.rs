@@ -11,10 +11,6 @@ pub mod skill {
     include!(concat!(env!("OUT_DIR"), "/skill_files.rs"));
 }
 
-pub mod hello_world {
-    include!(concat!(env!("OUT_DIR"), "/hello_world_files.rs"));
-}
-
 use std::fs;
 use std::path::Path;
 

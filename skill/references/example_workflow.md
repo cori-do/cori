@@ -1,13 +1,13 @@
-# Example runbook — a complete, realistic worked example
+# Example workflow — a complete, realistic worked example
 
-This is what a clean, well-decomposed Cori runbook looks like end-to-end. It's the translate-product-sheets workflow used elsewhere in the docs, rendered as the actual files the agent would write at `save_workflow`.
+This is what a clean, well-decomposed Cori workflow looks like end-to-end. It's the translate-product-sheets workflow used elsewhere in the docs, rendered as the actual files the agent would write at `save_workflow`.
 
-Read this once before you generate your first runbook in a session. It's faster than re-deriving the conventions from scratch.
+Read this once before you generate your first workflow in a session. It's faster than re-deriving the conventions from scratch.
 
 ## Directory layout
 
 ```
-~/.cori/runbooks/translate_product_sheets_fr/
+<chosen_path>/translate_product_sheets_fr/
 ├── manifest.md
 ├── types.ts
 ├── steps/
@@ -326,7 +326,7 @@ describe("check_gpsr", () => {
 });
 ```
 
-`tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run with `npx vitest tests/` from inside the runbook directory.
+`tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run with `npx vitest tests/` from inside the workflow directory.
 
 ## What this example demonstrates
 

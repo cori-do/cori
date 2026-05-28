@@ -17,9 +17,9 @@
 
 use chrono::NaiveDate;
 use cori_manifest::Manifest;
-use cori_protocol::{CompiledStep, CompiledWorkflow, StepKind};
+use cori_protocol::{CompiledStep, CompiledWorkflow, Placement, StepKind};
 use cori_worker::runner::run_workflow_once;
-use cori_worker::runtime::{CoriTemporalRuntime, DEFAULT_NAMESPACE, DEFAULT_TASK_QUEUE};
+use cori_worker::runtime::{CoriTemporalRuntime, DEFAULT_NAMESPACE};
 use cori_worker::workflow::WorkflowInput;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
@@ -30,7 +30,7 @@ fn temporal_target() -> String {
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runs_a_trivial_builtin_workflow() {
-    let rt = CoriTemporalRuntime::connect(temporal_target(), DEFAULT_NAMESPACE, DEFAULT_TASK_QUEUE)
+    let rt = CoriTemporalRuntime::connect(temporal_target(), DEFAULT_NAMESPACE, "cori.test.smoke")
         .await
         .expect("connect to local Temporal dev server");
 
@@ -63,6 +63,8 @@ async fn runs_a_trivial_builtin_workflow() {
             route: None,
             depends_on: vec![],
             metadata,
+            placement: Placement::Anywhere,
+            task_queue: Some("cori.test.smoke".to_string()),
         }],
         required_cli_binaries: vec![],
         required_mcp_servers: vec![],
@@ -71,10 +73,12 @@ async fn runs_a_trivial_builtin_workflow() {
 
     let input = WorkflowInput {
         workflow_id: "smoke".to_string(),
-        workflow_version: 1,
+        workflow_content_hash: None,
+        user_id: "smoke".to_string(),
         compiled_dag: dag,
         user_params: JsonValue::Object(JsonMap::new()),
         dry_run: false,
+        reauth_timeout_secs: None,
     };
 
     let out = run_workflow_once(&rt, "cori-smoke".to_string(), input)

@@ -11,31 +11,47 @@
 //! - The workflow body may be replayed from event history. Any
 //!   non-deterministic operation here will fail the replay.
 //!
-//! Architecture: a single `CoriRunbookWorkflow` handles every compiled
+//! Architecture: a single `CoriWorkflow` handles every compiled
 //! DAG. The DAG is passed in as part of [`WorkflowInput`] (locked
 //! decision — see `temporal-implementation-startegy.md` §C.1), so the
 //! workflow never reads from SQLite. Builtins (`map` / `for_each` /
 //! `branch` / `parallel` / `wait`) run as workflow code, not activities.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use temporalio_common::error::{ActivityExecutionError, IncomingError};
 use temporalio_macros::{workflow, workflow_methods};
-use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowResult};
+use temporalio_sdk::{ActivityOptions, SyncWorkflowContext, WorkflowContext, WorkflowResult};
 
 use cori_protocol::{CompiledWorkflow, StepKind};
 
-use crate::activities::{ActivityInput, ActivityOutput, CoriActivities};
+use crate::activities::{ActivityInput, ActivityOutput, CoriActivities, NeedsReauthDetails};
 
-/// Input to [`CoriRunbookWorkflow`].
+/// Default mid-run re-auth timeout when [`WorkflowInput::reauth_timeout_secs`]
+/// is not set. Matches the redesign-migration-plan §Phase 6 default.
+const DEFAULT_REAUTH_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// Input to [`CoriWorkflow`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowInput {
     /// Cori workflow id (the user-facing slug — not a Temporal type name).
     pub workflow_id: String,
-    /// Monotonic version from the registry.
-    pub workflow_version: u32,
+    /// Content hash of the workflow folder (manifest + steps). Carried
+    /// for trace / debugging only; the workflow body does not use it.
+    /// Optional because the smoke test constructs an in-memory DAG
+    /// without a source folder.
+    #[serde(default)]
+    pub workflow_content_hash: Option<String>,
+    /// Identity of the user requesting this run. The broker uses this
+    /// to scope credential lookups; Phase 4 will also use it to derive
+    /// per-step task queues. Defaults to the empty string for tests
+    /// that don't go through the CLI.
+    #[serde(default)]
+    pub user_id: String,
     /// The full compiled DAG. Whole-bytes determinism: re-passed into
     /// every replay via Temporal event history.
     pub compiled_dag: CompiledWorkflow,
@@ -44,9 +60,14 @@ pub struct WorkflowInput {
     pub user_params: JsonValue,
     /// When true, real-side-effect steps return mocked outputs.
     pub dry_run: bool,
+    /// Override for the mid-run re-auth wait timeout. Defaults to
+    /// `DEFAULT_REAUTH_TIMEOUT_SECS` (15 min) when unset. Tests use a
+    /// short value to exercise the timeout path quickly.
+    #[serde(default)]
+    pub reauth_timeout_secs: Option<u64>,
 }
 
-/// Output of [`CoriRunbookWorkflow`].
+/// Output of [`CoriWorkflow`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowOutput {
     /// Cori run id (== Temporal workflow execution id).
@@ -83,13 +104,30 @@ pub struct ActivitySummary {
     pub notes: Vec<String>,
 }
 
+/// Signal payload for [`CoriWorkflow::reauth_completed`].
+///
+/// `cori login <capability>` sends this signal to every open workflow
+/// owned by the same user after a successful sign-in. The workflow
+/// records the `server_id` in its `completed_reauths` set; any
+/// suspended step waiting on that capability wakes up and retries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReauthSignalArgs {
+    /// Stable id of the capability the user just signed in to —
+    /// matches the `server_id` carried by `BrokerError::NeedsReauth`.
+    pub server_id: String,
+}
+
 /// The single generic workflow type Cori registers with Temporal.
 #[workflow]
 #[derive(Default)]
-pub struct CoriRunbookWorkflow;
+pub struct CoriWorkflow {
+    /// Set of capability `server_id`s for which a `reauth_completed`
+    /// signal has been received and not yet consumed by a retry.
+    completed_reauths: BTreeSet<String>,
+}
 
 #[workflow_methods]
-impl CoriRunbookWorkflow {
+impl CoriWorkflow {
     #[run]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
@@ -109,7 +147,16 @@ impl CoriRunbookWorkflow {
         let mut run_status: &'static str = "succeeded";
         let mut run_error: Option<String> = None;
 
-        for step in &input.compiled_dag.steps {
+        let reauth_timeout = Duration::from_secs(
+            input
+                .reauth_timeout_secs
+                .unwrap_or(DEFAULT_REAUTH_TIMEOUT_SECS),
+        );
+
+        let mut step_idx: usize = 0;
+        let mut attempts_this_step: u32 = 1;
+        'outer: while step_idx < input.compiled_dag.steps.len() {
+            let step = &input.compiled_dag.steps[step_idx];
             let step_input = JsonValue::Object(accumulated.clone());
 
             // Builtins are not activities — they run in workflow code.
@@ -134,6 +181,8 @@ impl CoriRunbookWorkflow {
                     error: None,
                     notes: vec![format!("kind `builtin` is not implemented — skipping")],
                 });
+                step_idx += 1;
+                attempts_this_step = 1;
                 continue;
             }
 
@@ -146,6 +195,7 @@ impl CoriRunbookWorkflow {
                 input: step_input.clone(),
                 workflow_id: input.workflow_id.clone(),
                 run_id: run_id.clone(),
+                user_id: input.user_id.clone(),
                 dry_run: input.dry_run,
             };
 
@@ -193,7 +243,7 @@ impl CoriRunbookWorkflow {
                         started_at: out.started_at,
                         ended_at: out.ended_at,
                         duration_ms: out.duration_ms,
-                        attempts: 1,
+                        attempts: attempts_this_step,
                         route: step.route.clone(),
                         input: activity_in.input,
                         output: out.output,
@@ -202,8 +252,72 @@ impl CoriRunbookWorkflow {
                         error: None,
                         notes: out.notes,
                     });
+                    step_idx += 1;
+                    attempts_this_step = 1;
                 }
                 Err(e) => {
+                    // Phase 6: when an activity surfaces a `NeedsReauth`
+                    // application failure, suspend the workflow until
+                    // either (a) a `reauth_completed` signal arrives for
+                    // the matching capability, in which case we retry
+                    // the same step, or (b) `reauth_timeout` elapses, in
+                    // which case we fail the run cleanly.
+                    if let Some(details) = needs_reauth_details(&e) {
+                        let server_id = details.server_id.clone();
+                        let server_for_wait = server_id.clone();
+                        let mut signal_arrived = false;
+                        temporalio_sdk::workflows::select! {
+                            _ = ctx.timer(reauth_timeout) => {}
+                            _ = ctx.wait_condition(move |s: &Self| {
+                                s.completed_reauths.contains(&server_for_wait)
+                            }) => {
+                                signal_arrived = true;
+                            }
+                        }
+                        if signal_arrived {
+                            // Consume the marker so a future failure on
+                            // the same capability waits afresh.
+                            ctx.state_mut(|s| {
+                                s.completed_reauths.remove(&server_id);
+                            });
+                            attempts_this_step = attempts_this_step.saturating_add(1);
+                            // Re-enter the loop without advancing the
+                            // step index — retry the same activity with
+                            // the same input.
+                            continue 'outer;
+                        }
+                        // Timed out — fail the run.
+                        let msg = format!(
+                            "timed out after {}s waiting for `cori login {}` (capability: {})",
+                            reauth_timeout.as_secs(),
+                            details.server_id,
+                            details.server_id,
+                        );
+                        activities.push(ActivitySummary {
+                            activity_id: step.activity_id.clone(),
+                            step_name: step.name.clone(),
+                            kind: step.kind,
+                            status: "failed".to_string(),
+                            started_at: None,
+                            ended_at: None,
+                            duration_ms: 0,
+                            attempts: attempts_this_step,
+                            route: step.route.clone(),
+                            input: activity_in.input,
+                            output: JsonValue::Null,
+                            cost_eur: None,
+                            usage: None,
+                            error: Some(msg.clone()),
+                            notes: vec![format!(
+                                "needs sign-in for `{}` — {}",
+                                details.server_id, details.hint
+                            )],
+                        });
+                        run_status = "failed";
+                        run_error = Some(msg);
+                        break;
+                    }
+
                     let msg = format!("{e}");
                     activities.push(ActivitySummary {
                         activity_id: step.activity_id.clone(),
@@ -213,7 +327,7 @@ impl CoriRunbookWorkflow {
                         started_at: None,
                         ended_at: None,
                         duration_ms: 0,
-                        attempts: 1,
+                        attempts: attempts_this_step,
                         route: step.route.clone(),
                         input: activity_in.input,
                         output: JsonValue::Null,
@@ -237,6 +351,39 @@ impl CoriRunbookWorkflow {
             error: run_error,
         })
     }
+
+    /// Signal handler invoked by `cori login <capability>` after a
+    /// successful sign-in. Records the capability so any suspended
+    /// step waiting on it wakes up. Idempotent: receiving the signal
+    /// multiple times has the same effect as once.
+    #[signal]
+    pub fn reauth_completed(
+        &mut self,
+        _ctx: &mut SyncWorkflowContext<Self>,
+        args: ReauthSignalArgs,
+    ) {
+        self.completed_reauths.insert(args.server_id);
+    }
+}
+
+/// Extract [`NeedsReauthDetails`] from an activity execution error
+/// whose underlying [`ApplicationFailure`] was tagged with
+/// `type_name = "NeedsReauth"`. Returns `None` for any other failure
+/// shape so the dispatch loop falls back to the regular fail path.
+fn needs_reauth_details(err: &ActivityExecutionError) -> Option<NeedsReauthDetails> {
+    let failed = match err {
+        ActivityExecutionError::Failed(f) => f,
+        _ => return None,
+    };
+    let cause = failed.cause()?;
+    let app = match cause {
+        IncomingError::Application(a) => a,
+        _ => return None,
+    };
+    if app.type_name() != Some("NeedsReauth") {
+        return None;
+    }
+    app.details::<NeedsReauthDetails>().ok().flatten()
 }
 
 /// Build per-step `ActivityOptions`: default timeout + retry policy per
@@ -292,8 +439,16 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
         ],
     };
 
+    // Per-step task queue (Phase 4). When unset (e.g. legacy callers
+    // building a DAG by hand, like the smoke test), fall through to the
+    // workflow's own queue.
+    //
+    // 30s schedule_to_start surfaces missing-worker fast with an
+    // actionable error rather than blocking the workflow.
     ActivityOptions::with_start_to_close_timeout(timeout)
         .retry_policy(retry_policy)
+        .maybe_task_queue(step.task_queue.clone())
+        .schedule_to_start_timeout(Duration::from_secs(30))
         .build()
 }
 

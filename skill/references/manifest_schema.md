@@ -1,6 +1,6 @@
 # Manifest schema — YAML frontmatter spec
 
-Every Cori runbook has a `manifest.md` at its root. The file is split into two parts:
+Every Cori workflow has a `manifest.md` at its root. The file is split into two parts:
 
 - **YAML frontmatter** (between `---` lines at the top) — machine-readable metadata that `cori` parses
 - **Prose body** — human-readable goal, preconditions, step descriptions, verification, notes
@@ -11,10 +11,10 @@ This file documents the frontmatter. The prose body structure is in the main SKI
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | string (snake_case) | Unique within the user's runbook collection. Derived from `name` if not specified, but always set it explicitly to avoid surprises. Max 64 chars. |
+| `id` | string (snake_case) | Unique within the user's workflow collection. Derived from `name` if not specified, but always set it explicitly to avoid surprises. Max 64 chars. |
 | `name` | string | Human-readable. Title-case-ish, but write it like you'd write a function name aloud. |
 | `description` | string | One sentence. Used by `search_workflow` for ranking. Make it descriptive of *what* and *when*, not how. |
-| `created` | ISO 8601 date | The day the runbook was first written. |
+| `created` | ISO 8601 date | The day the workflow was first written. |
 | `version` | integer | Starts at 1, increments on edits. |
 
 ## Optional fields
@@ -23,8 +23,8 @@ This file documents the frontmatter. The prose body structure is in the main SKI
 |---|---|---|
 | `updated` | ISO 8601 date | Set on edits. |
 | `parameters` | list of parameter objects (see below) | Workflow inputs that can change per run. |
-| `tools_required` | list of strings | CLI binaries the runbook expects (e.g. `gws`, `kubectl`, `gh`). Used at registration to fail early if a worker lacks a binary. |
-| `mcp_servers` | list of strings | MCP server names the runbook expects (e.g. `slack`, `github`). Used at registration to fail early if the worker isn't configured for a server. |
+| `tools_required` | list of strings | CLI binaries the workflow expects (e.g. `gws`, `kubectl`, `gh`). Used at registration to fail early if a worker lacks a binary. |
+| `mcp_servers` | list of strings | MCP server names the workflow expects (e.g. `slack`, `github`). Used at registration to fail early if the worker isn't configured for a server. |
 | `tags` | list of strings | Helps grouping in `list_workflow`. Common tags: `deploy`, `data`, `report`, `compliance`, `support`. |
 | `schedule` | string (cron) | If set, registers a scheduled trigger. e.g. `"0 3 * * *"` for daily at 03:00. Cron interpreted in `schedule_tz`. |
 | `schedule_tz` | string (IANA tz) | Default `UTC`. Use `"Europe/Paris"`, `"America/Los_Angeles"`, etc. |
@@ -116,17 +116,16 @@ Produce a French version of the source product tab in the same spreadsheet, pres
 - Identifier columns (SKU, UPC) match between source and target row-for-row
 
 ## Notes
-- The first version of this runbook tried to translate row-by-row in step 2; it was 30× slower and hit rate limits. Batched 50/call is the right size for gpt-4o-mini at typical row sizes.
+- The first version of this workflow tried to translate row-by-row in step 2; it was 30× slower and hit rate limits. Batched 50/call is the right size for gpt-4o-mini at typical row sizes.
 - "Strict" GPSR check means missing operator contact alone is enough for NOK — don't soften this without explicit instruction.
 - `dry_run: true` runs everything except step 5, useful when iterating on translation prompts.
 ```
 
-## Validation rules `cori` enforces at registration
+## Validation rules `cori` enforces
 
-When you run `cori workflows register <path>`, the CLI checks:
+When you run `cori run <path>` (or `cori check <path>`), the compiler checks:
 
 - All required frontmatter fields are present
-- `id` is unique within the user's collection (or matches an existing id, in which case `version` must increment)
 - Every parameter has a unique name
 - `enum` parameters have `values`
 - `tools_required` and `mcp_servers` are arrays of strings
@@ -134,7 +133,11 @@ When you run `cori workflows register <path>`, the CLI checks:
 - Each TypeScript step file compiles and exports a valid `step.<kind>({…})` default
 - Step files referenced in `## Steps` exist in `steps/` and are numbered correctly
 
-If any of these fail, registration is rejected with a structured error. Surface those errors plainly to the user — they're usually one-line fixes.
+If any of these fail, compilation is rejected with a structured error. Surface those errors plainly to the user — they're usually one-line fixes.
+
+## Routing (computed, not authored)
+
+The compiler also infers a `Placement` for each step from its kind and `tools_required` / `mcp_servers` use — `Anywhere` for pure `code`/`llm`, `RequiresLocalFs` for `cli` or `code` that reads/writes the workspace, `RequiresCapability { id }` for `mcp_tool` and known-remote CLIs. The CLI's planner then maps each step to a concrete task queue (`cori.user.<id>` or `cori.service.<pool>`) before the workflow starts; the trace records the chosen `task_queue` + `worker_identity` per activity. **Authors do not write placement directly** — declaring `tools_required` / `mcp_servers` is enough.
 
 ## What not to put in frontmatter
 

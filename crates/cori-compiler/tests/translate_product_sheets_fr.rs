@@ -1,4 +1,4 @@
-//! Golden integration test against the canonical example runbook.
+//! Golden integration test against the canonical example workflow.
 //!
 //! Acceptance criteria for the current compiler fixture: the compiler
 //! invoked against `examples/translate_product_sheets_fr/` produces a

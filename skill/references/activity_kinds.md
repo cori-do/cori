@@ -1,6 +1,6 @@
 # Activity kinds — TypeScript templates and rules
 
-Every step in a Cori runbook is exactly one of five activity kinds. This file is the reference for what each kind looks like, when to use it, and the TypeScript template the agent generates.
+Every step in a Cori workflow is exactly one of five activity kinds. This file is the reference for what each kind looks like, when to use it, and the TypeScript template the agent generates.
 
 The Cori SDK exposes these primitives:
 
@@ -295,4 +295,4 @@ When reviewing your generated step files before showing them to the user, check:
 - For `llm`: output schema is strict; no untyped string returns
 - Imports from `@cori/sdk` are clean — no unused imports
 
-If something looks off, fix it before disk write. A clean runbook on the first try buys enormous trust.
+If something looks off, fix it before disk write. A clean workflow on the first try buys enormous trust.

@@ -1,4 +1,4 @@
-# `translate_product_sheets_fr` — example runbook
+# `translate_product_sheets_fr` — example workflow
 
 The canonical worked example. Used as the golden fixture for the
 `cori-compiler` integration test.

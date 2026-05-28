@@ -1,4 +1,4 @@
-//! Runbook compiler: parses manifest + steps and emits a
+//! Workflow compiler: parses manifest + steps and emits a
 //! [`CompiledWorkflow`].
 //!
 //! Compiler responsibilities:
@@ -28,7 +28,7 @@ mod step_parser;
 use std::path::{Path, PathBuf};
 
 use cori_manifest::{ManifestError, parse_manifest};
-use cori_protocol::{CompiledStep, CompiledWorkflow, StepKind};
+use cori_protocol::{CompiledStep, CompiledWorkflow, Placement, StepKind};
 use regex::Regex;
 use serde::Serialize;
 use thiserror::Error;
@@ -84,6 +84,45 @@ impl From<ManifestError> for CompileError {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Compute the [`Placement`] for a step from its kind + parsed
+/// metadata. Pure: lives here so the protocol crate stays free of
+/// step-kind heuristics.
+///
+/// - `Cli` → [`Placement::RequiresLocalFs`] (the binary runs on the
+///   requesting user's machine).
+/// - `Code` → `RequiresLocalFs` if the metadata declares a `reads_path`
+///   or `writes_path` field (deferred; the static parser does not emit
+///   these in v1, but the rule lives here so it lights up automatically
+///   when the parser learns them); otherwise [`Placement::Anywhere`].
+/// - `McpTool` → [`Placement::RequiresCapability`] keyed by the
+///   declared `server` name. Falls back to `Anywhere` if absent (the
+///   compiler will already have raised a hard error before this point).
+/// - `Llm`, `Builtin` → [`Placement::Anywhere`].
+pub fn compute_placement(
+    kind: StepKind,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Placement {
+    match kind {
+        StepKind::Cli => Placement::RequiresLocalFs,
+        StepKind::Code => {
+            let needs_fs =
+                metadata.contains_key("reads_path") || metadata.contains_key("writes_path");
+            if needs_fs {
+                Placement::RequiresLocalFs
+            } else {
+                Placement::Anywhere
+            }
+        }
+        StepKind::McpTool => match metadata.get("server").and_then(|v| v.as_str()) {
+            Some(server) => Placement::RequiresCapability {
+                id: server.to_string(),
+            },
+            None => Placement::Anywhere,
+        },
+        StepKind::Llm | StepKind::Builtin => Placement::Anywhere,
+    }
+}
+
 /// Map an LLM model name to its provider id. Kept here (and not just in
 /// the broker) so the compiler can validate `model: "…"` declarations
 /// without taking a dep on the broker crate.
@@ -103,24 +142,24 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Compile a runbook directory. Returns the compiled workflow on success or
+/// Compile a workflow directory. Returns the compiled workflow on success or
 /// a non-empty list of structured errors.
-pub fn compile(runbook_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>> {
+pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>> {
     let mut errors: Vec<CompileError> = Vec::new();
 
-    if !runbook_dir.is_dir() {
+    if !workflow_dir.is_dir() {
         return Err(vec![CompileError::new(
-            runbook_dir.display().to_string(),
-            "runbook path is not a directory",
+            workflow_dir.display().to_string(),
+            "workflow path is not a directory",
         )]);
     }
 
     // 1. manifest.md
-    let manifest_path = runbook_dir.join("manifest.md");
+    let manifest_path = workflow_dir.join("manifest.md");
     if !manifest_path.is_file() {
         return Err(vec![CompileError::new(
             "manifest.md",
-            "missing required file at runbook root",
+            "missing required file at workflow root",
         )]);
     }
     let manifest_src = match std::fs::read_to_string(&manifest_path) {
@@ -138,7 +177,7 @@ pub fn compile(runbook_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>
     };
 
     // 2. steps/
-    let steps_dir = runbook_dir.join("steps");
+    let steps_dir = workflow_dir.join("steps");
     if !steps_dir.is_dir() {
         errors.push(CompileError::new(
             "steps/",
@@ -182,6 +221,7 @@ pub fn compile(runbook_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>
                 } else {
                     vec![compiled_steps[idx - 1].activity_id.clone()]
                 };
+                let placement = compute_placement(parsed.kind, &parsed.metadata);
                 compiled_steps.push(CompiledStep {
                     activity_id,
                     index: idx as u32,
@@ -192,6 +232,8 @@ pub fn compile(runbook_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>
                     route: parsed.route,
                     depends_on,
                     metadata: parsed.metadata,
+                    placement,
+                    task_queue: None,
                 });
             }
             Err(es) => {
@@ -424,7 +466,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn make_runbook(dir: &Path, manifest: &str, files: &[(&str, &str)]) {
+    fn make_workflow(dir: &Path, manifest: &str, files: &[(&str, &str)]) {
         fs::create_dir_all(dir.join("steps")).unwrap();
         fs::write(dir.join("manifest.md"), manifest).unwrap();
         for (name, body) in files {
@@ -453,7 +495,7 @@ mod tests {
     #[test]
     fn happy_path_two_steps() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[
@@ -479,7 +521,7 @@ mod tests {
     #[test]
     fn gap_in_numbering_rejected() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[
@@ -500,7 +542,7 @@ mod tests {
     #[test]
     fn bad_filename_rejected() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[(
@@ -515,7 +557,7 @@ mod tests {
     #[test]
     fn cli_binary_must_be_declared() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST, // only `echo` declared
             &[(
@@ -534,7 +576,7 @@ mod tests {
     fn mcp_server_must_be_declared() {
         let manifest = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\nmcp_servers: [github]\n---\n# body\n";
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             manifest,
             &[(
@@ -549,7 +591,7 @@ mod tests {
     #[test]
     fn code_must_not_import_node_modules() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[(
@@ -564,7 +606,7 @@ mod tests {
     #[test]
     fn step_without_description_rejected() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[(
@@ -579,7 +621,7 @@ mod tests {
     #[test]
     fn step_without_default_export_rejected() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[(
@@ -594,7 +636,7 @@ mod tests {
     #[test]
     fn unknown_kind_rejected() {
         let tmp = tempdir();
-        make_runbook(
+        make_workflow(
             tmp.path(),
             OK_MANIFEST,
             &[(

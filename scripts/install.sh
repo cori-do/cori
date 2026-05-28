@@ -8,7 +8,7 @@
 #
 # Usage:
 #   curl -fsSL https://cli.cori.do/install.sh | bash
-#   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --version 0.1.0
+#   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --version 0.2.0
 #   curl -fsSL https://cli.cori.do/install.sh | bash -s -- --prefix ~/bin
 #
 # Environment overrides:

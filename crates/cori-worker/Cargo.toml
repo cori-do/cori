@@ -15,9 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
-notify.workspace = true
-ctrlc.workspace = true
-crossbeam-channel.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 futures.workspace = true

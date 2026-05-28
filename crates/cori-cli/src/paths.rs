@@ -1,18 +1,20 @@
 //! Resolves Cori's local state directories.
 //!
-//! v1 stores everything under `~/.cori/`:
+//! Phase 2 of the redesign moves Cori to the disk-as-truth layout:
 //!
 //! ```text
 //! ~/.cori/
-//! ├── config.toml      # CLI config (LLM providers, temporal.host, ...)
-//! ├── registry.db      # SQLite registry (workflows, runs)
-//! ├── runbooks/        # cached copies of registered runbooks
-//! ├── state/           # transient state (locks, pids, ...)
-//! └── logs/            # worker/serve log files
+//! ├── config.toml      # CLI config (LLM keys, temporal.host, ...)
+//! ├── cache/           # content-addressed compiled DAGs (rebuildable)
+//! ├── runs/            # run-trace JSON, keyed by workflow folder path
+//! ├── credentials/     # token metadata; real secrets in OS keychain
+//! ├── runtime/         # bundled Deno runner (extracted lazily)
+//! └── state/           # transient: dev-temporal pid, announce flags
 //! ```
 //!
-//! The home directory can be overridden with the `CORI_HOME` environment
-//! variable, which makes integration tests trivial.
+//! Directories are created lazily on first write (`cori init` is gone).
+//! The home directory can be overridden with `$CORI_HOME`, which makes
+//! integration tests trivial.
 
 use std::path::PathBuf;
 
@@ -30,33 +32,50 @@ pub fn home() -> Result<PathBuf> {
     Ok(home.join(".cori"))
 }
 
-pub fn runbooks_dir() -> Result<PathBuf> {
-    Ok(home()?.join("runbooks"))
+pub fn config_file() -> Result<PathBuf> {
+    Ok(home()?.join("config.toml"))
+}
+
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(home()?.join("cache"))
+}
+
+pub fn runs_dir() -> Result<PathBuf> {
+    Ok(home()?.join("runs"))
+}
+
+#[allow(dead_code)] // populated in Phase 5
+pub fn credentials_dir() -> Result<PathBuf> {
+    Ok(home()?.join("credentials"))
+}
+
+pub fn runtime_dir() -> Result<PathBuf> {
+    Ok(home()?.join("runtime"))
 }
 
 pub fn state_dir() -> Result<PathBuf> {
     Ok(home()?.join("state"))
 }
 
-pub fn logs_dir() -> Result<PathBuf> {
-    Ok(home()?.join("logs"))
+/// Worker capability reports (`~/.cori/cluster/<task_queue>.json`).
+/// v1 is local-disk-only: enough for solo dev and small
+/// shared-filesystem clusters. Phase 6+ replaces with a Temporal-native
+/// advertising mechanism.
+pub fn cluster_dir() -> Result<PathBuf> {
+    Ok(home()?.join("cluster"))
 }
 
-pub fn registry_db() -> Result<PathBuf> {
-    Ok(home()?.join("registry.db"))
+/// Root for fetched remote workflows: `~/.cori/cache/remote/`.
+pub fn remote_cache_dir() -> Result<PathBuf> {
+    Ok(cache_dir()?.join("remote"))
 }
 
-pub fn config_file() -> Result<PathBuf> {
-    Ok(home()?.join("config.toml"))
+/// `~/.cori/cache/remote/pins.json` — `ref → sha` map.
+pub fn pins_file() -> Result<PathBuf> {
+    Ok(remote_cache_dir()?.join("pins.json"))
 }
 
-/// Root of the bundled Deno runtime (`~/.cori/runtime/`).
-///
-/// The current runtime populates this with the runner script, its
-/// `deno.json` import map, and a copy of `@cori/sdk`. The Deno binary is
-/// either picked up from `PATH` or installed into this directory in a
-/// future update (see
-/// `cori-broker::runtime`).
-pub fn runtime_dir() -> Result<PathBuf> {
-    Ok(home()?.join("runtime"))
+/// `~/.cori/cache/remote/trust.json` — consented (repo, sha) pairs.
+pub fn trust_file() -> Result<PathBuf> {
+    Ok(remote_cache_dir()?.join("trust.json"))
 }

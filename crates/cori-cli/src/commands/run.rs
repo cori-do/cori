@@ -1,186 +1,213 @@
-//! `cori run <id> [--dry-run] [<param>=<value>...]`.
+//! `cori run <path> [--dry-run] [--json] [<param>=<value>...]`.
 //!
-//! Executes a registered workflow step-by-step. `code`, `cli`, `mcp_tool`,
-//! and `llm` steps are dispatched via the broker; `builtin` steps remain
-//! unimplemented (deferred) and short-circuit with a clear notice.
+//! Pipeline (Phase 2 of the redesign):
 //!
-//! `--dry-run`: the entire pipeline runs except that every step that would
-//! touch the outside world returns a placeholder annotated with
-//! `mocked: true`. `code` and `builtin` steps still execute for real since
-//! they have no external side effects. The trace marks the run with a
-//! top-level `dry_run: true` field and every mocked activity status is
-//! `skipped`.
-//!
-//! Parameter resolution:
-//! - Manifest defaults are applied first.
-//! - CLI arguments of the form `key=value` override the defaults. JSON-shaped
-//!   values (`true`, numbers, `null`, `[...]`, `{...}`, `"..."`) are decoded
-//!   as such; everything else is treated as a string.
-//! - Every step receives `{ ...initialParams, ...accumulatedOutputs }`.
-//!
-//! Output:
-//! - With `--json`, the run trace is emitted as pretty-printed JSON,
-//!   matching the canonical schema in `skill/references/trace_interpretation.md`.
-//! - Otherwise a friendly per-step summary is printed.
+//! 1. Resolve the workflow folder (`workflow_loader::load`).
+//! 2. Apply manifest parameter defaults + CLI `key=value` overrides.
+//! 3. Lazy-install the Deno runtime under `~/.cori/runtime/`.
+//! 4. Discover + validate broker capabilities.
+//! 5. Resolve the Temporal endpoint (config / preflight / auto-spawn).
+//! 6. Connect to Temporal, register an ephemeral in-process worker on
+//!    `task_queue_for(&Person { user_id })` (Phase 3). Phase 4 will
+//!    move queue selection per-step.
+//! 7. Start the workflow, await its result.
+//! 8. Serialize the trace as JSON to
+//!    `~/.cori/runs/<run_history_key>/<utc>.json`, atomically.
+//! 9. Print a friendly summary or the JSON trace.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use cori_broker::capabilities::{self, Capabilities};
+use cori_broker::capabilities::{self, Capabilities, CapabilityReport};
+use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::{LlmCredentials, LlmOptions};
-use cori_broker::{TokenUsage, TriggerContext, runtime};
-use cori_protocol::{CompiledWorkflow, StepKind};
+use cori_broker::{TokenUsage, TriggerContext, runtime as broker_runtime};
+use cori_protocol::{
+    CompiledWorkflow, StepKind, WorkerIdentity, identity_from_queue, task_queue_for,
+};
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
 use cori_worker::runner::run_workflow_once;
-use cori_worker::runtime::{
-    CoriTemporalRuntime, DEFAULT_NAMESPACE, DEFAULT_TASK_QUEUE, DEFAULT_TEMPORAL_TARGET,
-    preflight_check,
-};
-use cori_worker::workflow::{WorkflowInput, WorkflowOutput};
-use serde::Serialize;
+use cori_worker::runtime::{CoriTemporalRuntime, DEFAULT_NAMESPACE, preflight_check};
+use cori_worker::workflow::{ActivitySummary, WorkflowInput, WorkflowOutput};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::{config::Config, paths, registry};
+use crate::remote::{self, WorkflowSource};
+use crate::{
+    config::Config, paths, planner, runtime as cli_runtime, temporal_endpoint, workflow_loader,
+};
 
-#[derive(Debug, Clone, Serialize)]
+// Phase 3: the requesting user's identity derives the task queue. A
+// solo dev with no `cori work` running still works — `run` spins up an
+// ephemeral in-process worker on `cori.user.<id>`. Phase 4 will move
+// queue selection per-step.
+
+// ---------------------------------------------------------------------------
+// Trace types (persisted to ~/.cori/runs/<key>/<utc>.json)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RunTrace {
-    run_id: String,
-    workflow_id: String,
-    workflow_version: u32,
-    status: &'static str,
-    trigger: &'static str,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    dry_run: bool,
-    started_at: DateTime<Utc>,
-    ended_at: DateTime<Utc>,
-    duration_ms: u128,
-    params: JsonValue,
-    activities: Vec<ActivityTrace>,
-    cost: CostSummary,
-    error: Option<String>,
+    pub(crate) run_id: String,
+    pub(crate) workflow_id: String,
+    /// 16-hex-char hash of the workflow folder contents at run time.
+    /// Replaces the old `workflow_version` (no registry → no version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_content_hash: Option<String>,
+    pub(crate) status: String,
+    pub(crate) trigger: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) dry_run: bool,
+    /// Identity of the user who started this run. Routed steps inherit
+    /// this for credential lookup; recorded in the trace so `cori
+    /// runs show` can attribute each run. Phase 7 addition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) requesting_identity: Option<WorkerIdentity>,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) ended_at: DateTime<Utc>,
+    pub(crate) duration_ms: u128,
+    /// Origin of the workflow: local path or remote git ref + sha.
+    /// Added by the remote-workflows feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<WorkflowSource>,
+    pub(crate) params: JsonValue,
+    pub(crate) activities: Vec<ActivityTrace>,
+    pub(crate) cost: CostSummary,
+    pub(crate) error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
-struct CostSummary {
-    total_eur: f64,
-    input_tokens: u64,
-    output_tokens: u64,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct CostSummary {
+    pub(crate) total_eur: f64,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ActivityTrace {
-    activity_id: String,
-    step_name: String,
-    kind: StepKind,
-    status: &'static str,
-    started_at: DateTime<Utc>,
-    ended_at: DateTime<Utc>,
-    duration_ms: u128,
-    attempts: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    route: Option<String>,
-    input_summary: JsonValue,
-    output_summary: JsonValue,
-    output: JsonValue,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cost_eur: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tokens: Option<TokenUsage>,
-    error: Option<String>,
-    notes: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ActivityTrace {
+    pub(crate) activity_id: String,
+    pub(crate) step_name: String,
+    pub(crate) kind: StepKind,
+    pub(crate) status: String,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) ended_at: DateTime<Utc>,
+    pub(crate) duration_ms: u128,
+    pub(crate) attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<String>,
+    /// Task queue the activity was dispatched to (Phase 4 routing).
+    /// Phase 7 records it so traces document where each step actually
+    /// ran. `None` for legacy traces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_queue: Option<String>,
+    /// Worker identity derived from `task_queue` (Phase 7). `None` for
+    /// legacy traces or unrecognised queue names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) worker_identity: Option<WorkerIdentity>,
+    pub(crate) input_summary: JsonValue,
+    pub(crate) output_summary: JsonValue,
+    pub(crate) output: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cost_eur: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tokens: Option<TokenUsage>,
+    pub(crate) error: Option<String>,
+    pub(crate) notes: Option<String>,
 }
 
-/// Outcome of `execute_workflow` — used by both the CLI verb and the
-/// HTTP server (`cori serve start`).
-#[allow(dead_code)] // `run_id` mirrors what the caller passed in.
-pub(crate) struct RunResult {
-    pub run_id: String,
-    pub trace: RunTrace,
-    pub status: &'static str,
-}
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
-/// Generate a fresh run id. Exposed so the HTTP server can return it to
-/// the client before `execute_workflow` actually starts.
-pub(crate) fn new_run_id() -> String {
-    format!("run_{}", uuid_like())
-}
-
-/// Execute one workflow run, recording the trace into the registry.
-///
-/// `verbose=true` prints per-step status to stdout (CLI behaviour);
-/// `verbose=false` is silent (HTTP server behaviour). The returned
-/// `RunResult` always contains the same trace that was persisted.
-pub(crate) fn execute_workflow(
-    workflow_id: &str,
-    initial_params: JsonValue,
+pub fn run(
+    path: String,
+    params: Vec<String>,
+    json_out: bool,
     dry_run_mode: bool,
-    verbose: bool,
-    run_id: Option<String>,
-) -> Result<RunResult> {
-    let mut reg = registry::open()?;
-    let Some(detail) = reg.get(workflow_id)? else {
-        bail!(
-            "no workflow with id `{workflow_id}`. Run `cori workflows list` to see registered workflows."
-        );
-    };
-    let compiled = detail.compiled;
-    let source_path = PathBuf::from(&detail.source_path);
-    if !source_path.is_dir() {
-        bail!(
-            "registered source path `{}` no longer exists — re-run `cori workflows register {}`",
-            source_path.display(),
-            workflow_id
-        );
+    update: bool,
+    assume_yes: bool,
+) -> Result<()> {
+    let (resolved, mut loaded) = workflow_loader::resolve_arg(&path, update)?;
+
+    // Consent gate (remote only): runs after compilation (cheap, no
+    // user code) but before any broker / Temporal / network work.
+    if let Some(rr) = resolved.remote.as_ref()
+        && !remote::trust::is_trusted(&rr.spec, &rr.sha)?
+    {
+        let auto_yes = assume_yes || remote::trust::assume_yes_env();
+        let agreed = if auto_yes {
+            true
+        } else {
+            remote::trust::prompt_consent(
+                &rr.spec,
+                &rr.sha,
+                &loaded.absolute_path,
+                &loaded.compiled,
+            )?
+        };
+        if !agreed {
+            bail!("consent declined; not running remote workflow");
+        }
+        remote::trust::record_consent(
+            &rr.spec,
+            &rr.sha,
+            remote::trust::declared_capability_strings(&loaded.compiled),
+        )?;
     }
 
-    // Resolve the Deno runtime once.
+    let initial_params = build_initial_input(&loaded.compiled, &params)?;
+
+    cli_runtime::ensure_installed()?;
     let runtime_root = paths::runtime_dir()?;
-    let runtime = runtime::Runtime::resolve(&runtime_root).map_err(|e| {
+    let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
         anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  export CORI_DENO=$(which deno)"
+            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
+             export CORI_DENO=$(which deno)"
         )
     })?;
 
-    // Resolve LLM credentials: env > ~/.cori/config.toml.
-    let credentials = resolve_llm_credentials()?;
+    let credentials = resolve_llm_credentials();
     let llm_opts = LlmOptions {
         credentials: credentials.clone(),
         trigger: Some(TriggerContext::Cli),
     };
 
-    // Discover + validate capabilities before running anything.
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &compiled.required_cli_binaries, &credentials);
-    let missing = capabilities::validate(
-        &caps,
-        &compiled.required_cli_binaries,
-        &compiled.required_mcp_servers,
-        &compiled.required_llm_providers,
-    );
+    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
 
-    if verbose {
-        print_capability_banner(&caps, &compiled);
+    if !json_out {
+        print_capability_banner(&caps, &loaded.compiled);
         if dry_run_mode {
             println!("DRY RUN — no external calls (cli/mcp_tool/llm steps return mocked output)");
         }
+        if loaded.from_cache {
+            tracing::debug!("compiled workflow loaded from cache");
+        }
     }
 
+    let missing = capabilities::validate(
+        &caps,
+        &loaded.compiled.required_cli_binaries,
+        &loaded.compiled.required_mcp_servers,
+        &loaded.compiled.required_llm_providers,
+    );
     if !missing.is_empty() {
         if dry_run_mode {
-            if verbose {
+            if !json_out {
                 eprintln!(
-                    "ℹ workflow `{workflow_id}` is missing capabilities; --dry-run ignores them:"
+                    "ℹ workflow `{}` is missing capabilities; --dry-run ignores them:",
+                    loaded.folder_name
                 );
                 for m in &missing {
                     eprintln!("  · {m}");
                 }
             }
         } else {
-            if verbose {
+            if !json_out {
                 eprintln!(
-                    "✗ workflow `{workflow_id}` requires capabilities that are not available:"
+                    "✗ workflow `{}` requires capabilities that are not available:",
+                    loaded.folder_name
                 );
                 for m in &missing {
                     eprintln!("  · {m}");
@@ -190,103 +217,151 @@ pub(crate) fn execute_workflow(
         }
     }
 
-    // Pre-flight: verify the Temporal dev server is reachable before we
-    // record a placeholder "running" row. This turns the buried tonic
-    // transport error into a clean actionable message and avoids
-    // littering the ledger with failed-before-it-started runs.
-    let temporal_target = std::env::var("CORI_TEMPORAL_TARGET")
-        .unwrap_or_else(|_| DEFAULT_TEMPORAL_TARGET.to_string());
-    if let Err(e) = preflight_check(&temporal_target, std::time::Duration::from_millis(500)) {
-        if verbose {
-            eprintln!("✗ Temporal not reachable at {temporal_target}");
+    // Phase 6 preflight: presence is necessary but not sufficient —
+    // CLI / OAuth tokens may have expired since `cori login`. Probe
+    // authed state via the local capability report and bail with the
+    // same actionable lines `cori check` prints.
+    if !dry_run_mode {
+        let credentials_dir_for_check = paths::credentials_dir()?;
+        let probe_identity = OsUser
+            .resolve()
+            .context("resolving OS user identity for preflight auth check")?;
+        let probe_report = CapabilityReport::from_capabilities_with(
+            probe_identity,
+            &caps,
+            Some(&credentials_dir_for_check),
+        );
+        let mut needs_login: Vec<String> = Vec::new();
+        for cli in &loaded.compiled.required_cli_binaries {
+            if let Some(c) = probe_report.capabilities.iter().find(|c| &c.id == cli)
+                && !c.authed
+            {
+                needs_login.push(cli.clone());
+            }
+        }
+        for mcp in &loaded.compiled.required_mcp_servers {
+            if let Some(c) = probe_report.capabilities.iter().find(|c| &c.id == mcp)
+                && !c.authed
+            {
+                needs_login.push(mcp.clone());
+            }
+        }
+        if !needs_login.is_empty() {
+            if !json_out {
+                eprintln!(
+                    "✗ workflow `{}` has capabilities that need sign-in:",
+                    loaded.folder_name
+                );
+                for id in &needs_login {
+                    eprintln!("  · `{id}` needs sign-in — run: cori login {id}");
+                }
+            }
+            bail!("capabilities need sign-in — run `cori login <id>` and try again");
+        }
+    }
+
+    let endpoint = temporal_endpoint::resolve()?;
+    if let Err(e) = preflight_check(&endpoint.target, std::time::Duration::from_millis(500)) {
+        if !json_out {
+            eprintln!("✗ Temporal not reachable at {}", endpoint.target);
             for line in format!("{e:#}").lines() {
                 eprintln!("  {line}");
             }
         }
-        bail!("Temporal server unavailable — start it with `temporal server start-dev`");
+        bail!("Temporal server unavailable");
     }
 
-    let run_id = run_id.unwrap_or_else(new_run_id);
+    // Identity of the requesting user → task queue for this run.
+    let identity = OsUser
+        .resolve()
+        .context("resolving OS user identity for this run")?;
+    let user_id = match &identity {
+        WorkerIdentity::Person { user_id } => user_id.clone(),
+        // `OsUser` only ever returns `Person`; unreachable in practice.
+        WorkerIdentity::Service { pool } => pool.clone(),
+    };
+    let task_queue = task_queue_for(&identity);
+
+    // Planner (Phase 4): assign each step's `task_queue` from its
+    // declared `Placement` and the cluster view. The ephemeral worker
+    // this process spins up always polls `task_queue`, so we register
+    // it as a self-report so the planner prefers it for `Anywhere`
+    // steps and any capabilities it advertises locally.
+    let mut cluster = planner::ClusterView::load().unwrap_or_default();
+    let self_report = CapabilityReport::from_capabilities_with(
+        identity.clone(),
+        &caps,
+        Some(&paths::credentials_dir()?),
+    );
+    cluster.add_self(self_report);
+    let assignments = match planner::assign_queues(&mut loaded.compiled, &identity, &cluster) {
+        Ok(a) => a,
+        Err(e) => {
+            if !json_out {
+                eprintln!("✗ cannot plan workflow `{}`:", loaded.folder_name);
+                eprintln!("  · {e}");
+            }
+            bail!("placement failed");
+        }
+    };
+    if !json_out {
+        print_plan_summary(&assignments);
+    }
+
+    let run_id = new_run_id();
     let started_at = Utc::now();
     let start_instant = Instant::now();
 
-    // Insert a placeholder "running" row so callers polling
-    // `cori runs show <run_id>` (and the HTTP API) can see the run mid-flight.
-    let placeholder = serde_json::json!({
-        "run_id": run_id,
-        "workflow_id": compiled.manifest.id,
-        "workflow_version": detail.version,
-        "status": "running",
-        "trigger": "cli",
-        "dry_run": dry_run_mode,
-        "started_at": started_at,
-        "activities": [],
-    });
-    let _ = reg.record_run(
-        &run_id,
-        &compiled.manifest.id,
-        started_at,
-        None,
-        "running",
-        &placeholder.to_string(),
-    );
-
-    let mut activities: Vec<ActivityTrace> = Vec::with_capacity(compiled.steps.len());
-    let mut last_output: JsonValue = JsonValue::Null;
-    let mut run_status: &'static str = "succeeded";
-    let mut run_error: Option<String> = None;
-    let mut total_cost_eur: f64 = 0.0;
-    let mut had_cost: bool = false;
-    let mut total_tokens: TokenUsage = TokenUsage::default();
-
-    if verbose {
-        println!("Running {} (v{})…", compiled.manifest.id, detail.version);
-    }
-
-    // Set the process-wide broker context. Activities reach into this
-    // when Temporal invokes them on the worker side.
     let broker_ctx = BrokerCtx {
         runtime: runtime.clone(),
         caps: caps.clone(),
         llm_opts: llm_opts.clone(),
-        source_root: source_path.clone(),
+        source_root: loaded.absolute_path.clone(),
+        credentials_dir: paths::credentials_dir()?,
     };
-    // First-call wins. Subsequent runs in the same process reuse the
-    // existing slot — that's intentional because the daemon also calls
-    // this code path.
     let _ = set_broker_ctx(broker_ctx);
 
-    // Build a fresh tokio runtime per `cori run`. The Temporal worker's
-    // poll future is !Send and we don't want it to interleave with the
-    // CLI's outer thread.
+    if !json_out {
+        println!(
+            "Running {} (content {})…",
+            loaded.compiled.manifest.id,
+            &loaded.content_hash[..8.min(loaded.content_hash.len())]
+        );
+    }
+
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting tokio runtime for Temporal worker")?;
 
     let workflow_input = WorkflowInput {
-        workflow_id: compiled.manifest.id.clone(),
-        workflow_version: detail.version,
-        compiled_dag: compiled.clone(),
+        workflow_id: loaded.compiled.manifest.id.clone(),
+        workflow_content_hash: Some(loaded.content_hash.clone()),
+        user_id: user_id.clone(),
+        compiled_dag: loaded.compiled.clone(),
         user_params: initial_params.clone(),
         dry_run: dry_run_mode,
+        reauth_timeout_secs: std::env::var("CORI_REAUTH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok()),
     };
 
     let workflow_output_res: Result<WorkflowOutput> = tokio_rt.block_on(async {
         let temporal_rt = CoriTemporalRuntime::connect(
-            temporal_target.clone(),
+            endpoint.target.clone(),
             DEFAULT_NAMESPACE,
-            DEFAULT_TASK_QUEUE,
+            task_queue.clone(),
         )
         .await?;
         run_workflow_once(&temporal_rt, run_id.clone(), workflow_input).await
     });
 
+    let mut run_status: String = "succeeded".to_string();
+    let mut run_error: Option<String> = None;
     let workflow_output = match workflow_output_res {
         Ok(o) => o,
         Err(e) => {
-            // Connectivity / startup failures show as a failed run.
-            run_status = "failed";
+            run_status = "failed".to_string();
             run_error = Some(format!("{e:#}"));
             WorkflowOutput {
                 run_id: run_id.clone(),
@@ -298,12 +373,19 @@ pub(crate) fn execute_workflow(
         }
     };
 
-    // Map workflow-level summaries into the user-facing trace rows.
-    // Each `ActivitySummary` carries wall-clock timestamps recorded
-    // inside the activity (the workflow body itself never reads a
-    // clock). For builtin/failed steps without timestamps we fall back
-    // to a cursor walked forward from the run's started_at.
+    let mut activities: Vec<ActivityTrace> = Vec::with_capacity(workflow_output.activities.len());
+    let mut total_cost_eur: f64 = 0.0;
+    let mut total_tokens = TokenUsage::default();
     let mut cursor = started_at;
+
+    // Phase 7: enrich each activity row with the queue/worker it was
+    // dispatched to. The planner already assigned task_queue per step;
+    // we map back by `activity_id`.
+    let assignment_by_id: std::collections::HashMap<&str, &planner::StepAssignment> = assignments
+        .iter()
+        .map(|a| (a.activity_id.as_str(), a))
+        .collect();
+
     for summary in workflow_output.activities {
         let step_started_at = summary.started_at.unwrap_or(cursor);
         let duration_ms = summary.duration_ms as u128;
@@ -315,36 +397,38 @@ pub(crate) fn execute_workflow(
 
         if let Some(c) = summary.cost_eur {
             total_cost_eur += c;
-            had_cost = true;
         }
         if let Some(u) = summary.usage {
             total_tokens = total_tokens + u;
         }
-        if summary.status == "ok" {
-            last_output = summary.output.clone();
-        }
 
-        if verbose {
+        if !json_out {
             print_step_summary(&summary);
         }
 
-        let status_str: &'static str = match summary.status.as_str() {
-            "ok" => "ok",
-            "skipped" => "skipped",
-            _ => "failed",
-        };
         let note = summary.notes.first().cloned();
+
+        let (task_queue_field, worker_identity_field) =
+            match assignment_by_id.get(summary.activity_id.as_str()) {
+                Some(a) => (
+                    Some(a.task_queue.clone()),
+                    identity_from_queue(&a.task_queue),
+                ),
+                None => (None, None),
+            };
 
         activities.push(ActivityTrace {
             activity_id: summary.activity_id,
             step_name: summary.step_name,
             kind: summary.kind,
-            status: status_str,
+            status: summary.status,
             started_at: step_started_at,
             ended_at: step_ended_at,
             duration_ms,
             attempts: summary.attempts,
             route: summary.route,
+            task_queue: task_queue_field,
+            worker_identity: worker_identity_field,
             input_summary: summarize(&summary.input),
             output_summary: summarize(&summary.output),
             output: summary.output,
@@ -356,23 +440,24 @@ pub(crate) fn execute_workflow(
     }
 
     if workflow_output.status == "failed" && run_status != "failed" {
-        run_status = "failed";
+        run_status = "failed".to_string();
         run_error = workflow_output.error;
     }
 
     let ended_at = Utc::now();
     let total = start_instant.elapsed();
-    let _ = had_cost;
     let trace = RunTrace {
         run_id: run_id.clone(),
-        workflow_id: compiled.manifest.id.clone(),
-        workflow_version: detail.version,
-        status: run_status,
-        trigger: "cli",
+        workflow_id: loaded.compiled.manifest.id.clone(),
+        workflow_content_hash: Some(loaded.content_hash.clone()),
+        status: run_status.clone(),
+        trigger: "cli".to_string(),
         dry_run: dry_run_mode,
+        requesting_identity: Some(identity.clone()),
         started_at,
         ended_at,
         duration_ms: total.as_millis(),
+        source: Some(loaded.source.clone()),
         params: initial_params,
         activities,
         cost: CostSummary {
@@ -383,64 +468,73 @@ pub(crate) fn execute_workflow(
         error: run_error.clone(),
     };
 
-    let trace_json = serde_json::to_string(&trace).context("serializing run trace")?;
-    if let Err(e) = reg.record_run(
-        &run_id,
-        &compiled.manifest.id,
-        started_at,
-        Some(ended_at),
-        run_status,
-        &trace_json,
-    ) && verbose
-    {
-        eprintln!("warning: could not store run trace: {e}");
-    }
+    persist_trace(&loaded, started_at, &trace)?;
 
-    if verbose {
-        println!();
-        if run_status == "succeeded" {
-            print_final_output(&last_output);
-            if had_cost {
-                println!(
-                    "✓ run {run_id} completed in {ms}ms (cost: €{cost:.4})",
-                    ms = total.as_millis(),
-                    cost = total_cost_eur,
-                );
-            } else {
-                println!("✓ run {run_id} completed in {ms}ms", ms = total.as_millis());
-            }
-        } else {
-            println!("✗ run {run_id} failed after {ms}ms", ms = total.as_millis());
-        }
-    }
-
-    Ok(RunResult {
-        run_id,
-        trace,
-        status: run_status,
-    })
-}
-
-/// CLI entry point — wraps `execute_workflow` with param parsing and
-/// optional JSON-output rendering.
-pub fn run(id: &str, params: Vec<String>, json_out: bool, dry_run_mode: bool) -> Result<()> {
-    // Pre-parse params so a bad CLI invocation fails before we spin up
-    // the Deno runtime or write a placeholder run row.
-    let reg = registry::open()?;
-    let Some(detail) = reg.get(id)? else {
-        bail!("no workflow with id `{id}`. Run `cori workflows list` to see registered workflows.");
-    };
-    let initial_params = build_initial_input(&detail.compiled, &params)?;
-    drop(reg);
-
-    let result = execute_workflow(id, initial_params, dry_run_mode, !json_out, None)?;
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&result.trace)?);
+        println!("{}", serde_json::to_string_pretty(&trace)?);
+    } else if let Some(err) = &run_error {
+        eprintln!("\n✗ run failed: {err}");
+    } else {
+        print_final_output(&trace);
     }
-    if result.status == "failed" {
+
+    if run_status == "failed" {
         std::process::exit(1);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn new_run_id() -> String {
+    format!("run_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn persist_trace(
+    loaded: &workflow_loader::LoadedWorkflow,
+    started_at: DateTime<Utc>,
+    trace: &RunTrace,
+) -> Result<()> {
+    let key = workflow_loader::loaded_run_history_key(loaded);
+    let dir = paths::runs_dir()?.join(&key);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating `{}`", dir.display()))?;
+
+    // Windows-friendly filename: 2026-05-28T14-22-01Z.json
+    let filename = format!("{}.json", started_at.format("%Y-%m-%dT%H-%M-%SZ"));
+    let path = dir.join(&filename);
+
+    let bytes = serde_json::to_vec_pretty(trace).context("serializing run trace")?;
+    let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), filename));
+    std::fs::write(&tmp, &bytes).with_context(|| format!("writing `{}`", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("renaming into `{}`", path.display()))?;
+    Ok(())
+}
+
+fn print_plan_summary(assignments: &[planner::StepAssignment]) {
+    use cori_protocol::Placement;
+    let mut by_queue: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for a in assignments {
+        by_queue
+            .entry(a.task_queue.as_str())
+            .or_default()
+            .push(a.step_name.as_str());
+    }
+    let one_queue = by_queue.len() == 1;
+    if one_queue {
+        // Solo / single-queue case: don't clutter the banner.
+        return;
+    }
+    println!("Plan:");
+    for a in assignments {
+        let p = match &a.placement {
+            Placement::Anywhere => "anywhere".to_string(),
+            Placement::RequiresLocalFs => "local_fs".to_string(),
+            Placement::RequiresCapability { id } => format!("needs:{id}"),
+        };
+        println!("  · {} ({}) → {}", a.step_name, p, a.task_queue);
+    }
 }
 
 fn print_capability_banner(caps: &Capabilities, workflow: &CompiledWorkflow) {
@@ -481,7 +575,7 @@ fn print_capability_banner(caps: &Capabilities, workflow: &CompiledWorkflow) {
     );
 }
 
-fn print_step_summary(summary: &cori_worker::workflow::ActivitySummary) {
+fn print_step_summary(summary: &ActivitySummary) {
     let cost = match summary.cost_eur {
         Some(c) if c > 0.0 => format!(", €{c:.4}"),
         _ => String::new(),
@@ -509,8 +603,31 @@ fn print_step_summary(summary: &cori_worker::workflow::ActivitySummary) {
     }
 }
 
+fn print_final_output(trace: &RunTrace) {
+    let final_output = trace
+        .activities
+        .iter()
+        .rev()
+        .find(|a| a.status == "ok")
+        .map(|a| &a.output)
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    let pretty = serde_json::to_string(&final_output).unwrap_or_else(|_| final_output.to_string());
+    println!("Output: {pretty}");
+}
+
+fn kind_label(kind: StepKind) -> &'static str {
+    match kind {
+        StepKind::Cli => "cli",
+        StepKind::McpTool => "mcp_tool",
+        StepKind::Code => "code",
+        StepKind::Llm => "llm",
+        StepKind::Builtin => "builtin",
+    }
+}
+
 /// Read LLM keys from `~/.cori/config.toml` and overlay env vars on top.
-pub(crate) fn resolve_llm_credentials() -> Result<LlmCredentials> {
+pub(crate) fn resolve_llm_credentials() -> LlmCredentials {
     let mut from_config = LlmCredentials::default();
     if let Ok(cfg) = Config::load() {
         from_config.openai_api_key = cfg
@@ -526,22 +643,7 @@ pub(crate) fn resolve_llm_credentials() -> Result<LlmCredentials> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
     }
-    Ok(LlmCredentials::from_env().or_fill_from(&from_config))
-}
-
-fn print_final_output(value: &JsonValue) {
-    let pretty = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-    println!("Output: {pretty}");
-}
-
-fn kind_label(kind: StepKind) -> &'static str {
-    match kind {
-        StepKind::Cli => "cli",
-        StepKind::McpTool => "mcp_tool",
-        StepKind::Code => "code",
-        StepKind::Llm => "llm",
-        StepKind::Builtin => "builtin",
-    }
+    LlmCredentials::from_env().or_fill_from(&from_config)
 }
 
 /// Build the input to step 1 from manifest defaults overlaid with CLI
@@ -565,10 +667,8 @@ fn build_initial_input(workflow: &CompiledWorkflow, cli_args: &[String]) -> Resu
         if k.is_empty() {
             bail!("argument `{raw}` has an empty key");
         }
-        let value = parse_arg_value(v);
-        obj.insert(k.to_string(), value);
+        obj.insert(k.to_string(), parse_arg_value(v));
     }
-
     Ok(JsonValue::Object(obj))
 }
 
@@ -580,9 +680,8 @@ fn parse_arg_value(s: &str) -> JsonValue {
     }
 }
 
-/// Compact summary of a JSON value for inclusion in trace `input_summary`
-/// / `output_summary` fields. Mirrors the same shape used by
-/// `commands::runs::show`.
+/// Compact summary of a JSON value for inclusion in trace
+/// `input_summary` / `output_summary` fields.
 fn summarize(v: &JsonValue) -> JsonValue {
     match v {
         JsonValue::Array(a) => serde_json::json!({ "type": "array", "len": a.len() }),
@@ -597,18 +696,6 @@ fn summarize(v: &JsonValue) -> JsonValue {
         }),
         other => other.clone(),
     }
-}
-
-/// Tiny RFC-4122 v4-ish id without pulling in a uuid dep.
-fn uuid_like() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mixed = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(pid);
-    format!("{mixed:032x}")
 }
 
 #[cfg(test)]

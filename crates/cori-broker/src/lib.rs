@@ -25,11 +25,15 @@
 
 pub mod capabilities;
 pub mod cli;
+pub mod cli_auth;
 pub mod code;
+pub mod credentials;
 pub mod dispatch;
 pub mod dry_run;
+pub mod identity;
 pub mod llm;
 pub mod mcp;
+pub mod oauth;
 pub mod runtime;
 
 use std::time::Duration;
@@ -177,6 +181,21 @@ pub enum BrokerError {
         provider: &'static str,
         attempts: u32,
         reason: String,
+    },
+
+    /// A capability that requires per-user authentication has no usable
+    /// credential for the requesting owner. The CLI surfaces `hint` to
+    /// the user; the Temporal classifier marks this non-retryable so
+    /// retries don't loop while the user goes through `cori login`.
+    /// Phase 6 wires a workflow-side signal handler that catches this
+    /// error type, waits for `cori login`, and resumes the step.
+    #[error("{server_id} needs sign-in for {owner_kind} `{owner_id}` — {hint}")]
+    NeedsReauth {
+        server_id: String,
+        owner_kind: &'static str,
+        owner_id: String,
+        auth_kind: &'static str,
+        hint: String,
     },
 }
 

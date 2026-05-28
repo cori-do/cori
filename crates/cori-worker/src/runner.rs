@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use crate::activities::CoriActivities;
 use crate::runtime::CoriTemporalRuntime;
-use crate::workflow::{CoriRunbookWorkflow, WorkflowInput, WorkflowOutput};
+use crate::workflow::{CoriWorkflow, WorkflowInput, WorkflowOutput};
 
 /// Spin up a worker + start one workflow + await its result.
 ///
@@ -35,7 +35,7 @@ pub async fn run_workflow_once(
     input: WorkflowInput,
 ) -> Result<WorkflowOutput> {
     let worker_options = WorkerOptions::new(rt.task_queue.clone())
-        .register_workflow::<CoriRunbookWorkflow>()
+        .register_workflow::<CoriWorkflow>()
         .register_activities(CoriActivities)
         .build();
     let mut worker = Worker::new(&rt.core, (*rt.client).clone(), worker_options)
@@ -48,7 +48,7 @@ pub async fn run_workflow_once(
             WorkflowStartOptions::new(rt.task_queue.clone(), workflow_id.clone()).build();
         let handle = rt
             .client
-            .start_workflow(CoriRunbookWorkflow::run, input, start_opts)
+            .start_workflow(CoriWorkflow::run, input, start_opts)
             .await
             .map_err(|e| anyhow::Error::new(e).context("starting Cori workflow"))?;
         info!(run_id = ?handle.run_id(), "workflow started");
@@ -100,4 +100,37 @@ pub async fn run_workflow_once(
 
     let (result, _) = tokio::join!(starter, worker_fut);
     result
+}
+
+/// Run a long-lived worker on `rt.task_queue` until SIGINT.
+///
+/// Used by `cori work`: registers the single workflow type + the four
+/// activity handlers and polls forever. Returns `Ok(())` after a clean
+/// shutdown triggered by Ctrl-C, or an error if worker construction
+/// fails.
+pub async fn serve_worker_until_signal(rt: &CoriTemporalRuntime) -> Result<()> {
+    let worker_options = WorkerOptions::new(rt.task_queue.clone())
+        .register_workflow::<CoriWorkflow>()
+        .register_activities(CoriActivities)
+        .build();
+    let mut worker = Worker::new(&rt.core, (*rt.client).clone(), worker_options)
+        .map_err(|e| anyhow::anyhow!("constructing Temporal worker: {e}"))?;
+    let shutdown_handle = worker.shutdown_handle();
+    info!(task_queue = %rt.task_queue, "cori worker polling");
+
+    let signal_listener = async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            warn!("received SIGINT — shutting down worker");
+            shutdown_handle();
+        }
+    };
+
+    let worker_fut = async {
+        if let Err(e) = worker.run().await {
+            warn!(error = %e, "temporal worker exited with error");
+        }
+    };
+
+    let (_, _) = tokio::join!(signal_listener, worker_fut);
+    Ok(())
 }

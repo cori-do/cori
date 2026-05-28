@@ -1,6 +1,6 @@
 //! Manifest schema, parser, and shared workflow types.
 //!
-//! A Cori runbook's `manifest.md` has a YAML frontmatter block (between two
+//! A Cori workflow's `manifest.md` has a YAML frontmatter block (between two
 //! `---` delimiters) followed by a freeform Markdown prose body. This crate
 //! parses the frontmatter into a strongly-typed [`Manifest`] and validates
 //! every field. The prose body is preserved verbatim (so downstream tooling

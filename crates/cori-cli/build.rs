@@ -1,16 +1,12 @@
 //! Build script for the `cori` binary.
 //!
-//! Embeds two file trees into the binary:
+//! Embeds the `skill/` tree into the binary so
+//! `cori skill install --agent <name>` can extract it to the agent's
+//! local skill directory.
 //!
-//! 1. `skill/` — the Cori agent skill, extracted by
-//!    `cori skill install --agent <name>` to the agent's local skill
-//!    directory.
-//! 2. `examples/hello_world/` — the runbook used by `cori demo`,
-//!    extracted to `~/.cori/runbooks/hello_world/` on first run.
-//!
-//! For each tree we walk the directory and generate a Rust slice of
+//! We walk the directory and generate a Rust slice of
 //! `(relative_path, &'static [u8])` tuples written to `$OUT_DIR`. The
-//! emitted modules are picked up by `src/embedded.rs` via `include!`.
+//! emitted module is picked up by `src/embedded.rs` via `include!`.
 //! Storing the file contents directly (rather than a tarball) keeps the
 //! decompression path zero-dep and lets `include_bytes!` deduplicate
 //! identical assets across builds.
@@ -34,11 +30,6 @@ fn main() {
         &repo_root.join("skill"),
         &out_dir.join("skill_files.rs"),
         "SKILL_FILES",
-    );
-    emit_tree(
-        &repo_root.join("examples").join("hello_world"),
-        &out_dir.join("hello_world_files.rs"),
-        "HELLO_WORLD_FILES",
     );
 }
 

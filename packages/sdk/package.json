@@ -1,6 +1,6 @@
 {
   "name": "@cori/sdk",
-  "version": "0.1.0-dev",
+  "version": "0.2.0-dev",
   "description": "TypeScript SDK for authoring Cori workflow steps.",
   "license": "Apache-2.0",
   "type": "module",

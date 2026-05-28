@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Validates runbook directories and compiles them to executable workflow definitions."
+description = "Validates workflow directories and compiles them to executable workflow definitions."
 
 [dependencies]
 anyhow.workspace = true

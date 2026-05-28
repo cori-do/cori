@@ -2,7 +2,7 @@
 
 TypeScript SDK for authoring [Cori](https://github.com/cori-do/cori) workflow steps.
 
-> **Status:** v0.1.0-dev
+> **Status:** v0.2.0-dev
 
 ## Install
 

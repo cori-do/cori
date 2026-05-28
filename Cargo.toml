@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-dev"
+version = "0.2.0-dev"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/cori-do/cori"
@@ -40,6 +40,7 @@ comfy-table = { version = "7", default-features = false }
 sha2 = "0.11"
 hex = "0.4"
 chrono-humanize = "0.2"
+semver = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 ctrlc = { version = "3", features = ["termination"] }
@@ -59,6 +60,13 @@ temporalio-macros = "0.4"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
+
+# Phase 5: credentials + OAuth.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+base64 = "0.22"
+url = "2"
+webbrowser = "1"
+rand = "0.9"
 
 cori-broker = { path = "crates/cori-broker" }
 cori-compiler = { path = "crates/cori-compiler" }

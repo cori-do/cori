@@ -11,7 +11,7 @@
 //! - Deno [`cori_broker::runtime::Runtime`] handle.
 //! - Discovered [`cori_broker::capabilities::Capabilities`].
 //! - LLM credentials wrapped in [`cori_broker::llm::LlmOptions`].
-//! - The on-disk root of the runbook (`source_path`), so an activity
+//! - The on-disk root of the workflow (`source_path`), so an activity
 //!   can resolve `step.source_path` to an absolute file.
 
 use std::path::PathBuf;
@@ -29,8 +29,12 @@ pub struct BrokerCtx {
     pub runtime: Runtime,
     pub caps: Capabilities,
     pub llm_opts: LlmOptions,
-    /// Absolute path to the registered runbook directory.
+    /// Absolute path to the registered workflow directory.
     pub source_root: PathBuf,
+    /// `~/.cori/credentials/` — token-store backing directory used by
+    /// the OAuth subsystem for the encrypted-file fallback and the
+    /// non-secret `index.json` metadata file.
+    pub credentials_dir: PathBuf,
 }
 
 static BROKER_CTX: OnceCell<Arc<BrokerCtx>> = OnceCell::const_new();

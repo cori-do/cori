@@ -1,15 +1,19 @@
 //! The `cori` command-line interface.
 //!
-//! Currently wires up `init --local`, `workflows register|list|show`, and
-//! `config get|set`. Every other verb still prints a "not implemented"
-//! notice so `--help` is accurate.
+//! Phase 2 wires `run`/`runs` against the disk-as-truth layout in
+//! `~/.cori/{cache,runs,runtime,state}`. There is no registry; every
+//! `cori run` compiles (or loads from cache) the workflow folder
+//! supplied on the CLI.
 
 mod commands;
 mod config;
 mod embedded;
 mod paths;
-mod registry;
+mod planner;
+mod remote;
 mod runtime;
+mod temporal_endpoint;
+mod workflow_loader;
 
 use std::path::PathBuf;
 
@@ -25,36 +29,31 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Authenticate against a Cori account (optional in v1).
-    Login,
-    /// Run the bundled hello-world demo workflow.
-    Demo,
     /// Install the Cori skill into a supported agent.
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
     },
-    /// Manage registered workflows.
-    Workflows {
-        #[command(subcommand)]
-        command: WorkflowsCommand,
-    },
-    /// Execute a registered workflow.
+    /// Execute a workflow folder (local path or remote git reference).
     Run {
-        /// ID of a registered workflow.
-        id: String,
+        /// Path to the workflow folder or a remote git ref
+        /// (e.g. `github.com/org/workflows/translate@v1.1.12`).
+        path: String,
         /// Emit the run trace as JSON instead of the friendly table.
         #[arg(long)]
         json: bool,
-        /// Validate the plan without spawning any external process. `cli`,
-        /// `mcp_tool`, and `llm` steps return mocked outputs; `code` and
-        /// `builtin` steps still run for real (they're pure).
+        /// Validate the plan without spawning any external process.
         #[arg(long)]
         dry_run: bool,
+        /// For remote workflows: re-resolve the ref before running.
+        /// No-op for exact tags/shas and for local paths.
+        #[arg(long)]
+        update: bool,
+        /// Skip the first-run consent prompt for remote workflows.
+        /// Equivalent to setting `CORI_ASSUME_YES=1`.
+        #[arg(long = "yes", short = 'y')]
+        assume_yes: bool,
         /// `key=value` parameters forwarded as the input to step 1.
-        ///
-        /// Values are parsed as JSON when possible (numbers, booleans,
-        /// objects, arrays, `null`); otherwise treated as a string.
         #[arg(value_name = "PARAM")]
         params: Vec<String>,
     },
@@ -63,31 +62,54 @@ enum Command {
         #[command(subcommand)]
         command: RunsCommand,
     },
-    /// Run the local Cori stack (Temporal + worker + HTTP server/UI).
-    ///
-    /// This is the entrypoint a solo user runs in one terminal: it
-    /// ensures Temporal is up (spawning a bundled `temporal server
-    /// start-dev` when no external cluster is configured), boots the
-    /// worker daemon, and serves the local HTTP API + web UI.
-    Start {
-        #[command(subcommand)]
-        command: StartCommand,
-    },
-    /// Initialise the local Cori state directory at `~/.cori/`.
-    Init {
-        /// Required in v1; reserves the flag namespace for future modes.
-        #[arg(long)]
-        local: bool,
-    },
     /// Read or write CLI configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Inspect connected workers.
-    Workers {
-        #[command(subcommand)]
-        command: WorkersCommand,
+    /// Put this machine in the loop as a Cori worker.
+    ///
+    /// Default identity is the current OS user (queue
+    /// `cori.user.<id>`). With `--shared <name>`, runs as a shared
+    /// service worker (queue `cori.service.<name>`) whose credentials
+    /// become usable by any authorized user whose run routes here.
+    Work {
+        /// Run as a shared service worker named `<name>`.
+        #[arg(long, value_name = "NAME")]
+        shared: Option<String>,
+    },
+    /// Sign in to a capability (MCP server, CLI, LLM provider).
+    ///
+    /// Idempotent and refresh-aware: rerunning with a still-valid
+    /// token is a no-op. Tokens are stored in the OS keychain (with an
+    /// encrypted-file fallback) and scoped to the current OS user.
+    Login {
+        /// Capability id — e.g. `notion`, `gws`, `openai`.
+        capability: String,
+    },
+    /// Preflight a workflow folder — print per-step readiness and
+    /// capability auth status without starting the run. Exit code
+    /// reflects readiness (`0` ready, `2` not ready).
+    Check {
+        /// Path to the workflow folder or remote git ref.
+        path: String,
+        /// For remote refs: re-resolve before preflight.
+        #[arg(long)]
+        update: bool,
+        /// Skip the consent prompt for remote workflows.
+        #[arg(long = "yes", short = 'y')]
+        assume_yes: bool,
+    },
+    /// Print machine-scoped overview: endpoint, identity, capabilities,
+    /// and workers currently visible on the cluster.
+    Status,
+    /// Inspect a workflow folder — manifest, steps, required
+    /// capabilities, and recent runs. Accepts a remote ref; if the
+    /// ref has not been fetched locally, history is shown but the
+    /// workflow body is omitted.
+    Show {
+        /// Path to the workflow folder or remote git ref.
+        path: String,
     },
 }
 
@@ -102,54 +124,6 @@ enum SkillCommand {
         /// conventional path. Mutually exclusive with `--agent`.
         #[arg(long)]
         path: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum WorkflowsCommand {
-    /// Validate and register a runbook directory.
-    Register {
-        /// Path to the runbook directory (containing `manifest.md` and
-        /// `steps/`).
-        path: PathBuf,
-    },
-    /// List every registered workflow.
-    List {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show a registered workflow's manifest or a single field.
-    Show {
-        /// Workflow id.
-        id: String,
-        /// Print only a single top-level field or `## <section>` body.
-        #[arg(long)]
-        field: Option<String>,
-        /// Emit the compiled JSON representation instead of the manifest.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum StartCommand {
-    /// Run everything locally on this machine. The only mode in v1.
-    ///
-    /// Boots a bundled Temporal (or attaches to an external one declared
-    /// via `temporal.host`), starts the worker daemon, and — unless
-    /// `--no-ui` is set — also serves the HTTP API + web UI on
-    /// `127.0.0.1:7510`. Stops cleanly on Ctrl-C.
-    Local {
-        /// HTTP/UI bind address. Defaults to `127.0.0.1:7510`.
-        #[arg(long)]
-        bind: Option<String>,
-        /// Allow binding to a non-loopback address. There is no auth in
-        /// v1 — only set this if you understand what you're exposing.
-        #[arg(long)]
-        insecure: bool,
-        /// Run only the worker; do not start the embedded HTTP server.
-        #[arg(long)]
-        no_ui: bool,
     },
 }
 
@@ -181,11 +155,6 @@ enum RunsCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum WorkersCommand {
-    Status,
-}
-
-#[derive(Debug, Subcommand)]
 enum ConfigCommand {
     /// Print one key or every key.
     Get { key: Option<String> },
@@ -212,33 +181,18 @@ fn main() -> anyhow::Result<()> {
             println!();
             Ok(())
         }
-        Some(Command::Init { local }) => commands::init::run(local),
-        Some(Command::Workflows { command }) => match command {
-            WorkflowsCommand::Register { path } => commands::workflows::register(&path),
-            WorkflowsCommand::List { json } => commands::workflows::list(json),
-            WorkflowsCommand::Show { id, field, json } => {
-                commands::workflows::show(&id, field.as_deref(), json)
-            }
-        },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Get { key } => commands::config::get(key.as_deref()),
             ConfigCommand::Set { key, value } => commands::config::set(&key, &value),
         },
         Some(Command::Run {
-            id,
+            path,
             json,
             dry_run,
+            update,
+            assume_yes,
             params,
-        }) => commands::run::run(&id, params, json, dry_run),
-        Some(Command::Start { command }) => match command {
-            StartCommand::Local {
-                bind,
-                insecure,
-                no_ui,
-            } => commands::start::local(bind, insecure, no_ui),
-        },
-        Some(Command::Demo) => commands::demo::run(),
-        Some(Command::Login) => commands::login::run(),
+        }) => commands::run::run(path, params, json, dry_run, update, assume_yes),
         Some(Command::Skill { command }) => match command {
             SkillCommand::Install { agent, path } => commands::skill::install(agent, path),
         },
@@ -255,23 +209,14 @@ fn main() -> anyhow::Result<()> {
                 json,
             } => commands::runs::show(&run_id, activity.as_deref(), full, json),
         },
-        Some(other) => {
-            let name = match other {
-                Command::Workers { .. } => "workers",
-                Command::Login
-                | Command::Demo
-                | Command::Skill { .. }
-                | Command::Init { .. }
-                | Command::Run { .. }
-                | Command::Runs { .. }
-                | Command::Workflows { .. }
-                | Command::Config { .. }
-                | Command::Start { .. } => {
-                    unreachable!()
-                }
-            };
-            eprintln!("`cori {name}` is not implemented yet — see cori-v1-roadmap.md");
-            std::process::exit(2);
-        }
+        Some(Command::Work { shared }) => commands::work::work(shared),
+        Some(Command::Login { capability }) => commands::login::login(&capability),
+        Some(Command::Check {
+            path,
+            update,
+            assume_yes,
+        }) => commands::check::check(path, update, assume_yes),
+        Some(Command::Status) => commands::status::status(),
+        Some(Command::Show { path }) => commands::show::show(path),
     }
 }

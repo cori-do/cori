@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 
 use crate::capabilities::Capabilities;
+use crate::cli_auth::{self, AuthState};
 use crate::dispatch::{self, RunnerMode};
 use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
@@ -40,6 +41,7 @@ pub fn run(
     capabilities: &Capabilities,
     step_file_path: &Path,
     input: &JsonValue,
+    user_id: &str,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -73,6 +75,20 @@ pub fn run(
             });
         }
     };
+
+    // 2b. Per-CLI auth check (Phase 5). For known CLIs that carry their
+    //     own login state (e.g. `gws`), refuse to spawn when the CLI is
+    //     not authenticated so the user sees a clean `NeedsReauth`
+    //     instead of an opaque 401 from the CLI itself.
+    if let AuthState::NeedsReauth { hint } = cli_auth::check_known(&binary) {
+        return Err(BrokerError::NeedsReauth {
+            server_id: binary.clone(),
+            owner_kind: "user",
+            owner_id: user_id.to_string(),
+            auth_kind: "cli",
+            hint,
+        });
+    }
 
     // 3. Spawn.
     let mut cmd = Command::new(&resolved_bin);
