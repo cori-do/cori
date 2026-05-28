@@ -1,24 +1,15 @@
 ---
-name: cori
-description: Capture work done in this conversation as a reusable, executable Cori workflow, and drive the local `cori` CLI to run, inspect, and manage workflows. Use whenever the user types `save_workflow`, `list_workflow`, `search_workflow`, or `trigger_workflow`. Also use whenever the user says anything like "save this as a Cori workflow", "make this re-runnable", "run my Cori workflow X", "what Cori workflows do I have", or refers to Cori workflows. Be proactive — when the user has just finished a multi-step task that they're plausibly going to do again (data pipeline, deployment, report generation, ticket triage, content processing, file conversion, API workflow), offer to save it as a Cori workflow at the end. The skill writes workflow directories with TypeScript step files and shells out to the `cori` CLI to validate, run, and inspect them.
+name: cori_save_workflow
+description: Capture work done in this conversation as a reusable, executable Cori workflow. Use whenever the user asks to "save this as a Cori workflow", "turn this into a runbook", "make this re-runnable", or any equivalent phrasing. Be proactive — when the user has just finished a multi-step task that they're plausibly going to do again (data pipeline, deployment, report generation, ticket triage, content processing, file conversion, API workflow), offer to save it as a Cori workflow at the end. The skill writes a workflow directory with TypeScript step files and shells out to the `cori` CLI to validate it.
 ---
 
 # Cori
 
 Cori turns one-off agent conversations into deterministic, executable workflows. The thesis: **agents at design time, deterministic execution at runtime.** You (the agent) do the hard thinking once during the conversation; Cori captures the *result* as typed TypeScript step files that run on a Cori worker, with Temporal handling durability under the hood — no LLM in the loop at runtime unless the workflow explicitly needs one.
 
-A Cori workflow is a **folder on disk**. There is no registry. You run a workflow by giving `cori run` a path (or a git ref). The folder can live anywhere — typically inside a git repo the user already owns. The skill's primary job is to *create* that folder cleanly from the conversation.
+A Cori workflow is a **folder on disk**. There is no registry. You run a workflow by giving `cori run` a path (or a git ref). The folder can live anywhere — typically inside a git repo the user already owns. The skill's job is to *create* that folder cleanly from the conversation.
 
-This skill exposes one demanding command (`save_workflow`) and three thin pass-throughs to the CLI. There's also a proactive offer pattern. Every command maps to a section below.
-
-| Command | Purpose |
-|---|---|
-| `save_workflow` | Distill the current conversation into a Cori workflow directory |
-| `list_workflow` | Show workflows on disk + recent run history |
-| `search_workflow "<query>"` | Find the workflow folder that best matches a natural-language description |
-| `trigger_workflow <path-or-ref>` | Run a Cori workflow, collect parameters, show the plan, execute on approval |
-
-There is also a proactive pattern (no command): when the user has just finished a non-trivial repeatable task, offer to save it. See **Proactive save offer** below.
+The skill has one job: distill the current conversation into a Cori workflow directory. It also follows a proactive offer pattern — when the user has just finished a non-trivial repeatable task, offer to save it. See **Proactive save offer** below.
 
 ---
 
@@ -78,7 +69,7 @@ The full TS template for each kind is in [`references/activity_kinds.md`](refere
 
 ---
 
-## `save_workflow` — the demanding command
+## Saving a workflow — the procedure
 
 This is the work. Take time. A bad workflow costs the user hours debugging at 3am; a clean workflow runs for years.
 
@@ -213,106 +204,9 @@ cori check <chosen_path>
 
 After `cori check` is green:
 
-> "Saved to `<chosen_path>/`. Try a dry run with `cori run <chosen_path> --dry-run`, or trigger from here with `trigger_workflow <chosen_path>`."
+> "Saved to `<chosen_path>/`. Try a dry run with `cori run <chosen_path> --dry-run`, or run it for real with `cori run <chosen_path>`."
 
 Don't auto-run. Saving and running are separate decisions.
-
----
-
-## `list_workflow`
-
-There is no registry, so "list" means: enumerate workflows the user has on disk + any recent runs.
-
-1. Ask the user where their workflows live, or scan a sensible default (current working directory and any `workflows/` subfolder). Treat any folder containing a `manifest.md` as a workflow folder.
-2. For each candidate, parse its frontmatter (id, name, description, tags) and present a compact table: **name**, **path**, **description**, **last run** (relative time).
-3. For "last run", check `~/.cori/runs/` — the directory name pattern is `<folder>-<8hex(abs_path)>` for local workflows. Use `cori runs list --json` to enumerate run history.
-4. Sort by last-run descending; folders that have never run go last.
-
-If the user has no workflows on disk, say so plainly and suggest they run `save_workflow` at the end of their next repeatable task. Don't apologize.
-
----
-
-## `search_workflow "<query>"`
-
-Semantic search, not keyword match. The user's query is a *description of what they want to do*; find the workflow folder whose purpose matches.
-
-1. Enumerate workflows on disk as in `list_workflow`.
-2. For each, read the manifest frontmatter (`name`, `description`, `tags`) and the prose `## Goal` section.
-3. Rank by semantic fit to the query, not lexical overlap. "the thing we do when the API throws 5xx" should match a workflow called `incident_elevated_error_rate` even with zero shared words.
-4. Return the top 1–3 matches with a one-line rationale per match.
-5. If nothing is a reasonable fit, say so honestly — don't force a match.
-
-End with: "Run the best match with `trigger_workflow <path>`."
-
----
-
-## `trigger_workflow <path-or-ref>`
-
-Load, plan, confirm, execute. **Never skip the confirmation step**, even for trivial workflows. The user-in-the-loop is the safety model.
-
-### Step 1: Load
-
-If the user provided params inline (`trigger_workflow ./translate_sheets spreadsheet_id=ABC123`), capture them. Then:
-
-```bash
-cori show <path-or-ref>
-```
-
-This prints the manifest (parameters, tools, mcp_servers, prose) and a summary of recent runs. If the path doesn't resolve, surface the error.
-
-### Step 2: Collect parameters
-
-For each parameter in the manifest:
-
-- If provided in the trigger command, use that value.
-- Otherwise, prompt the user, showing the description, type, allowed values (for enums), and default. Accept the default if they say "default" or press enter.
-
-If there are more than 4 parameters, batch the prompts.
-
-### Step 3: Show the materialized plan
-
-Substitute the parameters into a plan summary — exact values, no `{placeholders}` visible. Number the steps with the kind in parens:
-
-```
-1. read_source_rows   (cli)  — gws sheets values get on ABC123!Sheet1
-2. translate_rows     (llm)  — gpt-4o-mini, batched 50/call
-3. check_gpsr         (code) — validate against strict rules
-4. ensure_fr_tab      (cli)  — create "Sheet1 (FR)" if missing
-5. write_results      (cli)  — write translated rows + check columns
-
-Estimated LLM cost: ~€0.018 per run (gpt-4o-mini, pass-through to OpenAI).
-```
-
-Frame any cost as **provider pass-through cost**, not Cori cost. Cori v1 doesn't charge for execution.
-
-Then ask explicitly: **"Run this plan? (yes / no / dry-run / edit)"**
-
-- **yes** → execute (Step 4)
-- **dry-run** → `cori run <path> --dry-run …` and show the result, then ask again
-- **no** → stop, confirm nothing changed
-- **edit** → ask what to change, re-materialize, re-ask
-
-### Step 4: Execute
-
-```bash
-cori run <path-or-ref> --json [<param>=<value> …]
-```
-
-Cori streams progress to stderr (visible to the user) and emits a JSON trace to stdout. The trace shape is in [`references/trace_interpretation.md`](references/trace_interpretation.md) — read it the first time you handle a trace in a session.
-
-After the run:
-
-- **Success**: report the workflow name, total duration, total LLM cost, and a one-line summary of what changed (taken from the activity outputs, not invented).
-- **Failure**: identify the failed step, surface its error message, and check the manifest's `## Notes` for guidance. Ask the user whether to retry, skip, or abort.
-- **NeedsReauth**: a step requires sign-in. Tell the user to run `cori login <capability>` in another terminal; the workflow is suspended and will resume automatically (up to 15 min, configurable via `CORI_REAUTH_TIMEOUT_SECS`).
-
-Don't dump the raw JSON. Synthesize.
-
-For the full per-activity payload of a past run, use:
-
-```bash
-cori runs show <run_id> [--activity <activity_id>] [--full]
-```
 
 ---
 
@@ -327,7 +221,7 @@ When the user has just completed a non-trivial task that looks repeatable, offer
 Before offering, silently check `cori --version`.
 
 - **If Cori is installed:** offer with one line:
-  > "Want me to save this as a Cori workflow so you can re-run it? Just say `save_workflow`."
+  > "Want me to save this as a Cori workflow so you can re-run it?"
 - **If Cori is not installed:** offer with the install path:
   > "If you install Cori, you can save this as a reusable workflow: `curl -fsSL https://cli.cori.do/install.sh | bash`."
 
@@ -352,10 +246,6 @@ One offer per conversation, max. Don't nag.
 
 **`cori check` says a CLI binary is missing from `tools_required`.** The compiler enforces the declaration. Add the binary to the manifest's `tools_required` list and re-check.
 
-**`cori run` fails with "no worker on queue …".** A step requires a capability that no worker on this machine provides. Either start one (`cori work`), or ask the user whether someone else operates a shared pool they should target.
-
-**`NeedsReauth` mid-run.** A credential expired. Tell the user to run `cori login <capability>` in another terminal — the suspended workflow will resume automatically.
-
 **A step kind looks wrong on review.** Better to re-decompose than to ship a workflow with an `llm` step that should have been `code` (or vice versa). Fix at Step 7 (review) before disk write.
 
 ---
@@ -364,7 +254,6 @@ One offer per conversation, max. Don't nag.
 
 - [`references/activity_kinds.md`](references/activity_kinds.md) — full TypeScript templates for each activity kind. Read before writing your first step file in a session.
 - [`references/manifest_schema.md`](references/manifest_schema.md) — full YAML frontmatter spec, parameter types, validation rules. Read before writing your first manifest in a session.
-- [`references/trace_interpretation.md`](references/trace_interpretation.md) — the JSON shape `cori run --json` emits and what to surface vs. omit. Read before interpreting your first run trace in a session.
 - [`references/example_workflow.md`](references/example_workflow.md) — a complete, realistic worked example (translate product sheets with a GPSR check). Read for a concrete model of what good output looks like.
 
 ---
@@ -375,7 +264,7 @@ One offer per conversation, max. Don't nag.
 - **The workflow is documentation first, automation second.** A clean manifest read by a human ten times and executed twice is still a win. Write the prose so it stands alone.
 - **Most workflows have zero LLM steps at runtime.** That's the point. The LLM (you) did the work at design time. Only insert an `llm` step where the *runtime data* genuinely needs a model: translating new product descriptions, classifying new tickets, summarizing new documents.
 - **Don't over-parametrize.** Three well-chosen parameters beat ten clever ones. If a parameter makes the manifest harder to read, leave the value inline.
-- **The user is the safety mechanism.** The Step-7 review (before disk write) and the Step-3 plan confirmation (before execution) are the spine of trust. Never collapse them. Never run a workflow you didn't show the user first.
+- **The user is the safety mechanism.** The Step-7 review (before disk write) is the spine of trust. Never skip it. Never write a workflow to disk you didn't show the user first.
 - **Conversations are messy; workflows are clean.** When saving, do the work of cleaning up. Don't preserve the meandering; preserve the distilled procedure.
 - **Be honest about what failed.** If `cori check` rejects the workflow, say so plainly. If a step is wrong, say so. The user values truth over polish.
 - **Builtins are deferred in v1.** The compiler accepts `map` / `for_each` / `branch` / `parallel` / `wait`, but the runtime doesn't execute them yet. If the conversation needs branching or fan-out, flag this to the user before emitting the step — they may prefer a linear workaround for now.
