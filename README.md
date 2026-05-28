@@ -19,7 +19,7 @@ cori run ./translate_product_sheets_fr
 cori run cori-do/workflows/code_only
 ```
 
-> Status: `v0.2.1-dev` — APIs may change.
+> Status: `v0.2.3-dev` — APIs may change.
 
 ---
 
@@ -134,8 +134,9 @@ Four step kinds, covering everything:
 | `mcp`  | Call a tool on an MCP server                  |
 | `llm`  | Ask an LLM (only when you explicitly opt in)  |
 
-See [examples/](examples/) for full working workflows, or [skill/SKILL.md](skill/SKILL.md)
-to teach your agent how to author them.
+See [examples/](examples/) for full working workflows, or [skills/cori_save_workflow/SKILL.md](skills/cori_save_workflow/SKILL.md)
+to teach your agent how to author them. To install the skill into your agent, run
+`npx skills add cori-do/cori`.
 
 ---
 
@@ -185,7 +186,7 @@ crates/        Rust workspace
 packages/      pnpm workspace
   sdk              @cori/sdk — what step files import
   deno-runner      runtime for sandboxed `code` steps
-skill/         agent skill for authoring workflows
+skills/        agent skills for authoring workflows
 examples/      reference workflows
 ```
 

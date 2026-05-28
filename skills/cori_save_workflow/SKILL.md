@@ -27,8 +27,9 @@ cori work  [--shared <pool>]                     # stay online as a worker
 cori login <capability>                          # OAuth/CLI sign-in
 cori status                                      # endpoint, identity, workers, caps
 cori config get|set                              # ~/.cori/config.toml access
-cori skill install                               # install the Cori agent skill
 ```
+
+(The Cori agent skill itself is installed via `npx skills add cori-do/cori`.)
 
 Key behaviours to remember:
 

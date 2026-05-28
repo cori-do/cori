@@ -43,8 +43,9 @@ cori work [--shared <name>]                                # put this machine in
 cori login <capability>                                    # OAuth/CLI sign-in
 cori status                                                # machine: endpoint + identity + caps + workers + pinned remotes
 cori config get|set                                        # ~/.cori/config.toml access
-cori skill install                                         # install Cori agent skill
 ```
+
+The Cori agent skill is installed via `npx skills add cori-do/cori` (not a `cori` subcommand).
 
 Remote refs follow `go mod`-style syntax: `host/owner/repo[/subpath][@<ref>]`. Refless picks the highest `vX.Y.Z` tag; `@v1` / `@v1.2` pick the highest matching prefix; exact tags and 7+ hex shas are immutable. SSH form `git@host:repo[@ref]` is supported. `--update` re-resolves mutable refs; `--yes` (or `CORI_ASSUME_YES=1`) skips the first-run consent prompt. See [remote-workflows.md](remote-workflows.md) for the full design.
 
@@ -66,7 +67,7 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori/sdk — what user step files import (`step.cli`, `step.code`, …)
   deno-runner/     Deno script that hosts `code` activities
-skill/             Cori agent skill — embedded into the binary at build time
+skills/            Cori agent skills (authored via `npx skills add cori-do/cori`)
 examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
 scripts/install.sh
 ```
@@ -216,8 +217,8 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 | A new step kind | Start with `StepKind` in [cori-protocol](crates/cori-protocol/src/lib.rs), then the SDK ([packages/sdk](packages/sdk/src/index.ts)), then the compiler parser ([cori-compiler/src/step_parser.rs](crates/cori-compiler/src/step_parser.rs)), then a broker module + an activity handler. Update the workflow dispatch loop last. |
 | A new CLI verb | [crates/cori-cli/src/commands/](crates/cori-cli/src/commands) + wire it in [main.rs](crates/cori-cli/src/main.rs). |
 | A new LLM provider | [crates/cori-broker/src/llm/providers.rs](crates/cori-broker/src/llm/providers.rs). Add credential resolution to the same module, pricing to `pricing.rs`. |
-| A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skill/references/manifest_schema.md](skill/references/manifest_schema.md) in lockstep. |
-| Trace shape changes | The trace types live in [crates/cori-cli/src/commands/run.rs](crates/cori-cli/src/commands/run.rs) (`RunTrace`, `ActivityTrace`). Update [skill/references/trace_interpretation.md](skill/references/trace_interpretation.md) too. |
+| A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skills/cori_save_workflow/references/manifest_schema.md](skills/cori_save_workflow/references/manifest_schema.md) in lockstep. |
+| Trace shape changes | The trace types live in [crates/cori-cli/src/commands/run.rs](crates/cori-cli/src/commands/run.rs) (`RunTrace`, `ActivityTrace`). Update `skills/cori_save_workflow/references/trace_interpretation.md` too. |
 | A new `Placement` variant or routing rule | [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) for the enum, [crates/cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs) for how it's inferred, [crates/cori-cli/src/planner.rs](crates/cori-cli/src/planner.rs) for how it maps to a queue. |
 | A new CLI auth adapter | [crates/cori-broker/src/cli_auth/](crates/cori-broker/src/cli_auth) — one tiny adapter per known CLI. |
 | A new OAuth flow | [crates/cori-broker/src/oauth/](crates/cori-broker/src/oauth) (`flow/pkce.rs`, `flow/device.rs`, `flow/client_credentials.rs`, `flow/dcr.rs`, `metadata.rs`). |

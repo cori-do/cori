@@ -7,15 +7,12 @@
 
 mod commands;
 mod config;
-mod embedded;
 mod paths;
 mod planner;
 mod remote;
 mod runtime;
 mod temporal_endpoint;
 mod workflow_loader;
-
-use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -29,11 +26,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install the Cori skill into a supported agent.
-    Skill {
-        #[command(subcommand)]
-        command: SkillCommand,
-    },
     /// Execute a workflow folder (local path or remote git reference).
     Run {
         /// Path to the workflow folder or a remote git ref
@@ -114,20 +106,6 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-enum SkillCommand {
-    /// Install the embedded Cori skill into an agent's skill directory.
-    Install {
-        /// Target agent. One of: claude-code, cursor, gemini-cli, copilot-cli.
-        #[arg(long)]
-        agent: Option<String>,
-        /// Install to an arbitrary directory instead of an agent's
-        /// conventional path. Mutually exclusive with `--agent`.
-        #[arg(long)]
-        path: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum RunsCommand {
     /// List recent runs, most-recent first.
     List {
@@ -193,9 +171,6 @@ fn main() -> anyhow::Result<()> {
             assume_yes,
             params,
         }) => commands::run::run(path, params, json, dry_run, update, assume_yes),
-        Some(Command::Skill { command }) => match command {
-            SkillCommand::Install { agent, path } => commands::skill::install(agent, path),
-        },
         Some(Command::Runs { command }) => match command {
             RunsCommand::List {
                 workflow_id,

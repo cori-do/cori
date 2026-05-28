@@ -6,6 +6,5 @@ pub mod login;
 pub mod run;
 pub mod runs;
 pub mod show;
-pub mod skill;
 pub mod status;
 pub mod work;
