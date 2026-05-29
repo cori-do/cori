@@ -1,4 +1,4 @@
-# @cori/deno-runner
+# @cori-do/runner
 
 The Deno script that hosts Cori `code` activities at runtime.
 
@@ -19,19 +19,18 @@ JSON.
 
 ## Module resolution
 
-The runner ships next to a `deno.json` import map (installed by
-`cori init --local` to `~/.cori/runtime/`):
+The runner ships next to a `deno.json` import map (installed to `~/.cori/runtime/`):
 
 ```json
 {
   "imports": {
-    "@cori/sdk": "./sdk/index.ts",
-    "zod": "npm:zod@^3.23.0"
+    "@cori-do/sdk": "./sdk/index.ts",
+    "zod": "npm:zod@^4.4.3"
   }
 }
 ```
 
-This means user step files can `import { step } from "@cori/sdk"` and
+This means user step files can `import { step } from "@cori-do/sdk"` and
 `import { z } from "zod"` without any local `node_modules` setup.
 
 ## Permissions

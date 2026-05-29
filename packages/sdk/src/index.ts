@@ -1,5 +1,5 @@
 /**
- * @cori/sdk — TypeScript SDK for authoring Cori workflow steps.
+ * @cori-do/sdk — TypeScript SDK for authoring Cori workflow steps.
  *
  * The SDK exposes the typed `step.<kind>(...)` constructors used by every
  * step file. The runtime is intentionally inert — each

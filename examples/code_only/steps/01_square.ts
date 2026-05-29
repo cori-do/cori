@@ -1,4 +1,4 @@
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({ x: z.number() });

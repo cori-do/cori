@@ -110,7 +110,7 @@ translate_product_sheets_fr/
 Each step is a typed function:
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 export default step.cli({
@@ -184,8 +184,8 @@ crates/        Rust workspace
   cori-protocol    wire types
   cori-manifest    manifest YAML schema
 packages/      pnpm workspace
-  sdk              @cori/sdk — what step files import
-  deno-runner      runtime for sandboxed `code` steps
+  sdk              @cori-do/sdk — what step files import
+  runner           runtime for sandboxed `code` steps
 skills/        agent skills for authoring workflows
 examples/      reference workflows
 ```

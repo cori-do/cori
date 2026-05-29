@@ -5,7 +5,7 @@ Every step in a Cori workflow is exactly one of five activity kinds. This file i
 The Cori SDK exposes these primitives:
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 ```
 
 `step` has five constructors — one per kind — plus shared options (description, retries, timeout). Every step file's default export is a `step.<kind>({ … })` call.
@@ -35,7 +35,7 @@ A few non-negotiable rules across all kinds:
 Use when the conversation ran a shell command that succeeded. The worker executes the binary; Cori captures stdout, stderr, and exit code.
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
@@ -79,7 +79,7 @@ When the CLI doesn't exist on the worker, Cori fails the activity with a clear "
 Use when the conversation invoked an MCP tool (e.g. via a Claude Code MCP connection) and it succeeded. The worker calls the same tool on the same server.
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
@@ -117,7 +117,7 @@ Cori validates at register time that the server + tool pair is reachable from th
 Use for pure data transformation: parsing, filtering, formatting, validation, math. Runs in a Deno sandbox with no network and no filesystem access.
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
@@ -169,7 +169,7 @@ Key fields:
 Use only when the *runtime* data genuinely needs a model. Translating new descriptions every day → `llm`. Re-deriving the workflow logic → no, that's what design-time was for.
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
@@ -224,7 +224,7 @@ The five most common builtins:
 ### `map` — transform a list by applying another step to each element
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import translateRow from "./02_translate_row";
 
 export default step.map({
@@ -242,7 +242,7 @@ Use when iterations are not independent (e.g. each iteration appends to a state 
 ### `branch` — conditional execution
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import nokStep from "./04_handle_nok";
 import okStep from "./04_handle_ok";
 
@@ -293,6 +293,6 @@ When reviewing your generated step files before showing them to the user, check:
 - For `cli`: `command` returns an array, not a string
 - For `mcp_tool`: `server` and `tool` match a real connected server's tool
 - For `llm`: output schema is strict; no untyped string returns
-- Imports from `@cori/sdk` are clean — no unused imports
+- Imports from `@cori-do/sdk` are clean — no unused imports
 
 If something looks off, fix it before disk write. A clean workflow on the first try buys enormous trust.

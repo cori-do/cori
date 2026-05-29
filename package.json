@@ -1,8 +1,8 @@
 {
-  "name": "cori-monorepo",
+  "name": "cori-packages",
   "version": "0.2.3-dev",
   "private": true,
-  "packageManager": "pnpm@11.3.0",
+  "packageManager": "pnpm@11.4.0",
   "scripts": {
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
@@ -13,6 +13,6 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "typescript": "^5.5.4"
+    "typescript": "^6.0.3"
   }
 }

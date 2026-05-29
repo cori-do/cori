@@ -501,11 +501,11 @@ mod tests {
             &[
                 (
                     "01_one.ts",
-                    "import { step } from \"@cori/sdk\";\nexport default step.cli({ description: \"one\", command: () => [\"echo\", \"hi\"] });\n",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"one\", command: () => [\"echo\", \"hi\"] });\n",
                 ),
                 (
                     "02_two.ts",
-                    "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"two\", run: (x) => x });\n",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"two\", run: (x) => x });\n",
                 ),
             ],
         );
@@ -527,11 +527,11 @@ mod tests {
             &[
                 (
                     "01_a.ts",
-                    "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"a\", run: (x) => x });\n",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"a\", run: (x) => x });\n",
                 ),
                 (
                     "03_c.ts",
-                    "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"c\", run: (x) => x });\n",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"c\", run: (x) => x });\n",
                 ),
             ],
         );
@@ -547,7 +547,7 @@ mod tests {
             OK_MANIFEST,
             &[(
                 "BadName.ts",
-                "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"x\", run: (x) => x });\n",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", run: (x) => x });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -562,7 +562,7 @@ mod tests {
             OK_MANIFEST, // only `echo` declared
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nexport default step.cli({ description: \"a\", command: () => [\"kubectl\", \"get\", \"pods\"] });\n",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"a\", command: () => [\"kubectl\", \"get\", \"pods\"] });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -581,7 +581,7 @@ mod tests {
             manifest,
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nexport default step.mcp_tool({ description: \"a\", server: \"slack\", tool: \"post\", args: () => ({}) });\n",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.mcp_tool({ description: \"a\", server: \"slack\", tool: \"post\", args: () => ({}) });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -596,7 +596,7 @@ mod tests {
             OK_MANIFEST,
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nimport fs from \"node:fs\";\nexport default step.code({ description: \"a\", run: (x) => { fs.readFileSync; return x; } });\n",
+                "import { step } from \"@cori-do/sdk\";\nimport fs from \"node:fs\";\nexport default step.code({ description: \"a\", run: (x) => { fs.readFileSync; return x; } });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -611,7 +611,7 @@ mod tests {
             OK_MANIFEST,
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nexport default step.code({ run: (x) => x });\n",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.code({ run: (x) => x });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -626,7 +626,7 @@ mod tests {
             OK_MANIFEST,
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nconst x = step.code({ description: \"a\", run: (x) => x });\n",
+                "import { step } from \"@cori-do/sdk\";\nconst x = step.code({ description: \"a\", run: (x) => x });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();
@@ -641,7 +641,7 @@ mod tests {
             OK_MANIFEST,
             &[(
                 "01_a.ts",
-                "import { step } from \"@cori/sdk\";\nexport default step.unknown({ description: \"a\" });\n",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.unknown({ description: \"a\" });\n",
             )],
         );
         let errs = compile(tmp.path()).unwrap_err();

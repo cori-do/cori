@@ -136,9 +136,9 @@ Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` direc
 
 ### Step 5: Write the files
 
-Create the directory layout. Use the `@cori/sdk` templates from [`references/activity_kinds.md`](references/activity_kinds.md). Each step file:
+Create the directory layout. Use the `@cori-do/sdk` templates from [`references/activity_kinds.md`](references/activity_kinds.md). Each step file:
 
-- Imports the right primitive from `@cori/sdk` (`step.cli`, `step.code`, `step.mcp_tool`, `step.llm`)
+- Imports the right primitive from `@cori-do/sdk` (`step.cli`, `step.code`, `step.mcp_tool`, `step.llm`)
 - Declares typed `input` and `output` as zod schemas (in the file or imported from `types.ts`)
 - Has a one-line `description` (becomes the activity name in the run trace)
 - Default-exports the `step.<kind>({…})` call
@@ -243,7 +243,7 @@ One offer per conversation, max. Don't nag.
 
 **`cori` not installed.** Install: `curl -fsSL https://cli.cori.do/install.sh | bash`. Don't proceed without it.
 
-**`cori check` fails on a TS step file.** Read the error, locate the offending step, fix it (most often a type mismatch, missing `@cori/sdk` import, or wrong zod schema), re-run `cori check`.
+**`cori check` fails on a TS step file.** Read the error, locate the offending step, fix it (most often a type mismatch, missing `@cori-do/sdk` import, or wrong zod schema), re-run `cori check`.
 
 **`cori check` says a CLI binary is missing from `tools_required`.** The compiler enforces the declaration. Add the binary to the manifest's `tools_required` list and re-check.
 

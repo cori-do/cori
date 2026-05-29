@@ -5,7 +5,7 @@
 //! `skill/references/activity_kinds.md`:
 //!
 //! ```ts
-//! import { step } from "@cori/sdk";
+//! import { step } from "@cori-do/sdk";
 //! // ...optional imports, type aliases, const declarations...
 //! export default step.<kind>({
 //!   description: "one-line summary",
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn parses_cli_step() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.cli({\n  description: \"do a thing\",\n  command: () => [\"gws\", \"sheets\"],\n});\n";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.cli({\n  description: \"do a thing\",\n  command: () => [\"gws\", \"sheets\"],\n});\n";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Cli);
         assert_eq!(p.description, "do a thing");
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn parses_mcp_step() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.mcp_tool({ description: \"post\", server: \"slack\", tool: \"chat_postMessage\", args: () => ({}) });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.mcp_tool({ description: \"post\", server: \"slack\", tool: \"chat_postMessage\", args: () => ({}) });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::McpTool);
         assert_eq!(p.metadata.get("server").unwrap(), "slack");
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn parses_llm_step_with_model() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.llm({ description: \"translate\", model: \"gpt-4o-mini\", prompt: () => `hi` });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"translate\", model: \"gpt-4o-mini\", prompt: () => `hi` });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Llm);
         assert_eq!(p.metadata.get("model").unwrap(), "gpt-4o-mini");
@@ -596,14 +596,14 @@ mod tests {
 
     #[test]
     fn parses_code_step() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"square\", run: (x) => x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"square\", run: (x) => x });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Code);
     }
 
     #[test]
     fn parses_builtin_map() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.map({ description: \"each\", apply: x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.map({ description: \"each\", apply: x });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Builtin);
     }
@@ -611,28 +611,28 @@ mod tests {
     #[test]
     fn missing_description() {
         let src =
-            "import { step } from \"@cori/sdk\";\nexport default step.code({ run: (x) => x });";
+            "import { step } from \"@cori-do/sdk\";\nexport default step.code({ run: (x) => x });";
         let errs = parse(src).unwrap_err();
         assert!(errs.iter().any(|e| e.reason.contains("description")));
     }
 
     #[test]
     fn missing_default_export() {
-        let src = "import { step } from \"@cori/sdk\";\nconst x = step.code({ description: \"x\", run: (x) => x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nconst x = step.code({ description: \"x\", run: (x) => x });";
         let errs = parse(src).unwrap_err();
         assert!(errs[0].reason.contains("default export"));
     }
 
     #[test]
     fn unknown_kind() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.weird({ description: \"x\" });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.weird({ description: \"x\" });";
         let errs = parse(src).unwrap_err();
         assert!(errs[0].reason.contains("unknown"));
     }
 
     #[test]
     fn flags_node_imports_in_code() {
-        let src = "import { step } from \"@cori/sdk\";\nimport fs from \"node:fs\";\nexport default step.code({ description: \"x\", run: (x) => x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nimport fs from \"node:fs\";\nexport default step.code({ description: \"x\", run: (x) => x });";
         let p = parse(src).unwrap();
         let arr = p.metadata.get("node_imports").unwrap().as_array().unwrap();
         assert_eq!(arr[0], "node:fs");
@@ -640,28 +640,28 @@ mod tests {
 
     #[test]
     fn no_node_imports_flagged_for_cli() {
-        let src = "import { step } from \"@cori/sdk\";\nimport fs from \"node:fs\";\nexport default step.cli({ description: \"x\", command: () => [\"echo\"] });";
+        let src = "import { step } from \"@cori-do/sdk\";\nimport fs from \"node:fs\";\nexport default step.cli({ description: \"x\", command: () => [\"echo\"] });";
         let p = parse(src).unwrap();
         assert!(p.metadata.get("node_imports").is_none());
     }
 
     #[test]
     fn description_can_be_single_quoted() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.code({ description: 'hi', run: (x) => x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: 'hi', run: (x) => x });";
         let p = parse(src).unwrap();
         assert_eq!(p.description, "hi");
     }
 
     #[test]
     fn cli_binary_must_be_literal() {
-        let src = "import { step } from \"@cori/sdk\";\nconst bin = 'gws';\nexport default step.cli({ description: \"x\", command: () => [bin, 'y'] });";
+        let src = "import { step } from \"@cori-do/sdk\";\nconst bin = 'gws';\nexport default step.cli({ description: \"x\", command: () => [bin, 'y'] });";
         let errs = parse(src).unwrap_err();
         assert!(errs[0].reason.contains("command"));
     }
 
     #[test]
     fn comments_do_not_confuse_parser() {
-        let src = "// export default step.cli({ description: \"fake\" })\nimport { step } from \"@cori/sdk\";\n/* export default step.cli */\nexport default step.code({ description: \"real\", run: (x) => x });";
+        let src = "// export default step.cli({ description: \"fake\" })\nimport { step } from \"@cori-do/sdk\";\n/* export default step.cli */\nexport default step.code({ description: \"real\", run: (x) => x });";
         let p = parse(src).unwrap();
         assert_eq!(p.description, "real");
         assert_eq!(p.kind, StepKind::Code);
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn route_field_extracted() {
-        let src = "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"x\", route: \"worker\", run: (x) => x });";
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", route: \"worker\", run: (x) => x });";
         let p = parse(src).unwrap();
         assert_eq!(p.route.as_deref(), Some("worker"));
     }

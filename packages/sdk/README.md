@@ -1,19 +1,19 @@
-# @cori/sdk
+# @cori-do/sdk
 
-TypeScript SDK for authoring [Cori](https://github.com/cori-do/cori) workflow steps.
+TypeScript SDK to structure [Cori](https://github.com/cori-do/cori) workflow steps.
 
-> **Status:** v0.2.3-dev
+> **Status:** v0.2.4
 
 ## Install
 
 ```bash
-pnpm add @cori/sdk zod
+pnpm add @cori-do/sdk zod
 ```
 
 ## Usage (preview)
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 
 export default step.code({
   description: "Square a number",

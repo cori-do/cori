@@ -1,8 +1,8 @@
 {
-  "name": "@cori/deno-runner",
-  "version": "0.2.3-dev",
+  "name": "@cori-do/runner",
+  "version": "0.2.3",
   "description": "Deno-based runner that hosts Cori `code` activities in a sandboxed subprocess.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "private": true,
   "files": [
     "runner.ts",

@@ -122,7 +122,7 @@ export type GpsrCheck = z.infer<typeof GpsrCheck>;
 ## `steps/01_read_source_rows.ts`
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 import { SourceRow } from "../types";
 
@@ -167,7 +167,7 @@ export default step.cli({
 ## `steps/02_translate_rows.ts`
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 import { SourceRow, TranslatedRow } from "../types";
 
@@ -193,7 +193,7 @@ ${JSON.stringify(rows, null, 2)}
 ## `steps/03_check_gpsr.ts`
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 import { TranslatedRow, GpsrCheck } from "../types";
 
@@ -221,7 +221,7 @@ export default step.code({
 ## `steps/04_ensure_fr_tab.ts`
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
@@ -252,7 +252,7 @@ export default step.cli({
 ## `steps/05_write_results.ts`
 
 ```ts
-import { step } from "@cori/sdk";
+import { step } from "@cori-do/sdk";
 import { z } from "zod";
 import { TranslatedRow, GpsrCheck } from "../types";
 

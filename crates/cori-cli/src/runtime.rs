@@ -1,7 +1,7 @@
 //! Materialises the bundled Deno runtime under `~/.cori/runtime/`.
 //!
 //! The runner script, its `deno.json` import map, and a copy of
-//! `@cori/sdk` are embedded into the `cori` binary at compile time via
+//! `@cori-do/sdk` are embedded into the `cori` binary at compile time via
 //! `include_str!`. Phase 2 of the redesign removed `cori init`; the
 //! runtime is now installed lazily the first time `cori run` needs it.
 //! Subsequent invocations are no-ops because [`write_if_changed`]
@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 
 use crate::paths;
 
-const RUNNER_TS: &str = include_str!("../../../packages/deno-runner/runner.ts");
-const DENO_JSON: &str = include_str!("../../../packages/deno-runner/deno.json");
+const RUNNER_TS: &str = include_str!("../../../packages/runner/runner.ts");
+const DENO_JSON: &str = include_str!("../../../packages/runner/deno.json");
 const SDK_INDEX_TS: &str = include_str!("../../../packages/sdk/src/index.ts");
 
 /// Install the runtime at `~/.cori/runtime/`. Idempotent.

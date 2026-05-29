@@ -65,8 +65,8 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
   cori-manifest/   YAML schema + parser (manifest.md frontmatter + body)
   cori-protocol/   wire types (CompiledWorkflow, Placement, WorkerIdentity, task_queue_for, …)
 packages/                              pnpm workspace (Node ≥ 20)
-  sdk/             @cori/sdk — what user step files import (`step.cli`, `step.code`, …)
-  deno-runner/     Deno script that hosts `code` activities
+  sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
+  runner/     Deno script that hosts `code` activities
 skills/            Cori agent skills (authored via `npx skills add cori-do/cori`)
 examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
 scripts/install.sh

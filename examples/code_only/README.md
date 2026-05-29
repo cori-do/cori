@@ -10,7 +10,7 @@ cori run code_only x=12
 ```
 
 Both steps are `code` activities: they execute in a sandboxed Deno
-subprocess (`packages/deno-runner`) with `--allow-read` permission and no
+subprocess (`packages/runner`) with `--allow-read` permission and no
 network access. Step 1 squares its input; step 2 receives step 1's output
 as its input and renders it as a string.
 

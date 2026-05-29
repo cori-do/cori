@@ -1,8 +1,8 @@
 {
-  "name": "@cori/sdk",
-  "version": "0.2.3-dev",
-  "description": "TypeScript SDK for authoring Cori workflow steps.",
-  "license": "Apache-2.0",
+  "name": "@cori-do/sdk",
+  "version": "0.2.4",
+  "description": "SDK to structure Cori workflow steps.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,9 +24,9 @@
     "test": "echo \"no tests yet\""
   },
   "devDependencies": {
-    "typescript": "^5.5.4"
+    "typescript": "^6.0.3"
   },
   "peerDependencies": {
-    "zod": "^3.23.0"
+    "zod": "^4.4.3"
   }
 }
