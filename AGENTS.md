@@ -190,7 +190,7 @@ Default `max_attempts` per kind:
 
 `schedule_to_start_timeout = 30s` on routed activities makes "no worker on this queue" fail fast with an actionable error.
 
-A step can opt into different retries via `retries.max_attempts` in its metadata.
+A step can opt into different retries via `retries.max` in its metadata.
 
 ---
 

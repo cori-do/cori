@@ -391,7 +391,9 @@ fn needs_reauth_details(err: &ActivityExecutionError) -> Option<NeedsReauthDetai
 ///
 /// Recognised metadata keys:
 /// - `timeout_ms` (number): overrides `start_to_close_timeout`.
-/// - `retries.max_attempts` (number): overrides the default cap.
+/// - `retries.max` (number): overrides the default attempt cap.
+/// - `retries.backoff` (`"exponential"` | `"linear"`): retry backoff
+///   strategy. Defaults to exponential.
 fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOptions {
     let default_secs: u64 = match step.kind {
         StepKind::Cli => 60,
@@ -415,17 +417,24 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
         StepKind::Code | StepKind::Llm => 3,
         StepKind::Builtin => 1,
     };
-    let max_attempts: i32 = step
-        .metadata
-        .get("retries")
-        .and_then(|r| r.get("max_attempts"))
+    let retries = step.metadata.get("retries");
+    let max_attempts: i32 = retries
+        .and_then(|r| r.get("max"))
         .and_then(|v| v.as_i64())
         .map(|n| n as i32)
         .unwrap_or(default_attempts);
 
+    // Backoff strategy mirrors the SDK's `retries.backoff` field. Linear
+    // backoff keeps a constant interval (coefficient 1.0); exponential
+    // (the default) doubles each attempt.
+    let backoff_coefficient = match retries.and_then(|r| r.get("backoff")).and_then(|v| v.as_str()) {
+        Some("linear") => 1.0,
+        _ => 2.0,
+    };
+
     let retry_policy = temporalio_common::protos::temporal::api::common::v1::RetryPolicy {
         initial_interval: Some(prost_duration_from_secs(1)),
-        backoff_coefficient: 2.0,
+        backoff_coefficient,
         maximum_interval: Some(prost_duration_from_secs(60)),
         maximum_attempts: max_attempts,
         non_retryable_error_types: vec![

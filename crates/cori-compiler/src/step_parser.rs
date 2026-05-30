@@ -116,8 +116,14 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
 
     let route = extract_string_field(args_span, "route");
 
-    // 4. Kind-specific scalar metadata.
+    // 4. Kind-agnostic scalar metadata shared by every step kind
+    //    (`BaseStepOpts` in the SDK).
     let mut metadata = JsonMap::new();
+    if let Some(retries) = extract_retries_field(args_span) {
+        metadata.insert("retries".into(), JsonValue::Object(retries));
+    }
+
+    // 5. Kind-specific scalar metadata.
     match kind {
         StepKind::Cli => {
             if let Some(bin) = extract_cli_binary(args_span) {
@@ -164,7 +170,7 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         StepKind::Code | StepKind::Builtin => {}
     }
 
-    // 5. Code-step import audit: scan the *full* source (not just the call)
+    // 6. Code-step import audit: scan the *full* source (not just the call)
     //    for `node:*` imports. Done with a simple line scan.
     if kind == StepKind::Code {
         let banned = find_node_imports(&stripped);
@@ -289,7 +295,7 @@ fn extract_balanced(s: &str, open_at: usize, open: char, close: char) -> Option<
 /// interpolation).
 fn extract_string_field(body: &str, field: &str) -> Option<String> {
     let pattern = format!(
-        r#"(?m)(^|[\s,{{])\s*{field}\s*:\s*("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|`([^`\\$]|\\.)*`)\s*[,\n}}]"#,
+        r#"(?m)(^|[\s,{{])\s*{field}\s*:\s*("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|`([^`\\$]|\\.)*`)\s*([,\n}}]|$)"#,
         field = regex::escape(field)
     );
     let re = Regex::new(&pattern).ok()?;
@@ -564,6 +570,29 @@ fn extract_batch_field(body: &str) -> Option<(u64, String)> {
     Some((size, by))
 }
 
+/// Extract a `retries: { max: N, backoff: "exponential" | "linear" }`
+/// declaration from any step's options object (`BaseStepOpts` in the SDK).
+/// `max` is required for the field to be recognised; `backoff` is optional.
+/// The emitted metadata mirrors the SDK field names so the worker can read
+/// `retries.max` / `retries.backoff` directly.
+fn extract_retries_field(body: &str) -> Option<JsonMap<String, JsonValue>> {
+    let key_re = Regex::new(r"(?m)(^|[\s,{])\s*retries\s*:\s*\{").expect("static regex");
+    let m = key_re.find(body)?;
+    let brace_at = body[..m.end()].rfind('{')?;
+    let inner = extract_balanced(body, brace_at, '{', '}')?;
+    let max_re = Regex::new(r#"(?m)(^|[\s,{])\s*max\s*:\s*(\d+)"#).expect("static regex");
+    let max = max_re
+        .captures(inner)
+        .and_then(|c| c.get(2))
+        .and_then(|m| m.as_str().parse::<u64>().ok())?;
+    let mut out = JsonMap::new();
+    out.insert("max".into(), JsonValue::Number(max.into()));
+    if let Some(backoff) = extract_string_field(inner, "backoff") {
+        out.insert("backoff".into(), JsonValue::String(backoff));
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +701,30 @@ mod tests {
         let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", route: \"worker\", run: (x) => x });";
         let p = parse(src).unwrap();
         assert_eq!(p.route.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn retries_field_extracted() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"x\", retries: { max: 5, backoff: \"linear\" }, command: () => [\"echo\"] });";
+        let p = parse(src).unwrap();
+        let retries = p.metadata.get("retries").unwrap().as_object().unwrap();
+        assert_eq!(retries.get("max").unwrap(), 5);
+        assert_eq!(retries.get("backoff").unwrap(), "linear");
+    }
+
+    #[test]
+    fn retries_backoff_optional() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", retries: { max: 2 }, run: (x) => x });";
+        let p = parse(src).unwrap();
+        let retries = p.metadata.get("retries").unwrap().as_object().unwrap();
+        assert_eq!(retries.get("max").unwrap(), 2);
+        assert!(retries.get("backoff").is_none());
+    }
+
+    #[test]
+    fn no_retries_field_means_no_metadata() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", run: (x) => x });";
+        let p = parse(src).unwrap();
+        assert!(p.metadata.get("retries").is_none());
     }
 }

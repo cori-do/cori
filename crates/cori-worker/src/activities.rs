@@ -10,7 +10,7 @@
 //!   double-billing summaries.
 //! - `cori_cli`, `cori_mcp_tool` — may mutate external state. v1 defaults
 //!   to `max_attempts = 1`. Steps can opt into retries explicitly via
-//!   `retries.max_attempts` in metadata.
+//!   `retries.max` in metadata.
 //!
 //! All four handlers share the same input / output shape — the workflow
 //! decides which activity to invoke based on `step.kind`. They are async
