@@ -65,6 +65,12 @@ the workflow, runs three steps, and writes a trace to `~/.cori/runs/`.
 
 ---
 
+## Documentation
+
+Learn more at [docs.cori.do](https://docs.cori.do).
+
+---
+
 ## The CLI
 
 ```text
