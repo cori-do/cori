@@ -427,7 +427,10 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
     // Backoff strategy mirrors the SDK's `retries.backoff` field. Linear
     // backoff keeps a constant interval (coefficient 1.0); exponential
     // (the default) doubles each attempt.
-    let backoff_coefficient = match retries.and_then(|r| r.get("backoff")).and_then(|v| v.as_str()) {
+    let backoff_coefficient = match retries
+        .and_then(|r| r.get("backoff"))
+        .and_then(|v| v.as_str())
+    {
         Some("linear") => 1.0,
         _ => 2.0,
     };
