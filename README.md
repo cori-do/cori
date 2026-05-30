@@ -19,7 +19,7 @@ cori run ./translate_product_sheets_fr
 cori run cori-do/workflows/code_only
 ```
 
-> Status: `v0.2.3-dev` — APIs may change.
+> Status: `v0.2.5-dev` — APIs may change.
 
 ---
 
