@@ -50,6 +50,7 @@ crossbeam-channel = "0.5"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["cors"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 
 # Temporal Rust SDK — pinned to v0.4.x.
 # These are pre-1.0; the workspace pins exact versions and `cargo update -p`

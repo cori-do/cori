@@ -70,6 +70,9 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
   runner/     Deno script that hosts `code` activities
+  console/         @cori-do/console — React Router v7 SPA (`ssr: false`).
+                   `pnpm --filter @cori-do/console build` → build/client/,
+                   embedded into cori-console by rust-embed at compile time.
 skills/            Cori agent skills (authored via `npx skills add cori-do/cori`)
 examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
 scripts/install.sh
@@ -90,6 +93,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm -r lint && pnpm -r typecheck && pnpm -r test
 ```
+
+**Build ordering for the Console**: `pnpm --filter @cori-do/console build` must run **before** `cargo build -p cori-console` so the SPA assets exist at the path `cori-console/build.rs` embeds via `rust-embed`. The build script will emit a `cargo:warning` and write a placeholder `index.html` if the assets are missing — the binary still compiles, but `/` serves a "console not built" splash until you run the SPA build.
 
 CI builds on Linux/Mac/Windows; tests run on Linux only.
 
