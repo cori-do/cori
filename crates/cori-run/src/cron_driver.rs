@@ -18,19 +18,14 @@ use chrono::{DateTime, Utc};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 use serde_json::Value as JsonValue;
 
-use crate::{
-    ConsentCallback, NoopSink, RunRequest, Trigger, run_workflow, schedules,
-};
+use crate::{ConsentCallback, NoopSink, RunRequest, Trigger, run_workflow, schedules};
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Run the cron driver until cancelled. Returns only when the
 /// `shutdown` future resolves — the caller is responsible for
 /// dropping it on process exit.
-pub async fn run<F: std::future::Future<Output = ()>>(
-    identity: WorkerIdentity,
-    shutdown: F,
-) {
+pub async fn run<F: std::future::Future<Output = ()>>(identity: WorkerIdentity, shutdown: F) {
     let queue = task_queue_for(&identity);
     let mut last_check = Utc::now();
     tracing::info!(task_queue = %queue, "cron driver started");
@@ -113,8 +108,11 @@ fn spawn_fire(entry: schedules::ScheduleEntry, fire_at: DateTime<Utc>) {
                 trigger: Trigger::Schedule,
                 run_id: None,
             };
-            let result =
-                rt.block_on(run_workflow(req, ConsentCallback::AssumeYes, Arc::new(NoopSink)));
+            let result = rt.block_on(run_workflow(
+                req,
+                ConsentCallback::AssumeYes,
+                Arc::new(NoopSink),
+            ));
             match result {
                 Ok(trace) => {
                     let _ = schedules::record_fire(

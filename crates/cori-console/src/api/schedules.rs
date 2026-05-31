@@ -83,23 +83,13 @@ pub async fn create(
         let manifest_cron = pre.loaded.compiled.manifest.schedule.clone();
         let manifest_tz = pre.loaded.compiled.manifest.schedule_tz.clone();
 
-        let cron = body
-            .schedule
-            .or(manifest_cron)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no `schedule` field in manifest and none provided in body"
-                )
-            })?;
+        let cron = body.schedule.or(manifest_cron).ok_or_else(|| {
+            anyhow::anyhow!("no `schedule` field in manifest and none provided in body")
+        })?;
         let tz = body.schedule_tz.or(manifest_tz);
         let resolved_sha = None; // populated by the resolver when remote
-        let entry = schedules::new_entry(
-            body.source.clone(),
-            cron,
-            tz,
-            identity_queue,
-            resolved_sha,
-        )?;
+        let entry =
+            schedules::new_entry(body.source.clone(), cron, tz, identity_queue, resolved_sha)?;
         schedules::save(&entry)?;
         Ok(json!({
             "id": entry.id,
@@ -132,13 +122,14 @@ pub async fn patch(
         let me = OsUser.resolve()?;
         let my_queue = task_queue_for(&me);
 
-        let entry = schedules::load(&id)?
-            .ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
+        let entry = schedules::load(&id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
         if entry.identity != my_queue {
             return Err(anyhow::anyhow!(
                 "schedule `{}` is owned by `{}`; this Console is `{}`. \
                  Open it from a `cori work` running as that identity to mutate.",
-                id, entry.identity, my_queue
+                id,
+                entry.identity,
+                my_queue
             ));
         }
         let updated = if let Some(enabled) = body.enabled {
@@ -185,7 +176,8 @@ pub async fn delete(
         {
             return Err(anyhow::anyhow!(
                 "schedule `{}` is owned by `{}`; cannot delete from this identity",
-                id_clone, entry.identity
+                id_clone,
+                entry.identity
             ));
         }
         schedules::delete(&id_clone)?;

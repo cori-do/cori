@@ -42,7 +42,7 @@ pub enum RunEvent {
         error: Option<String>,
     },
     /// Final event on a successful run. Carries the persisted trace.
-    Completed { trace: RunTrace },
+    Completed { trace: Box<RunTrace> },
     /// Final event on a run that errored before producing a trace
     /// (consent denied, missing capability, Temporal down, …).
     Failed { error: String },

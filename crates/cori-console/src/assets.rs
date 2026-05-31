@@ -40,10 +40,8 @@ pub async fn serve(uri: Uri) -> Response {
 fn file_response(path: &str, bytes: Vec<u8>) -> Response {
     let mime = content_type_for(path);
     let mut res = Response::new(Body::from(bytes));
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(mime),
-    );
+    res.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
     // The hashed asset filenames are cache-safe; `index.html` is not.
     let is_hashed_asset = path.starts_with("assets/") && !path.ends_with(".html");
     let cache = if is_hashed_asset {

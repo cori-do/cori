@@ -31,7 +31,9 @@ async fn post_runs_without_anything_is_401() {
                 .method(Method::POST)
                 .uri("/api/runs")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"source":"./x","params":{},"dry_run":false}"#))
+                .body(Body::from(
+                    r#"{"source":"./x","params":{},"dry_run":false}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -49,7 +51,9 @@ async fn post_runs_with_cookie_only_is_401() {
                 .uri("/api/runs")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::COOKIE, cookie_header(&session))
-                .body(Body::from(r#"{"source":"./x","params":{},"dry_run":false}"#))
+                .body(Body::from(
+                    r#"{"source":"./x","params":{},"dry_run":false}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -89,7 +93,9 @@ async fn post_runs_with_wrong_bearer_is_401() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::COOKIE, cookie_header(&session))
                 .header(header::AUTHORIZATION, "Bearer not-the-master-token")
-                .body(Body::from(r#"{"source":"./x","params":{},"dry_run":false}"#))
+                .body(Body::from(
+                    r#"{"source":"./x","params":{},"dry_run":false}"#,
+                ))
                 .unwrap(),
         )
         .await

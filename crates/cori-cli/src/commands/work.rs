@@ -131,8 +131,7 @@ pub fn work(opts: WorkOpts) -> Result<()> {
                 // shut down. With `select!`, whichever future finishes
                 // first (typically the worker on SIGINT) drops the
                 // other and lets us exit cleanly.
-                let console_fut =
-                    cori_console::serve(cfg.port, cfg.token, paths::home()?);
+                let console_fut = cori_console::serve(cfg.port, cfg.token, paths::home()?);
                 let worker_fut = serve_worker_until_signal(&rt);
                 tokio::pin!(console_fut, worker_fut);
                 tokio::select! {
@@ -152,9 +151,7 @@ pub fn work(opts: WorkOpts) -> Result<()> {
     if let Err(e) = planner::unpublish_report(&queue) {
         tracing::warn!(error = %format!("{e:#}"), "could not remove capability report");
     }
-    if console_state_written
-        && let Err(e) = remove_console_state()
-    {
+    if console_state_written && let Err(e) = remove_console_state() {
         tracing::warn!(error = %format!("{e:#}"), "could not remove ~/.cori/state/console.json");
     }
 
@@ -267,8 +264,7 @@ fn write_console_state(port: u16) -> Result<()> {
 fn remove_console_state() -> Result<()> {
     let path = paths::console_state_file()?;
     if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing `{}`", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing `{}`", path.display()))?;
     }
     Ok(())
 }

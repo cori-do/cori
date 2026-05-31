@@ -13,9 +13,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use cori_run::{
-    ConsentCallback, RunRequest, Trigger, new_run_id, preflight, run_workflow,
-};
+use cori_run::{ConsentCallback, RunRequest, Trigger, new_run_id, preflight, run_workflow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -58,7 +56,8 @@ pub async fn handler(
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("preflight join: {e}")))??;
 
     if let Some(cr) = outcome.consent_required {
-        let declared = cori_run::remote::trust::declared_capability_strings(&outcome.loaded.compiled);
+        let declared =
+            cori_run::remote::trust::declared_capability_strings(&outcome.loaded.compiled);
         let body = json!({
             "consent_required": {
                 "host": cr.spec.host,
@@ -75,7 +74,11 @@ pub async fn handler(
     // 2. Mint run_id, create channel, register.
     let run_id = new_run_id();
     let channel = RunChannel::new(64);
-    state.runs.write().await.insert(run_id.clone(), channel.clone());
+    state
+        .runs
+        .write()
+        .await
+        .insert(run_id.clone(), channel.clone());
 
     // 3. Spawn the run on a dedicated OS thread with its own
     // current-thread tokio runtime. The `run_workflow` future holds
@@ -113,7 +116,9 @@ pub async fn handler(
             };
             let result = rt.block_on(run_workflow(req, ConsentCallback::AssumeYes, sink));
             match result {
-                Ok(trace) => channel_for_task.push(RunEvent::Completed { trace }),
+                Ok(trace) => channel_for_task.push(RunEvent::Completed {
+                    trace: Box::new(trace),
+                }),
                 Err(e) => channel_for_task.push(RunEvent::Failed {
                     error: format!("{e:#}"),
                 }),

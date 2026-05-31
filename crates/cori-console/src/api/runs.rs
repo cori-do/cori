@@ -44,9 +44,10 @@ pub async fn list(
     let runs_root = state.home.join("runs");
     let limit = q.limit.unwrap_or(50);
     let workflow_id = q.workflow_id.clone();
-    let traces = tokio::task::spawn_blocking(move || collect_traces(&runs_root, workflow_id, limit))
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("runs task join: {e}")))??;
+    let traces =
+        tokio::task::spawn_blocking(move || collect_traces(&runs_root, workflow_id, limit))
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("runs task join: {e}")))??;
     Ok(Json(traces))
 }
 

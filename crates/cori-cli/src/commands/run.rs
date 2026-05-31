@@ -231,8 +231,6 @@ fn kind_label(kind: cori_protocol::StepKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn parses_json_and_string_args() {
         use serde_json::json;

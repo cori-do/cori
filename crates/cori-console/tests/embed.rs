@@ -57,7 +57,10 @@ async fn deep_link_falls_back_to_index() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
-    assert!(body.contains("<html"), "expected SPA index.html for deep link");
+    assert!(
+        body.contains("<html"),
+        "expected SPA index.html for deep link"
+    );
 }
 
 #[tokio::test]

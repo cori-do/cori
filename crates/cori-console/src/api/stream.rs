@@ -39,7 +39,7 @@ pub async fn handler(
     let buffer = channel.snapshot();
     let rx = channel.tx.subscribe();
 
-    let buffered = stream::iter(buffer.into_iter());
+    let buffered = stream::iter(buffer);
     let live = BroadcastStream::new(rx).filter_map(|res| async move { res.ok() });
 
     // Close the stream after the run's terminal event. Without this

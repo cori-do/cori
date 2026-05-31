@@ -75,10 +75,9 @@ pub fn load(id: &str) -> Result<Option<ScheduleEntry>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading `{}`", path.display()))?;
-    let entry: ScheduleEntry = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing `{}`", path.display()))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("reading `{}`", path.display()))?;
+    let entry: ScheduleEntry =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing `{}`", path.display()))?;
     Ok(Some(entry))
 }
 
@@ -103,7 +102,7 @@ pub fn load_all() -> Result<Vec<ScheduleEntry>> {
             out.push(entry);
         }
     }
-    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    out.sort_by_key(|e| e.created_at);
     Ok(out)
 }
 
@@ -132,8 +131,7 @@ pub fn save(entry: &ScheduleEntry) -> Result<()> {
 pub fn delete(id: &str) -> Result<()> {
     let path = entry_path(id)?;
     if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing `{}`", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing `{}`", path.display()))?;
     }
     Ok(())
 }
@@ -197,12 +195,7 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<ScheduleEntry> {
 }
 
 /// Update fire metadata after the cron driver has run a fire.
-pub fn record_fire(
-    id: &str,
-    status: &str,
-    error: Option<&str>,
-    at: DateTime<Utc>,
-) -> Result<()> {
+pub fn record_fire(id: &str, status: &str, error: Option<&str>, at: DateTime<Utc>) -> Result<()> {
     let mut entry = load(id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
     entry.last_fire_at = Some(at);
     entry.last_status = Some(status.to_string());
@@ -216,12 +209,16 @@ pub fn record_fire(
 mod tests {
     use super::*;
 
+    // Tests touch the process-wide `CORI_HOME` env var, so they must
+    // not run in parallel with each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn with_temp_home<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("CORI_HOME").ok();
-        // SAFETY: tests are not parallel-safe wrt env vars; cargo
-        // serialises them by default for `#[cfg(test)] mod tests` in
-        // the same file. Phase 4 has only a handful of tests.
+        // SAFETY: ENV_LOCK serialises access across these tests, and
+        // no other thread reads CORI_HOME for the duration of `f`.
         unsafe {
             std::env::set_var("CORI_HOME", tmp.path());
         }

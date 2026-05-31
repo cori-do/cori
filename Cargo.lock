@@ -447,7 +447,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cori-broker"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "base64",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cori-cli"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "cori-compiler"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "cori-manifest",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "cori-console"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "axum",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "cori-ledger"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "serde",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "cori-manifest"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "cori-protocol"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "chrono",
  "cori-manifest",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "cori-run"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "cori-worker"
-version = "0.2.5-dev"
+version = "0.2.7-dev"
 dependencies = [
  "anyhow",
  "async-trait",

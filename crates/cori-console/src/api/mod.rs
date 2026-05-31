@@ -25,8 +25,7 @@ pub mod workflow;
 pub mod workflows;
 
 use axum::{
-    Json,
-    Router,
+    Json, Router,
     http::StatusCode,
     middleware,
     response::IntoResponse,

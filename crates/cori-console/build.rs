@@ -14,8 +14,7 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR set by cargo");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let asset_root = PathBuf::from(&manifest).join("../../packages/console/build/client");
     let index = asset_root.join("index.html");
 

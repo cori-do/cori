@@ -16,10 +16,7 @@ pub struct Body {
     pub token: String,
 }
 
-pub async fn exchange(
-    State(state): State<AppState>,
-    Json(body): Json<Body>,
-) -> impl IntoResponse {
+pub async fn exchange(State(state): State<AppState>, Json(body): Json<Body>) -> impl IntoResponse {
     if !constant_time_eq(body.token.as_bytes(), state.master_token.as_bytes()) {
         return (
             StatusCode::UNAUTHORIZED,

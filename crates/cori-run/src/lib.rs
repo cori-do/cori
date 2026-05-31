@@ -158,11 +158,8 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
     let identity = OsUser
         .resolve()
         .context("resolving OS user identity for preflight")?;
-    let cap_report = CapabilityReport::from_capabilities_with(
-        identity,
-        &caps,
-        Some(&paths::credentials_dir()?),
-    );
+    let cap_report =
+        CapabilityReport::from_capabilities_with(identity, &caps, Some(&paths::credentials_dir()?));
 
     let missing_caps = capabilities::validate(
         &caps,

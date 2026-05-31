@@ -8,12 +8,7 @@ use std::net::SocketAddr;
 #[tokio::test]
 async fn serve_refuses_non_loopback() {
     let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let res = cori_console::serve_at(
-        addr,
-        "test-token".to_string(),
-        std::env::temp_dir(),
-    )
-    .await;
+    let res = cori_console::serve_at(addr, "test-token".to_string(), std::env::temp_dir()).await;
     let err = res.unwrap_err().to_string();
     assert!(
         err.contains("non-loopback"),
