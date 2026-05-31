@@ -1,36 +1,35 @@
 [package]
-name = "cori-cli"
+name = "cori-run"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "The `cori` command-line interface."
-
-[[bin]]
-name = "cori"
-path = "src/main.rs"
+description = "Run orchestration library for Cori — the shared pipeline used by the CLI and Console."
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-chrono.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+toml.workspace = true
+semver.workspace = true
+tokio.workspace = true
 temporalio-client.workspace = true
 futures.workspace = true
+
 cori-protocol.workspace = true
+cori-manifest.workspace = true
+cori-compiler.workspace = true
 cori-broker.workspace = true
 cori-worker.workspace = true
-cori-run = { path = "../cori-run" }
-tokio.workspace = true
-comfy-table.workspace = true
-chrono-humanize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

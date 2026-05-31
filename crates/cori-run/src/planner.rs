@@ -1,13 +1,8 @@
-//! Per-step queue assignment (Phase 4 of the redesign).
+//! Per-step queue assignment.
 //!
 //! Pure function: given a [`CompiledWorkflow`], the requesting user's
 //! [`WorkerIdentity`], and a [`ClusterView`] of who advertises which
 //! capabilities, fill in each step's `task_queue` field.
-//!
-//! The planner runs **before** workflow start, in the CLI process —
-//! results are baked into `WorkflowInput.compiled_dag` so the workflow
-//! body stays a deterministic function of its input. The workflow never
-//! re-queries the cluster.
 
 use std::path::Path;
 
@@ -20,21 +15,12 @@ use thiserror::Error;
 use crate::paths;
 
 /// Snapshot of every capability report known to this machine.
-///
-/// v1 implementation: reads `~/.cori/cluster/<queue>.json` written by
-/// `cori work` on startup. Locally that means the user's own worker (if
-/// running) plus any `cori work --shared` pools on the same machine.
-/// For a multi-machine cluster the directory needs to be a shared
-/// filesystem; the redesign notes this is a v1 hack.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterView {
     pub reports: Vec<CapabilityReport>,
 }
 
 impl ClusterView {
-    /// Load every `*.json` in `~/.cori/cluster/`. Missing or unreadable
-    /// files are silently skipped — we'd rather degrade to "no
-    /// advertised worker" than refuse to plan.
     pub fn load() -> Result<Self> {
         let dir = paths::cluster_dir()?;
         Self::load_from(&dir)
@@ -72,9 +58,6 @@ impl ClusterView {
         Ok(Self { reports })
     }
 
-    /// Add an in-process report (the ephemeral worker `cori run` spins
-    /// up). Placed first so it wins ties for `Anywhere` steps when this
-    /// machine can serve them — keeps solo dev on a single queue.
     pub fn add_self(&mut self, report: CapabilityReport) {
         self.reports.insert(0, report);
     }
@@ -114,8 +97,7 @@ pub enum PlacementError {
 }
 
 /// Fill `task_queue` on every step in `compiled` according to its
-/// [`Placement`] and the cluster view. Returns a per-step summary the
-/// CLI can print before starting.
+/// [`Placement`] and the cluster view.
 pub fn assign_queues(
     compiled: &mut CompiledWorkflow,
     requesting: &WorkerIdentity,
@@ -146,8 +128,6 @@ pub fn assign_queues(
                 }
             },
             Placement::RequiresCapability { id } => {
-                // Prefer a service pool, then the requesting user's own
-                // worker if they advertise it.
                 if let Some(r) = cluster.first_service_with(id) {
                     (r.task_queue.clone(), AssignReason::ServicePool)
                 } else if let WorkerIdentity::Person { user_id } = requesting {
@@ -158,19 +138,11 @@ pub fn assign_queues(
                         .map(|_| true)
                         .unwrap_or(false)
                     {
-                        // The user's own worker is on the cluster but
-                        // doesn't advertise this capability — that's a
-                        // definite miss.
                         return Err(PlacementError::MissingCapability {
                             step: step.activity_id.clone(),
                             capability: id.clone(),
                         });
                     } else {
-                        // No worker known at all; the cori-run ephemeral
-                        // worker is the requesting user's queue. Route
-                        // there and let the broker's capability check
-                        // surface a clear error if the cap is really
-                        // missing.
                         (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
                     }
                 } else {
@@ -207,13 +179,9 @@ pub struct StepAssignment {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignReason {
-    /// Routed to the requesting user's own queue.
     RequestingUser,
-    /// The requesting identity is a service pool.
     RequestingService,
-    /// Step needs local FS → user queue.
     LocalFsForUser,
-    /// A shared service pool advertises the required capability.
     ServicePool,
 }
 
@@ -221,8 +189,6 @@ pub enum AssignReason {
 // Write / delete a worker's own report under `~/.cori/cluster/`.
 // ---------------------------------------------------------------------------
 
-/// Write a [`CapabilityReport`] to `~/.cori/cluster/<task_queue>.json`.
-/// Atomic (tempfile + rename). Used by `cori work` to advertise.
 pub fn publish_report(report: &CapabilityReport) -> Result<std::path::PathBuf> {
     let dir = paths::cluster_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating `{}`", dir.display()))?;
@@ -238,8 +204,6 @@ pub fn publish_report(report: &CapabilityReport) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Delete a worker's published report. Best-effort — used by `cori work`
-/// on shutdown.
 pub fn unpublish_report(task_queue: &str) -> Result<()> {
     let path = paths::cluster_dir()?.join(format!("{task_queue}.json"));
     if path.exists() {
@@ -249,7 +213,7 @@ pub fn unpublish_report(task_queue: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests (mirror of cori-cli tests)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -360,7 +324,6 @@ mod tests {
         assert_eq!(summary[0].task_queue, "cori.user.jean");
         assert_eq!(summary[1].task_queue, "cori.service.notion-pool");
         assert_eq!(summary[2].task_queue, "cori.user.jean");
-
         assert_eq!(
             compiled.steps[1].task_queue.as_deref(),
             Some("cori.service.notion-pool"),
@@ -386,7 +349,6 @@ mod tests {
     fn missing_capability_when_user_worker_lacks_it() {
         let me = person("alice");
         let mut cluster = ClusterView::default();
-        // alice has a worker but no `notion` advertised.
         cluster.add_self(report_with(
             me.clone(),
             vec![("local_fs", CapabilityKind::LocalFs)],
@@ -410,9 +372,6 @@ mod tests {
 
     #[test]
     fn solo_no_cluster_falls_through_to_user_queue() {
-        // No workers known anywhere — `cori run` will spin up an
-        // ephemeral worker on the user's queue. Capability check fails
-        // later if the cap is truly missing.
         let me = person("solo");
         let cluster = ClusterView::default();
         let mut compiled = CompiledWorkflow {

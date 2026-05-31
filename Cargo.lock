@@ -416,25 +416,20 @@ dependencies = [
  "clap",
  "comfy-table",
  "cori-broker",
- "cori-compiler",
- "cori-manifest",
  "cori-protocol",
+ "cori-run",
  "cori-worker",
- "dirs",
  "futures",
  "hex",
- "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "temporalio-client",
- "thiserror",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -479,9 +474,38 @@ dependencies = [
 name = "cori-protocol"
 version = "0.2.5-dev"
 dependencies = [
+ "chrono",
  "cori-manifest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cori-run"
+version = "0.2.5-dev"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cori-broker",
+ "cori-compiler",
+ "cori-manifest",
+ "cori-protocol",
+ "cori-worker",
+ "dirs",
+ "futures",
+ "hex",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "temporalio-client",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

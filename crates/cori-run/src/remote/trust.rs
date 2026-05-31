@@ -1,8 +1,4 @@
 //! First-run consent for remote workflows.
-//!
-//! Trust is keyed on `(repo, sha)`. A new sha — whether reached via
-//! `--update` or a maintainer retag — re-prompts. See
-//! `remote-workflows.md` §7.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -81,9 +77,7 @@ pub fn record_consent(spec: &RemoteRef, sha: &str, caps: Vec<String>) -> Result<
     save(&t)
 }
 
-/// Print the consent banner and read a y/N answer. Returns `true` if
-/// the user consented. The caller is responsible for calling
-/// [`record_consent`] before proceeding.
+/// Print the consent banner and read a y/N answer from stdin.
 pub fn prompt_consent(
     spec: &RemoteRef,
     sha: &str,
@@ -132,8 +126,6 @@ pub fn prompt_consent(
     Ok(matches!(trimmed, "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
-/// Capability list ready for storage on a trust entry (and for the
-/// consent prompt). One stable string per declared capability.
 pub fn declared_capability_strings(compiled: &CompiledWorkflow) -> Vec<String> {
     let mut out = Vec::new();
     for c in &compiled.required_cli_binaries {
@@ -195,7 +187,6 @@ fn short_sha(sha: &str) -> String {
     format!("{}...", &sha[..n])
 }
 
-/// `CORI_ASSUME_YES=1` or `--yes` skips the prompt.
 pub fn assume_yes_env() -> bool {
     matches!(
         std::env::var("CORI_ASSUME_YES").as_deref(),

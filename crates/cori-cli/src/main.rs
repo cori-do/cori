@@ -6,13 +6,6 @@
 //! supplied on the CLI.
 
 mod commands;
-mod config;
-mod paths;
-mod planner;
-mod remote;
-mod runtime;
-mod temporal_endpoint;
-mod workflow_loader;
 
 use clap::{Parser, Subcommand};
 

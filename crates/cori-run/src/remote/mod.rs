@@ -3,11 +3,6 @@
 //! Turns a `cori run <ref>` argument that names a git-hosted workflow
 //! into a local directory under `~/.cori/cache/remote/<host>/<repo>/<sha>/<subpath>/`
 //! that the regular workflow loader can compile and execute.
-//!
-//! The handoff to the rest of the CLI is a single function ([`resolve`])
-//! that returns a [`Resolved`] containing the on-disk workflow folder
-//! plus a `source` descriptor for the run trace. See `remote-workflows.md`
-//! for the full design.
 
 pub mod git;
 pub mod pins;
@@ -21,55 +16,27 @@ use anyhow::{Context, Result, bail};
 use crate::config::Config;
 use crate::paths;
 
+// WorkflowSource is now in cori-protocol; re-export for callers.
+pub use cori_protocol::WorkflowSource;
+
 pub use refspec::{ArgClass, RemoteRef, RemoteRefKind, classify_arg};
 
-/// Default set of known git hosts. Additional hosts are added via
-/// `[remotes].hosts = [...]` in `~/.cori/config.toml`.
 const DEFAULT_HOSTS: &[&str] = &["github.com", "gitlab.com", "bitbucket.org"];
-
-/// Origin of a workflow execution — recorded in the run trace.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WorkflowSource {
-    Local {
-        path: String,
-    },
-    Remote {
-        host: String,
-        repo: String,
-        subpath: String,
-        #[serde(rename = "ref")]
-        ref_str: String,
-        sha: String,
-    },
-}
 
 /// Outcome of [`resolve`]: the on-disk workflow folder and provenance.
 pub struct Resolved {
-    /// Local filesystem directory the workflow loader should compile.
     pub workflow_dir: PathBuf,
-    /// Where the workflow came from (for the run trace).
     pub source: WorkflowSource,
-    /// Original ref + spec for remote resolutions (used by consent gate
-    /// and history-key derivation). `None` for local.
     pub remote: Option<ResolvedRemote>,
 }
 
 pub struct ResolvedRemote {
     pub spec: RemoteRef,
     pub sha: String,
-    /// Whether this (repo, sha) pair was newly pinned during this run.
-    /// Drives whether we need to re-prompt for consent.
     #[allow(dead_code)]
     pub newly_pinned: bool,
 }
 
-/// Resolve `arg` into a local workflow folder. Implements §2 of
-/// `remote-workflows.md`: local always wins; otherwise classify as a
-/// git ref and dispatch to the remote pipeline.
-///
-/// `update` corresponds to the `--update` flag (mutable refs are
-/// re-resolved; immutable refs are no-ops with sha verification).
 pub fn resolve(arg: &str, update: bool) -> Result<Resolved> {
     match classify_arg(arg)? {
         ArgClass::Local(path) => {
@@ -126,8 +93,6 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
     let mut newly_pinned = false;
     let sha = if let Some(existing) = existing_pin.clone() {
         if update {
-            // Re-resolve. Immutable refs (exact tag, exact sha) noop —
-            // but still verify the remote agrees.
             let resolved = resolve_ref_to_sha(&spec)?;
             if matches!(spec.kind, RemoteRefKind::ExactSha | RemoteRefKind::ExactTag) {
                 if resolved != existing {
@@ -155,7 +120,6 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
             existing
         }
     } else {
-        // First resolution — always touches the network.
         let resolved = resolve_ref_to_sha(&spec)?;
         pins.set(pin_key.clone(), resolved.clone());
         pins::save(&pins)?;
@@ -163,10 +127,8 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
         resolved
     };
 
-    // Ensure the working tree at <sha> exists.
     let checkout = ensure_checkout(&spec, &sha)?;
 
-    // Subpath validation: must contain a `manifest.md`.
     let workflow_dir = if spec.subpath.is_empty() {
         checkout.clone()
     } else {
@@ -188,8 +150,6 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
         );
     }
 
-    // Record the now-known subpath split back into the spec for the
-    // caller (used by history-key derivation).
     let _ = &mut spec;
 
     Ok(Resolved {
@@ -213,8 +173,6 @@ fn short(s: &str) -> usize {
     8.min(s.len())
 }
 
-/// Resolve the `RemoteRef` to a sha by querying the remote with
-/// `git ls-remote`. Implements §2.3 (`go mod`-style).
 fn resolve_ref_to_sha(spec: &RemoteRef) -> Result<String> {
     let url = spec.clone_url();
     let entries = git::ls_remote(&url).with_context(|| {
@@ -233,9 +191,6 @@ fn resolve_ref_to_sha(spec: &RemoteRef) -> Result<String> {
                     return Ok(entry.sha.clone());
                 }
             }
-            // No entry matched the sha through refs — accept the sha
-            // verbatim if it parses, since `git fetch <sha>` may still
-            // work for unadvertised commits.
             if want.chars().all(|c| c.is_ascii_hexdigit()) && want.len() >= 7 {
                 return Ok(want.clone());
             }
@@ -337,7 +292,6 @@ fn ensure_checkout(spec: &RemoteRef, sha: &str) -> Result<PathBuf> {
         return Ok(checkout_dir);
     }
 
-    // Make sure the sha is present locally; if not, fetch.
     if !git::has_commit(&bare, sha)? {
         git::fetch_all(&bare)?;
         if !git::has_commit(&bare, sha)? {
@@ -361,8 +315,6 @@ fn has_any_file(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Run-history key for a remote workflow: `<repo_name>-<short_hash(host/repo//subpath)>`.
-/// Ignores `@ref` so different versions of the same workflow share history.
 pub fn remote_run_history_key(spec: &RemoteRef) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

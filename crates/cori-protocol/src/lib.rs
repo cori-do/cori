@@ -4,6 +4,9 @@
 //! compiles to. The CLI stores it, the worker executes it, and the trace
 //! recorder references its `activity_id` values.
 
+pub mod trace;
+pub use trace::{ActivityTrace, CostSummary, RunTrace, TokenUsage, WorkflowSource};
+
 use serde::{Deserialize, Serialize};
 
 pub use cori_manifest::Manifest;

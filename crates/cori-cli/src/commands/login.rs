@@ -33,7 +33,7 @@ use cori_broker::llm::LlmCredentials;
 use cori_broker::oauth::{self, McpOAuthConfig, Owner, TokenKey, default_store, pkce};
 use cori_protocol::WorkerIdentity;
 
-use crate::paths;
+use cori_run::paths;
 
 const PKCE_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -183,7 +183,7 @@ fn notify_open_workflows(server_id: &str) {
     use cori_worker::workflow::{CoriWorkflow, ReauthSignalArgs};
     use temporalio_client::{WorkflowListOptions, WorkflowSignalOptions};
 
-    let endpoint = match crate::temporal_endpoint::resolve() {
+    let endpoint = match cori_run::temporal_endpoint::resolve() {
         Ok(e) => e,
         Err(_) => return,
     };

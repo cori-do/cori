@@ -26,7 +26,7 @@ Do not re-litigate these without explicit human approval.
 8. **Two-place ownership enforcement (defense in depth).** (a) The planner routes each step to a queue derived from authenticated identity — physical isolation. (b) The broker resolves credentials keyed by `user_id` in `WorkflowInput` — token isolation. Both checks must stay; do not collapse to one.
 9. **Worker presence is Temporal-native.** Use `DescribeTaskQueue` only on human-frequency paths (`cori status`, `cori check`). Never per-step. The v1 fallback for cluster presence is reading `~/.cori/cluster/<queue>.json` files published by `cori work`. **Do not** use Temporal Worker Versioning / Build IDs for capability routing — versioning is reserved for future Cori-binary rollout. **Do not** introduce Nexus in v1 (noted as v2 possibility).
 10. **TypeScript only for user step files.** Zod is the schema library. Static parsing of step files is regex-based today (see [crates/cori-compiler/src/step_parser.rs](crates/cori-compiler/src/step_parser.rs)) — a swc/oxc migration is planned but not in v1.
-11. **Local Temporal auto-spawn, no bundling.** If `temporal.host` isn't configured and `127.0.0.1:7233` isn't already serving, `cori run` shells out `temporal server start-dev` as a supervised child (see [crates/cori-cli/src/temporal_endpoint.rs](crates/cori-cli/src/temporal_endpoint.rs)). Production deployments override via `temporal.host` in `~/.cori/config.toml`. No Temporal Cloud support.
+11. **Local Temporal auto-spawn, no bundling.** If `temporal.host` isn't configured and `127.0.0.1:7233` isn't already serving, `cori run` shells out `temporal server start-dev` as a supervised child (see [crates/cori-run/src/temporal_endpoint.rs](crates/cori-run/src/temporal_endpoint.rs)). Production deployments override via `temporal.host` in `~/.cori/config.toml`. No Temporal Cloud support.
 
 ---
 
@@ -57,13 +57,16 @@ No `init`, `start`, `register`, `workflows`, `save`, `ls`, `rm`, `serve`, `worke
 
 ```
 crates/                                Rust workspace (edition 2024, MSRV 1.94)
-  cori-cli/        binary `cori`; clap-derived commands, planner, temporal_endpoint, remote-ref resolver
+  cori-cli/        binary `cori`; clap-derived commands only (thin wrappers over cori-run)
+  cori-run/        run pipeline library: planner, temporal_endpoint, remote-ref resolver,
+                   workflow_loader, paths, config, ConsentCallback, ProgressSink, run_workflow()
   cori-worker/     Temporal worker: workflow + activities + runtime + runner
   cori-compiler/   manifest + step parsing → CompiledWorkflow (computes Placement)
   cori-broker/     capability broker (cli, code, mcp, llm, oauth, cli_auth) — trust boundary
   cori-ledger/     placeholder for cost analytics (mostly empty in v1)
   cori-manifest/   YAML schema + parser (manifest.md frontmatter + body)
-  cori-protocol/   wire types (CompiledWorkflow, Placement, WorkerIdentity, task_queue_for, …)
+  cori-protocol/   wire types (CompiledWorkflow, Placement, WorkerIdentity, RunTrace,
+                   ActivityTrace, TokenUsage, task_queue_for, …)
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
   runner/     Deno script that hosts `code` activities
@@ -72,7 +75,7 @@ examples/          Reference workflows (hello_world, code_only, translate_produc
 scripts/install.sh
 ```
 
-The remote-ref pipeline lives in [crates/cori-cli/src/remote/](crates/cori-cli/src/remote/mod.rs): `refspec` (parsing + semver), `git` (system `git` subprocess wrappers), `pins` (`pins.json`), `trust` (`trust.json` + consent prompt).
+The remote-ref pipeline lives in [crates/cori-run/src/remote/](crates/cori-run/src/remote/mod.rs): `refspec` (parsing + semver), `git` (system `git` subprocess wrappers), `pins` (`pins.json`), `trust` (`trust.json` + consent prompt).
 
 ---
 
@@ -218,11 +221,11 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 | A new CLI verb | [crates/cori-cli/src/commands/](crates/cori-cli/src/commands) + wire it in [main.rs](crates/cori-cli/src/main.rs). |
 | A new LLM provider | [crates/cori-broker/src/llm/providers.rs](crates/cori-broker/src/llm/providers.rs). Add credential resolution to the same module, pricing to `pricing.rs`. |
 | A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skills/cori_save_workflow/references/manifest_schema.md](skills/cori_save_workflow/references/manifest_schema.md) in lockstep. |
-| Trace shape changes | The trace types live in [crates/cori-cli/src/commands/run.rs](crates/cori-cli/src/commands/run.rs) (`RunTrace`, `ActivityTrace`). Update `skills/cori_save_workflow/references/trace_interpretation.md` too. |
-| A new `Placement` variant or routing rule | [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) for the enum, [crates/cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs) for how it's inferred, [crates/cori-cli/src/planner.rs](crates/cori-cli/src/planner.rs) for how it maps to a queue. |
+| Trace shape changes | The trace types live in [crates/cori-protocol/src/trace.rs](crates/cori-protocol/src/trace.rs) (`RunTrace`, `ActivityTrace`, `TokenUsage`). Update `skills/cori_save_workflow/references/trace_interpretation.md` too. |
+| A new `Placement` variant or routing rule | [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) for the enum, [crates/cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs) for how it's inferred, [crates/cori-run/src/planner.rs](crates/cori-run/src/planner.rs) for how it maps to a queue. |
 | A new CLI auth adapter | [crates/cori-broker/src/cli_auth/](crates/cori-broker/src/cli_auth) — one tiny adapter per known CLI. |
 | A new OAuth flow | [crates/cori-broker/src/oauth/](crates/cori-broker/src/oauth) (`flow/pkce.rs`, `flow/device.rs`, `flow/client_credentials.rs`, `flow/dcr.rs`, `metadata.rs`). |
-| A new known git host for remote workflows | The default allowlist (`github.com`, `gitlab.com`, `bitbucket.org`) is in [crates/cori-cli/src/remote/mod.rs](crates/cori-cli/src/remote/mod.rs); custom hosts go in `~/.cori/config.toml` under `[remotes].hosts`. |
+| A new known git host for remote workflows | The default allowlist (`github.com`, `gitlab.com`, `bitbucket.org`) is in [crates/cori-run/src/remote/mod.rs](crates/cori-run/src/remote/mod.rs); custom hosts go in `~/.cori/config.toml` under `[remotes].hosts`. |
 | Builtin step support (`map`/`for_each`/`branch`/`parallel`/`wait`) | This is the largest known gap. Implement in workflow code in [workflow.rs](crates/cori-worker/src/workflow.rs); the compiler already accepts the kind but the runtime short-circuits with "deferred" notices. Keep all builtin logic deterministic (no activity dispatch inside `wait`, etc.). |
 
 ---

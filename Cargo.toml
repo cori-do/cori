@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cori-cli",
+    "crates/cori-run",
     "crates/cori-worker",
     "crates/cori-compiler",
     "crates/cori-broker",
@@ -73,6 +74,7 @@ cori-compiler = { path = "crates/cori-compiler" }
 cori-ledger = { path = "crates/cori-ledger" }
 cori-manifest = { path = "crates/cori-manifest" }
 cori-protocol = { path = "crates/cori-protocol" }
+cori-run = { path = "crates/cori-run" }
 cori-worker = { path = "crates/cori-worker" }
 
 [profile.release]

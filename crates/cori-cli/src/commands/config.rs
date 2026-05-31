@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::config::Config;
+use cori_run::config::Config;
 
 pub fn get(key: Option<&str>) -> Result<()> {
     let cfg = Config::load()?;

@@ -17,8 +17,7 @@ use cori_broker::identity::{IdentitySource, OsUser};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 
 use crate::commands::run::resolve_llm_credentials;
-use crate::remote;
-use crate::{paths, planner, temporal_endpoint};
+use cori_run::{paths, planner, remote, temporal_endpoint};
 
 pub fn status() -> Result<()> {
     let endpoint = temporal_endpoint::resolve()?;

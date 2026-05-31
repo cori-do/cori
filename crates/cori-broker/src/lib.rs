@@ -38,7 +38,7 @@ pub mod runtime;
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -65,21 +65,8 @@ pub struct ActivityOutcome {
 }
 
 /// Per-activity token accounting for LLM calls.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-impl std::ops::Add for TokenUsage {
-    type Output = TokenUsage;
-    fn add(self, rhs: TokenUsage) -> TokenUsage {
-        TokenUsage {
-            input_tokens: self.input_tokens + rhs.input_tokens,
-            output_tokens: self.output_tokens + rhs.output_tokens,
-        }
-    }
-}
+/// Re-exported from `cori-protocol` for backward compatibility.
+pub use cori_protocol::TokenUsage;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

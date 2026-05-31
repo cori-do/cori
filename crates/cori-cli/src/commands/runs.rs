@@ -15,8 +15,8 @@ use chrono::{DateTime, Utc};
 use chrono_humanize::HumanTime;
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
 
-use super::run::RunTrace;
-use crate::paths;
+use cori_protocol::RunTrace;
+use cori_run::paths;
 
 struct RunEntry {
     trace: RunTrace,

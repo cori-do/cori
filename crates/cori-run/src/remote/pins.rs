@@ -1,7 +1,4 @@
 //! `~/.cori/cache/remote/pins.json` — `<ref> → <sha>` map.
-//!
-//! The pin is the source of truth for what a reference resolves to.
-//! See `remote-workflows.md` §4 for the resolution algorithm.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,8 +49,6 @@ pub fn load_from(path: &Path) -> Result<Pins> {
     if bytes.is_empty() {
         return Ok(Pins::default());
     }
-    // Accept either the flat `{ "<key>": { "sha": "...", ... } }`
-    // shape or the older inline-string `{ "<key>": "<sha>" }` shape.
     if let Ok(p) = serde_json::from_slice::<Pins>(&bytes) {
         return Ok(p);
     }

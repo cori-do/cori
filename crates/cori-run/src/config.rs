@@ -1,8 +1,4 @@
 //! `~/.cori/config.toml` reader/writer.
-//!
-//! v1 keeps the config a flat `key.subkey = value` TOML document and exposes
-//! it through `cori config get|set <dotted.key> [<value>]`. No schema —
-//! later commands look up the values they care about.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -86,10 +82,6 @@ impl Config {
         Ok(())
     }
 
-    /// Flatten the document into dotted keys for `cori config get` with no
-    /// argument. Used by later commands; kept here so the surface is one
-    /// module.
-    #[allow(dead_code)]
     pub fn flatten(&self) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();
         flatten_into(&self.doc, String::new(), &mut out);

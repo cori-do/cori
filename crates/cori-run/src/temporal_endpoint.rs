@@ -10,20 +10,6 @@
 //!    write its PID to `~/.cori/state/temporal-dev.pid`, and wait up
 //!    to 10s for the gRPC port to accept connections.
 //!    `source = AutoSpawnedDev`.
-//!
-//! The auto-spawned child is **not** killed when `cori run` exits —
-//! it's a shared dev resource (one per machine). On every fresh
-//! `cori run` we re-check the PID file; if the process is still
-//! alive we attach to its socket instead of spawning a new one.
-//!
-//! On the first auto-spawn per machine we print:
-//!
-//! ```text
-//! Started local execution engine.
-//! ```
-//!
-//! and touch `~/.cori/state/dev-engine-announced` so subsequent
-//! invocations are silent.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,14 +32,11 @@ pub enum EndpointSource {
 
 pub struct ResolvedEndpoint {
     pub target: String,
-    /// Where the endpoint came from. Future phases will display this
-    /// in `cori doctor` / status output; today nothing reads it.
     #[allow(dead_code)]
     pub source: EndpointSource,
 }
 
-/// Honour `$CORI_TEMPORAL_TARGET` (a back-door used by tests and the
-/// pre-redesign documentation) before consulting config.toml.
+/// Honour `$CORI_TEMPORAL_TARGET` before consulting config.toml.
 pub fn resolve() -> Result<ResolvedEndpoint> {
     if let Ok(env) = std::env::var("CORI_TEMPORAL_TARGET")
         && !env.is_empty()
@@ -83,7 +66,6 @@ pub fn resolve() -> Result<ResolvedEndpoint> {
         });
     }
 
-    // Existing PID file with a live process? Attach without respawning.
     if pid_alive_from_file()? && preflight_check(DEV_TARGET, PREFLIGHT_TIMEOUT).is_ok() {
         return Ok(ResolvedEndpoint {
             target: DEV_TARGET.to_string(),
@@ -119,7 +101,6 @@ fn pid_alive_from_file() -> Result<bool> {
 
 #[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
-    // `kill -0` checks for the process existence without sending a signal.
     unsafe { libc_kill(pid as i32, 0) == 0 }
 }
 
@@ -131,8 +112,6 @@ unsafe extern "C" {
 
 #[cfg(not(unix))]
 fn is_alive(_pid: u32) -> bool {
-    // No portable way without an extra dep. Fall through to re-spawn;
-    // the user will see the spawn fail if Temporal is already bound.
     false
 }
 
@@ -167,11 +146,9 @@ fn spawn_dev_temporal() -> Result<()> {
 
     #[cfg(unix)]
     {
-        // Detach so the child outlives this `cori run` invocation.
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                // New session — survives shell hangup, doesn't get our SIGINT.
                 if libc_setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -185,10 +162,8 @@ fn spawn_dev_temporal() -> Result<()> {
         .context("spawning `temporal server start-dev`")?;
     std::fs::write(pid_file()?, child.id().to_string())
         .with_context(|| "writing temporal-dev.pid")?;
-    // Forget the child handle so its `Drop` doesn't reap it on our exit.
     std::mem::forget(child);
 
-    // Wait for the gRPC port to accept connections.
     let started = Instant::now();
     loop {
         if preflight_check(DEV_TARGET, Duration::from_millis(200)).is_ok() {
@@ -203,7 +178,6 @@ fn spawn_dev_temporal() -> Result<()> {
         std::thread::sleep(Duration::from_millis(150));
     }
 
-    // One-line notice the first time per machine.
     let flag = announce_flag()?;
     if !flag.exists() {
         println!("Started local execution engine.");

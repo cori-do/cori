@@ -1,16 +1,4 @@
 //! `cori check <path>` — Phase 6 preflight.
-//!
-//! Reproduces the early pipeline of [`commands::run`] up to (but not
-//! including) `start_workflow`: load + plan + capability authed
-//! probe + Temporal reachability. Per-step readiness is printed,
-//! plus a capability summary; exit code reflects readiness.
-//!
-//! Exit codes:
-//! - `0` — every step's queue + capability is `✓ ready`
-//! - `2` — at least one capability is missing or unauthed
-//!
-//! `cori run` calls [`preflight`] internally and refuses to start
-//! when readiness != 0, surfacing the same actionable lines.
 
 use anyhow::{Context, Result};
 use cori_broker::capabilities::{self, Capabilities, Capability, CapabilityKind, CapabilityReport};
@@ -18,26 +6,17 @@ use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::runtime as broker_runtime;
 use cori_protocol::{CompiledWorkflow, Placement, StepKind, WorkerIdentity, task_queue_for};
 
-use crate::remote;
-use crate::{
-    commands::run::resolve_llm_credentials, paths, planner, runtime as cli_runtime,
-    temporal_endpoint, workflow_loader,
-};
+use cori_run::{paths, planner, runtime as cli_runtime, temporal_endpoint, workflow_loader};
+use cori_run::remote;
 
-/// Outcome of running [`preflight`] against a workflow folder.
+use crate::commands::run::resolve_llm_credentials;
+
 pub struct PreflightReport {
-    /// True iff every step's capability is authed and the Temporal
-    /// endpoint is reachable. `cori run` refuses to start when false.
     pub ready: bool,
-    /// One [`StepReadiness`] per step in execution order.
     pub steps: Vec<StepReadiness>,
-    /// Workflow-level capabilities (CLI / MCP / LLM) with authed flag.
     pub capabilities: Vec<CapabilityReadiness>,
-    /// Whether the configured Temporal endpoint accepted a TCP connect.
     pub temporal_reachable: bool,
-    /// Resolved Temporal endpoint (URL form), purely for display.
     pub endpoint: String,
-    /// Requesting user's task queue (for the banner).
     pub user_task_queue: String,
 }
 
@@ -49,7 +28,6 @@ pub struct StepReadiness {
     pub task_queue: String,
     #[allow(dead_code)]
     pub placement: Placement,
-    /// `None` when the step is ready; `Some(reason)` otherwise.
     pub missing: Option<String>,
 }
 
@@ -58,7 +36,6 @@ pub struct CapabilityReadiness {
     pub kind: CapabilityKind,
     pub authed: bool,
     pub detail: Option<String>,
-    /// Login hint (`cori login <id>`) when not authed.
     pub login_command: Option<String>,
 }
 
@@ -71,9 +48,6 @@ pub fn check(path: String, update: bool, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Reusable preflight body. Loads the workflow folder, resolves
-/// identity + capabilities, runs the planner, and probes Temporal.
-/// Never panics or exits — callers decide whether to print or bail.
 pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightReport> {
     let (resolved, mut loaded) = workflow_loader::resolve_arg(arg, update)?;
 
@@ -127,9 +101,6 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
     );
     cluster.add_self(self_report.clone());
 
-    // Planner may fail with PlacementError (missing capability on the
-    // cluster). Translate that into a non-ready report rather than
-    // bailing — the user wants to see the full picture.
     let plan_result = planner::assign_queues(&mut loaded.compiled, &identity, &cluster);
 
     let steps = build_step_readiness(&loaded.compiled, &plan_result, &cluster);

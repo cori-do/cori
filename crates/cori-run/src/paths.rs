@@ -1,17 +1,5 @@
 //! Resolves Cori's local state directories.
 //!
-//! Phase 2 of the redesign moves Cori to the disk-as-truth layout:
-//!
-//! ```text
-//! ~/.cori/
-//! ├── config.toml      # CLI config (LLM keys, temporal.host, ...)
-//! ├── cache/           # content-addressed compiled DAGs (rebuildable)
-//! ├── runs/            # run-trace JSON, keyed by workflow folder path
-//! ├── credentials/     # token metadata; real secrets in OS keychain
-//! ├── runtime/         # bundled Deno runner (extracted lazily)
-//! └── state/           # transient: dev-temporal pid, announce flags
-//! ```
-//!
 //! Directories are created lazily on first write (`cori init` is gone).
 //! The home directory can be overridden with `$CORI_HOME`, which makes
 //! integration tests trivial.
@@ -44,7 +32,6 @@ pub fn runs_dir() -> Result<PathBuf> {
     Ok(home()?.join("runs"))
 }
 
-#[allow(dead_code)] // populated in Phase 5
 pub fn credentials_dir() -> Result<PathBuf> {
     Ok(home()?.join("credentials"))
 }
@@ -58,9 +45,6 @@ pub fn state_dir() -> Result<PathBuf> {
 }
 
 /// Worker capability reports (`~/.cori/cluster/<task_queue>.json`).
-/// v1 is local-disk-only: enough for solo dev and small
-/// shared-filesystem clusters. Phase 6+ replaces with a Temporal-native
-/// advertising mechanism.
 pub fn cluster_dir() -> Result<PathBuf> {
     Ok(home()?.join("cluster"))
 }
@@ -78,4 +62,9 @@ pub fn pins_file() -> Result<PathBuf> {
 /// `~/.cori/cache/remote/trust.json` — consented (repo, sha) pairs.
 pub fn trust_file() -> Result<PathBuf> {
     Ok(remote_cache_dir()?.join("trust.json"))
+}
+
+/// `~/.cori/schedules/` — schedule intent store (§3.2).
+pub fn schedules_dir() -> Result<PathBuf> {
+    Ok(home()?.join("schedules"))
 }

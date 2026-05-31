@@ -2,19 +2,6 @@
 //!
 //! Boots a long-lived Temporal worker bound to the identity-derived
 //! task queue (see [`cori_protocol::task_queue_for`]).
-//!
-//! - Default: identity = current OS user → queue `cori.user.<id>`.
-//! - `--shared <name>`: identity = service pool → queue
-//!   `cori.service.<name>`. Loudly announced — capabilities exposed
-//!   here are usable by any authorized user whose run routes to them.
-//!
-//! Phase 3 caveat: a worker process needs a `source_root` to resolve
-//! `step.source_path` for `code` / `cli` / `mcp` / `llm` steps. Until
-//! Phase 4 ships per-step routing (and the planner sends the absolute
-//! workflow path through `WorkflowInput`), this command sets
-//! `source_root` to the current working directory. Steps whose source
-//! lives elsewhere will fail with a clear path error — run `cori run`
-//! from the workflow's parent folder, or wait for Phase 4.
 
 use anyhow::{Context, Result, bail};
 use cori_broker::capabilities::{self, CapabilityReport};
@@ -27,7 +14,7 @@ use cori_worker::runner::serve_worker_until_signal;
 use cori_worker::runtime::{CoriTemporalRuntime, DEFAULT_NAMESPACE, preflight_check};
 
 use crate::commands::run::resolve_llm_credentials;
-use crate::{paths, planner, runtime as cli_runtime, temporal_endpoint};
+use cori_run::{paths, planner, runtime as cli_runtime, temporal_endpoint};
 
 pub fn work(shared: Option<String>) -> Result<()> {
     let identity = resolve_identity(shared.as_deref())?;
@@ -44,8 +31,6 @@ pub fn work(shared: Option<String>) -> Result<()> {
         )
     })?;
 
-    // Discover all capabilities this worker can offer (no per-workflow
-    // filter — Phase 4 routes by capability declaration anyway).
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
     let caps = capabilities::discover(&home, &[], &credentials);
@@ -74,10 +59,6 @@ pub fn work(shared: Option<String>) -> Result<()> {
         bail!("Temporal server unavailable");
     }
 
-    // Publish this worker's capability report so other CLIs running on
-    // the same machine (and, with a shared cluster dir, the same
-    // cluster) can plan placement against it. Best-effort cleanup
-    // happens after `serve_worker_until_signal` returns.
     let report = CapabilityReport::from_capabilities_with(
         identity.clone(),
         &caps,
@@ -100,7 +81,6 @@ pub fn work(shared: Option<String>) -> Result<()> {
         serve_worker_until_signal(&rt).await
     });
 
-    // Best-effort unpublish; never fail the command on this.
     if let Err(e) = planner::unpublish_report(&queue) {
         tracing::warn!(error = %format!("{e:#}"), "could not remove capability report");
     }

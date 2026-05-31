@@ -10,11 +10,10 @@
 
 use anyhow::{Context, Result};
 use chrono_humanize::HumanTime;
-use cori_protocol::{Placement, StepKind};
+use cori_protocol::{Placement, RunTrace, StepKind};
 
-use super::run::RunTrace;
-use crate::remote::{self, ArgClass};
-use crate::{paths, workflow_loader};
+use cori_run::remote::{self, ArgClass};
+use cori_run::{paths, workflow_loader};
 
 pub fn show(path: String) -> Result<()> {
     let class = remote::classify_arg(&path)?;
