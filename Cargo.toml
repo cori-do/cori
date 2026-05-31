@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cori-cli",
+    "crates/cori-console",
     "crates/cori-run",
     "crates/cori-worker",
     "crates/cori-compiler",
@@ -71,6 +72,7 @@ rand = "0.9"
 
 cori-broker = { path = "crates/cori-broker" }
 cori-compiler = { path = "crates/cori-compiler" }
+cori-console = { path = "crates/cori-console" }
 cori-ledger = { path = "crates/cori-ledger" }
 cori-manifest = { path = "crates/cori-manifest" }
 cori-protocol = { path = "crates/cori-protocol" }

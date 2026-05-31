@@ -45,6 +45,7 @@ pub fn status() -> Result<()> {
 
     print_header();
     print_endpoint(&endpoint.target, reachable);
+    print_console_line();
     print_identity(&identity, &queue);
     println!();
     print_capabilities(&self_report);
@@ -53,6 +54,29 @@ pub fn status() -> Result<()> {
     println!();
     print_pinned_remotes()?;
     Ok(())
+}
+
+fn print_console_line() {
+    let Ok(path) = paths::console_state_file() else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return;
+    };
+    let port = v.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+    if port == 0 {
+        return;
+    }
+    let started = v
+        .get("started_at")
+        .and_then(|s| s.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| chrono_humanize::HumanTime::from(dt.with_timezone(&chrono::Utc)).to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("Console:    http://127.0.0.1:{port}  (started {started})");
 }
 
 fn print_header() {
