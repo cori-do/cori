@@ -522,15 +522,18 @@ dependencies = [
  "cori-protocol",
  "cori-run",
  "cori-worker",
+ "futures",
  "rand 0.9.4",
  "rust-embed",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -572,11 +575,13 @@ version = "0.2.5-dev"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "cori-broker",
  "cori-compiler",
  "cori-manifest",
  "cori-protocol",
  "cori-worker",
+ "cron",
  "dirs",
  "futures",
  "hex",
@@ -3215,6 +3220,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

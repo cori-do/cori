@@ -1,19 +1,27 @@
 //! HTTP router.
 //!
-//! Layering:
-//!   1. `POST /api/session` — unauthenticated (this is how the SPA
-//!      trades the URL token for a cookie).
-//!   2. Every other `/api/...` route — behind the cookie middleware.
-//!   3. Any unmatched `/api/{rest}` returns a real 404 JSON — never
-//!      the SPA fallback. The catch-all 404 lives in the same
-//!      protected branch as the read endpoints so cross-site pages
-//!      can't probe the surface anonymously.
-//!   4. Anything else falls through to `assets::serve`, which serves
+//! Auth layering:
+//!   1. `POST /api/session` — unauthenticated (token-for-cookie exchange).
+//!   2. Read endpoints — `require_cookie`.
+//!   3. State-changing endpoints (`POST /api/runs`, `POST /api/trust`)
+//!      — `require_cookie` **and** `require_bearer` (Authorization
+//!      header carries the master token). The bearer layer defeats
+//!      CSRF: a cross-site page in the same browser has the cookie
+//!      but cannot read the bearer secret.
+//!   4. Any unmatched `/api/{rest}` returns a real 404 JSON — never
+//!      the SPA shell.
+//!   5. Anything else falls through to `assets::serve`, which serves
 //!      the embedded SPA (or `index.html` for deep links).
 
 pub mod runs;
+pub mod schedules;
 pub mod session;
 pub mod status;
+pub mod stream;
+pub mod trigger;
+pub mod trust;
+pub mod workers;
+pub mod workflow;
 pub mod workflows;
 
 use axum::{
@@ -22,19 +30,39 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::{any, delete, get, patch, post},
 };
 use serde_json::json;
 
 use crate::{assets, state::AppState};
 
 pub fn build_router(state: AppState) -> Router {
-    let protected = Router::new()
+    // Cookie + bearer: state-changing endpoints.
+    let mutations = Router::new()
+        .route("/api/runs", post(trigger::handler))
+        .route("/api/trust", post(trust::handler))
+        .route("/api/schedules", post(schedules::create))
+        .route("/api/schedules/{id}", patch(schedules::patch))
+        .route("/api/schedules/{id}", delete(schedules::delete))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_bearer,
+        ));
+
+    // Cookie only: read endpoints + the SSE stream.
+    let reads = Router::new()
         .route("/api/status", get(status::handler))
         .route("/api/runs", get(runs::list))
         .route("/api/runs/{key}/{filename}", get(runs::trace))
+        .route("/api/runs/{run_id}/stream", get(stream::handler))
+        .route("/api/workflow", get(workflow::handler))
         .route("/api/workflows/recent", get(workflows::recent))
-        // Anything else under `/api/` is a 404 JSON — never the SPA shell.
+        .route("/api/workers", get(workers::handler))
+        .route("/api/schedules", get(schedules::list));
+
+    let protected = reads
+        .merge(mutations)
+        // /api/* catch-all 404 so the SPA fallback never swallows API typos.
         .route("/api/{*rest}", any(api_not_found))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -46,9 +74,6 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(open)
         .merge(protected)
-        // SPA fallback: everything outside `/api/*` resolves to an
-        // embedded asset, falling through to `index.html` for client
-        // routing on deep links.
         .fallback(assets::serve)
         .with_state(state)
 }

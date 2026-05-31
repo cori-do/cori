@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
 };
 use cori_protocol::RunTrace;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{error::ApiError, state::AppState};
@@ -21,10 +21,26 @@ pub struct ListQuery {
     pub limit: Option<usize>,
 }
 
+/// One row in the runs list. Carries the on-disk coordinates so the
+/// SPA can deep-link to `/runs/:key/:utc` — those aren't recoverable
+/// from `RunTrace` alone (the run-history directory key depends on
+/// the absolute source path hash, not the workflow id).
+#[derive(Serialize)]
+pub struct RunListEntry {
+    /// Run-history directory under `~/.cori/runs/`. URL-safe.
+    pub key: String,
+    /// Trace filename without the `.json` extension. URL-safe.
+    pub utc: String,
+    /// Full trace payload. Inlined so the list view doesn't need a
+    /// second round-trip for the columns it shows.
+    #[serde(flatten)]
+    pub trace: RunTrace,
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Vec<RunTrace>>, ApiError> {
+) -> Result<Json<Vec<RunListEntry>>, ApiError> {
     let runs_root = state.home.join("runs");
     let limit = q.limit.unwrap_or(50);
     let workflow_id = q.workflow_id.clone();
@@ -70,8 +86,8 @@ fn collect_traces(
     runs_root: &Path,
     workflow_filter: Option<String>,
     limit: usize,
-) -> anyhow::Result<Vec<RunTrace>> {
-    let mut out: Vec<RunTrace> = Vec::new();
+) -> anyhow::Result<Vec<RunListEntry>> {
+    let mut out: Vec<RunListEntry> = Vec::new();
     if !runs_root.exists() {
         return Ok(out);
     }
@@ -81,6 +97,9 @@ fn collect_traces(
         if !dir.is_dir() {
             continue;
         }
+        let Some(key) = dir.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
         let Ok(files) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -89,13 +108,13 @@ fn collect_traces(
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            if path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with('.'))
-            {
+            let Some(filename) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if filename.starts_with('.') {
                 continue;
             }
+            let utc = filename.trim_end_matches(".json").to_string();
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
@@ -107,10 +126,14 @@ fn collect_traces(
             {
                 continue;
             }
-            out.push(trace);
+            out.push(RunListEntry {
+                key: key.clone(),
+                utc,
+                trace,
+            });
         }
     }
-    out.sort_by_key(|t| Reverse(t.started_at));
+    out.sort_by_key(|e| Reverse(e.trace.started_at));
     out.truncate(limit);
     Ok(out)
 }

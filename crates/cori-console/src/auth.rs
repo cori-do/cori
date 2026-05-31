@@ -39,6 +39,28 @@ pub async fn require_cookie(
     Ok(next.run(req).await)
 }
 
+/// Reject the request unless `Authorization: Bearer <master_token>`
+/// matches. Layered on top of [`require_cookie`] on state-changing
+/// endpoints to defeat CSRF — a malicious page in the same browser
+/// has the cookie automatically but cannot read the bearer secret.
+pub async fn require_bearer(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if !constant_time_eq(presented.as_bytes(), state.master_token.as_bytes()) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(next.run(req).await)
+}
+
 /// Extract `name=value` from a `Cookie` header. Returns the first match.
 pub fn cookie_value(header: &str, name: &str) -> Option<String> {
     for part in header.split(';') {

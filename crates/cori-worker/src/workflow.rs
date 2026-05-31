@@ -65,6 +65,13 @@ pub struct WorkflowInput {
     /// short value to exercise the timeout path quickly.
     #[serde(default)]
     pub reauth_timeout_secs: Option<u64>,
+    /// Absolute filesystem path of the workflow's folder on the
+    /// triggering machine. Carried into every `ActivityInput` so the
+    /// activity resolves step files against the **workflow's** root,
+    /// not the worker process's startup `cwd`. Empty string for tests
+    /// that build in-memory DAGs.
+    #[serde(default)]
+    pub source_root: String,
 }
 
 /// Output of [`CoriWorkflow`].
@@ -197,6 +204,7 @@ impl CoriWorkflow {
                 run_id: run_id.clone(),
                 user_id: input.user_id.clone(),
                 dry_run: input.dry_run,
+                source_root: input.source_root.clone(),
             };
 
             let opts = activity_options_for_step(step);

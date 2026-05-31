@@ -10,10 +10,12 @@
 //! `cori-compiler`, `cori-manifest`, `cori-worker`, `cori-protocol`.
 
 pub mod config;
+pub mod cron_driver;
 pub mod paths;
 pub mod planner;
 pub mod remote;
 pub mod runtime;
+pub mod schedules;
 pub mod temporal_endpoint;
 pub mod workflow_loader;
 
@@ -185,20 +187,41 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
 // run_workflow — the full pipeline
 // ---------------------------------------------------------------------------
 
+/// Inputs to [`run_workflow`]. Bundled so we can grow the surface in
+/// later phases (e.g. Phase 4 schedule context) without breaking
+/// callers.
+pub struct RunRequest {
+    pub source: String,
+    pub params: JsonValue,
+    pub dry_run: bool,
+    pub update: bool,
+    pub trigger: Trigger,
+    /// Pre-generated run id. Used by Cori Console so it can return
+    /// `{ run_id, stream_url }` synchronously from `POST /api/runs`
+    /// before the workflow has started. `None` means
+    /// `run_workflow` mints one (current CLI behaviour).
+    pub run_id: Option<String>,
+}
+
 /// Execute a workflow end-to-end and return the persisted [`RunTrace`].
 ///
 /// This is the single code path shared by `cori run`, Cori Console
 /// (`POST /api/runs`), and scheduled runs. It does not exit the
 /// process; the caller handles UI/error handling.
 pub async fn run_workflow(
-    source: String,
-    params: JsonValue,
-    dry_run: bool,
-    update: bool,
-    trigger: Trigger,
+    req: RunRequest,
     consent: ConsentCallback,
     progress: Arc<dyn ProgressSink>,
 ) -> Result<RunTrace> {
+    let RunRequest {
+        source,
+        params,
+        dry_run,
+        update,
+        trigger,
+        run_id: caller_run_id,
+    } = req;
+
     // 1. Resolve + compile
     let (resolved, mut loaded) = workflow_loader::resolve_arg(&source, update)?;
 
@@ -342,7 +365,7 @@ pub async fn run_workflow(
     progress.on_plan(&assignments);
 
     // 9. Build Temporal worker + run
-    let run_id = new_run_id();
+    let run_id = caller_run_id.unwrap_or_else(new_run_id);
     let started_at = Utc::now();
     let start_instant = Instant::now();
 
@@ -365,6 +388,11 @@ pub async fn run_workflow(
         reauth_timeout_secs: std::env::var("CORI_REAUTH_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok()),
+        // The activity worker may be a different process (`cori work`)
+        // started from a different cwd. Carry the absolute workflow
+        // root so step file resolution doesn't depend on the worker's
+        // startup directory.
+        source_root: loaded.absolute_path.display().to_string(),
     };
 
     let workflow_output_res = {

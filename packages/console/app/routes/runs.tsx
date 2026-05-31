@@ -1,9 +1,9 @@
 import { Link, useSearchParams } from "react-router";
-import { apiGet, type RunTrace } from "../lib/api";
+import { apiGet, type RunListEntry } from "../lib/api";
 import { formatCost, formatDuration, formatRelative } from "../lib/format";
 
 interface LoaderData {
-  runs: RunTrace[];
+  runs: RunListEntry[];
   filter: string | null;
 }
 
@@ -16,27 +16,13 @@ export async function clientLoader({
   const filter = url.searchParams.get("workflow_id");
   const qs = new URLSearchParams({ limit: "100" });
   if (filter) qs.set("workflow_id", filter);
-  const runs = await apiGet<RunTrace[]>(`/api/runs?${qs.toString()}`);
+  const runs = await apiGet<RunListEntry[]>(`/api/runs?${qs.toString()}`);
   return { runs, filter };
-}
-
-function runHistoryKey(run: RunTrace): string | null {
-  // Derive the run-history key from the source. For Phase 2 the
-  // server tells us the key implicitly via the on-disk directory
-  // path — but our list endpoint only returns the trace contents.
-  // We embed the key in the URL via the source path; if unknown,
-  // skip the link.
-  const src = (run as unknown as { source?: { kind?: string; path?: string } }).source;
-  if (!src) return null;
-  // For local runs, the key is `<folder_name>-<8hex>`. We can't
-  // reconstruct it without the hash, so we link via /runs/?run_id=…
-  // pattern when needed. For Phase 2 keep it simple: don't link.
-  return null;
 }
 
 export default function Runs({ loaderData }: { loaderData: LoaderData }) {
   const { runs, filter } = loaderData;
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [, setSearchParams] = useSearchParams();
   return (
     <>
       <h1>{filter ? `Runs — ${filter}` : "Runs"}</h1>
@@ -61,7 +47,8 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
 
       {runs.length === 0 ? (
         <div className="empty">
-          No runs recorded yet. Start one with{" "}
+          No runs recorded yet. Start one from{" "}
+          <Link to="/run">Run</Link> or via{" "}
           <code>cori run &lt;path-or-ref&gt;</code>.
         </div>
       ) : (
@@ -78,17 +65,21 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
           </thead>
           <tbody>
             {runs.map((r) => (
-              <tr key={r.run_id}>
-                <td title={r.started_at}>{formatRelative(r.started_at)}</td>
-                <td>
+              <tr key={r.run_id} className="row-link">
+                <RowCell run={r}>
+                  <span title={r.started_at}>{formatRelative(r.started_at)}</span>
+                </RowCell>
+                <RowCell run={r}>
                   <strong>{r.workflow_id}</strong>
-                </td>
-                <td>
+                </RowCell>
+                <RowCell run={r}>
                   <span className={`pill ${pillFor(r.status)}`}>{r.status}</span>
-                </td>
-                <td>{formatDuration(r.duration_ms)}</td>
-                <td>{formatCost(r.cost?.total_eur)}</td>
-                <td className="mono">{r.run_id.slice(0, 8)}</td>
+                </RowCell>
+                <RowCell run={r}>{formatDuration(r.duration_ms)}</RowCell>
+                <RowCell run={r}>{formatCost(r.cost?.total_eur)}</RowCell>
+                <RowCell run={r} mono>
+                  {r.run_id.slice(0, 8)}
+                </RowCell>
               </tr>
             ))}
           </tbody>
@@ -96,11 +87,35 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
       )}
 
       <p className="hint">
-        Direct deep-link by run key:{" "}
-        <code>/runs/&lt;dir&gt;/&lt;timestamp&gt;</code> — use{" "}
-        <code>cori runs show &lt;run_id&gt;</code> to find the path.
+        Click any row for the full step-by-step trace. Same data{" "}
+        <code>cori runs show &lt;run_id&gt;</code> prints.
       </p>
     </>
+  );
+}
+
+function RowCell({
+  run,
+  children,
+  mono,
+}: {
+  run: RunListEntry;
+  children: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <td className={mono ? "mono" : undefined}>
+      <Link
+        to={`/runs/${encodeURIComponent(run.key)}/${encodeURIComponent(run.utc)}`}
+        style={{
+          color: "inherit",
+          textDecoration: "none",
+          display: "block",
+        }}
+      >
+        {children}
+      </Link>
+    </td>
   );
 }
 

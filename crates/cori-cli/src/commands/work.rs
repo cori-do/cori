@@ -105,19 +105,48 @@ pub fn work(opts: WorkOpts) -> Result<()> {
         .build()
         .context("starting tokio runtime for Temporal worker")?;
 
+    let identity_for_cron = identity.clone();
     let serve_result = tokio_rt.block_on(async {
         let rt = CoriTemporalRuntime::connect(endpoint.target.clone(), DEFAULT_NAMESPACE, &queue)
             .await?;
-        match console_cfg {
+
+        // Background cron driver: scans `~/.cori/schedules/` every
+        // 30s and fires enabled entries whose `identity` matches us.
+        // We rely on the worker shutdown to kill the tokio runtime
+        // (and therefore this task) — no explicit cancellation token.
+        let (cron_stop_tx, cron_stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let cron_task = tokio::spawn(async move {
+            cori_run::cron_driver::run(identity_for_cron, async move {
+                let _ = cron_stop_rx.await;
+            })
+            .await;
+        });
+
+        let result = match console_cfg {
             None => serve_worker_until_signal(&rt).await,
             Some(cfg) => {
-                tokio::try_join!(
-                    serve_worker_until_signal(&rt),
-                    cori_console::serve(cfg.port, cfg.token, paths::home()?),
-                )
-                .map(|_| ())
+                // `select!`, not `try_join!`: the Console's `axum::serve(...)`
+                // future runs forever, so a `try_join!` would keep the
+                // process alive after the worker handled Ctrl-C and
+                // shut down. With `select!`, whichever future finishes
+                // first (typically the worker on SIGINT) drops the
+                // other and lets us exit cleanly.
+                let console_fut =
+                    cori_console::serve(cfg.port, cfg.token, paths::home()?);
+                let worker_fut = serve_worker_until_signal(&rt);
+                tokio::pin!(console_fut, worker_fut);
+                tokio::select! {
+                    r = &mut worker_fut => r,
+                    r = &mut console_fut => r,
+                }
             }
-        }
+        };
+
+        // Stop the cron driver before we exit the runtime.
+        let _ = cron_stop_tx.send(());
+        let _ = cron_task.await;
+
+        result
     });
 
     if let Err(e) = planner::unpublish_report(&queue) {

@@ -77,6 +77,12 @@ pub struct ActivityInput {
     /// When true, this activity should return a mocked outcome without
     /// touching the outside world.
     pub dry_run: bool,
+    /// Absolute filesystem path of the workflow folder on the
+    /// triggering machine. `run_step` joins it with `source_path` to
+    /// locate the step file. Falls back to `BrokerCtx::source_root` if
+    /// empty (legacy traces / smoke-test in-memory DAGs).
+    #[serde(default)]
+    pub source_root: String,
 }
 
 /// Per-activity output. Mirrors what the in-process executor previously
@@ -159,7 +165,15 @@ enum BrokerKind {
 /// activity boundary to the sync broker via `spawn_blocking`.
 async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutput, ActivityError> {
     let ctx = broker_ctx();
-    let absolute_path = ctx.source_root.join(&input.source_path);
+    // Prefer the triggering workflow's root (carried in ActivityInput).
+    // Falls back to the worker process's startup `cwd` only when the
+    // input came from a pre-fix trace or an in-memory smoke-test DAG.
+    let workflow_root: std::path::PathBuf = if input.source_root.is_empty() {
+        ctx.source_root.clone()
+    } else {
+        std::path::PathBuf::from(&input.source_root)
+    };
+    let absolute_path = workflow_root.join(&input.source_path);
     let dry_run = input.dry_run;
     let step_input = input.input.clone();
     let user_id = input.user_id.clone();

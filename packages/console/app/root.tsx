@@ -9,15 +9,17 @@ import {
   useRouteError,
 } from "react-router";
 
+import { ThemeToggle } from "./components/theme-toggle";
 import { ensureSession } from "./lib/session";
 import "./styles/base.css";
 
+// Runs synchronously in <head> before paint to avoid a light flash on
+// dark systems. Mirrors the standard "ThemeProvider" trick.
+const THEME_BOOT = `(function(){try{var k='cori-theme';var s=localStorage.getItem(k);var d=s==='dark'||(!s&&matchMedia('(prefers-color-scheme: dark)').matches);if(d)document.documentElement.classList.add('dark');}catch(e){}})();`;
+
 export const links = () => [
-  {
-    rel: "icon",
-    href:
-      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9A%99%EF%B8%8F%3C/text%3E%3C/svg%3E",
-  },
+  { rel: "icon", type: "image/png", href: "/cori-mark.png" },
+  { rel: "apple-touch-icon", href: "/cori-mark.png" },
 ];
 
 export const meta = () => [{ title: "Cori Console" }];
@@ -46,16 +48,35 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <Meta />
         <Links />
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>
       <body>
         <header className="topbar">
-          <Link to="/" className="brand">
-            Cori Console
+          <Link to="/" className="brand" aria-label="Cori Console — home">
+            <img
+              src="/cori-logo.png"
+              alt="Cori"
+              className="brand-logo brand-logo-light"
+              width={2600}
+              height={1072}
+            />
+            <img
+              src="/cori-logo-white.png"
+              alt="Cori"
+              className="brand-logo brand-logo-dark"
+              width={2600}
+              height={1072}
+            />
+            <span className="brand-tag">Console</span>
           </Link>
           <nav>
             <Link to="/">Dashboard</Link>
+            <Link to="/run">Run</Link>
             <Link to="/runs">Runs</Link>
+            <Link to="/workers">Workers</Link>
+            <Link to="/schedules">Schedules</Link>
           </nav>
+          <ThemeToggle />
         </header>
         <main className="main">{children}</main>
         <ScrollRestoration />

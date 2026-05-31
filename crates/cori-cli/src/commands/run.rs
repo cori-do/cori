@@ -65,11 +65,14 @@ pub fn run(
         .map_err(|e| anyhow::anyhow!("starting tokio runtime: {e}"))?;
 
     let trace = tokio_rt.block_on(cori_run::run_workflow(
-        path,
-        initial_params,
-        dry_run_mode,
-        update,
-        cori_run::Trigger::Cli,
+        cori_run::RunRequest {
+            source: path,
+            params: initial_params,
+            dry_run: dry_run_mode,
+            update,
+            trigger: cori_run::Trigger::Cli,
+            run_id: None,
+        },
         consent,
         progress,
     ))?;

@@ -11,6 +11,8 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod error;
+pub mod runs;
+pub mod sink;
 pub mod state;
 pub mod token;
 

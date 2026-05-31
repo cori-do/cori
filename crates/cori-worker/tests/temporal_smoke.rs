@@ -79,6 +79,9 @@ async fn runs_a_trivial_builtin_workflow() {
         user_params: JsonValue::Object(JsonMap::new()),
         dry_run: false,
         reauth_timeout_secs: None,
+        // Empty → activity falls back to BrokerCtx::source_root, which
+        // the smoke test sets up directly.
+        source_root: String::new(),
     };
 
     let out = run_workflow_once(&rt, "cori-smoke".to_string(), input)
