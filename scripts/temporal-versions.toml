@@ -1,9 +1,0 @@
-[temporal_cli]
-version = "1.7.0"
-
-[temporal_cli.checksums]
-linux_amd64 = "8b5de72e622f4ae062d0d5d948ca398de6212d63b2f25766a1cb810a3dc2d0ed"
-linux_arm64 = "f78d8cf0353b4e04c9024f11e66eaba372f07efe9956de0f41cf03bd31c302f3"
-darwin_amd64 = "a289156e464bdbb667a125b5e94abeab98a74814771ea4828731970cab4e907c"
-darwin_arm64 = "88a59ea7b1a51309a873e2a914360865123d5b36528d55f8d7c34c6d79007fda"
-windows_amd64 = "ce84637dbf794d71e0c530d1b250edfb7b692784213e234f7d50ea310491e01a"
