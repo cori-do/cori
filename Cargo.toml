@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.9-dev"
+version = "0.2.10-dev"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/cori-do/cori"
