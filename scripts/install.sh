@@ -30,7 +30,10 @@ BIN_NAME="cori"
 TEMPORAL_REPO="temporalio/cli"
 DEFAULT_TEMPORAL_VERSION="1.7.0"
 TEMPORAL_VERSION="${TEMPORAL_VERSION:-}"
-TEMPORAL_MANIFEST_URL="${TEMPORAL_MANIFEST_URL:-https://cli.cori.do/temporal-versions.toml}"
+
+DENO_REPO="denoland/deno"
+DEFAULT_DENO_VERSION="2.8.1"
+DENO_VERSION="${DENO_VERSION:-}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -138,36 +141,6 @@ verify_sha256() {
   fi
 }
 
-# Minimal TOML reader: prints the string value of `<key>` inside section
-# `[<section>]`. Supports plain `key = "value"` lines only — enough for the
-# temporal manifest. Returns empty string if not found.
-parse_toml_value() {
-  local file="$1" section="$2" key="$3"
-  awk -v section="[$section]" -v key="$key" '
-    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*\[/ {
-      hdr = $0
-      sub(/[[:space:]]*#.*$/, "", hdr)
-      gsub(/[[:space:]]/, "", hdr)
-      in_section = (hdr == section)
-      next
-    }
-    in_section {
-      line = $0
-      sub(/[[:space:]]*#.*$/, "", line)
-      eq = index(line, "=")
-      if (eq == 0) next
-      k = trim(substr(line, 1, eq - 1))
-      v = trim(substr(line, eq + 1))
-      if (k != key) next
-      if (substr(v, 1, 1) == "\"") {
-        end = index(substr(v, 2), "\"")
-        if (end > 0) { print substr(v, 2, end - 1); exit }
-      }
-    }
-  ' "$file" 2>/dev/null
-}
 
 install_cori() {
   local stem="${BIN_NAME}-${CORI_TAG}-${TARGET}"
@@ -228,43 +201,72 @@ install_temporal() {
     *) warn "unsupported architecture for temporal install — skipping"; return ;;
   esac
 
-  local manifest="$WORK_DIR/temporal-versions.toml"
-  local manifest_ok=0
-  if download "$TEMPORAL_MANIFEST_URL" "$manifest" 2>/dev/null; then
-    manifest_ok=1
-  else
-    warn "could not fetch temporal manifest from $TEMPORAL_MANIFEST_URL — falling back to defaults"
-  fi
+  local resolved_version="${TEMPORAL_VERSION:-$DEFAULT_TEMPORAL_VERSION}"
 
-  local resolved_version="$TEMPORAL_VERSION"
-  if [[ -z "$resolved_version" && $manifest_ok -eq 1 ]]; then
-    resolved_version="$(parse_toml_value "$manifest" 'temporal_cli' 'version')"
-  fi
-  [[ -n "$resolved_version" ]] || resolved_version="$DEFAULT_TEMPORAL_VERSION"
-
-  local expected_sha=""
-  if [[ $manifest_ok -eq 1 ]]; then
-    local manifest_version
-    manifest_version="$(parse_toml_value "$manifest" 'temporal_cli' 'version')"
-    if [[ -n "$manifest_version" && "$manifest_version" == "$resolved_version" ]]; then
-      expected_sha="$(parse_toml_value "$manifest" 'temporal_cli.checksums' "${temporal_os}_${temporal_arch}")"
-    else
-      warn "temporal manifest pins ${manifest_version:-<unknown>} but installing ${resolved_version} — skipping checksum verification"
-    fi
-  fi
-
+  local asset="temporal_cli_${resolved_version}_${temporal_os}_${temporal_arch}.tar.gz"
   local archive="$WORK_DIR/temporal.tar.gz"
-  local url="https://github.com/${TEMPORAL_REPO}/releases/download/v${resolved_version}/temporal_cli_${resolved_version}_${temporal_os}_${temporal_arch}.tar.gz"
+  local base_url="https://github.com/${TEMPORAL_REPO}/releases/download/v${resolved_version}"
   log "Downloading temporal CLI v${resolved_version}"
-  download "$url" "$archive"
-  if [[ -n "$expected_sha" ]]; then
-    verify_sha256 "$archive" "$expected_sha"
+  download "${base_url}/${asset}" "$archive"
+
+  local sums="$WORK_DIR/temporal-checksums.txt"
+  if download "${base_url}/checksums.txt" "$sums" 2>/dev/null; then
+    local expected
+    expected="$(grep "${asset}" "$sums" | awk '{print $1}')"
+    if [[ -n "$expected" ]]; then
+      verify_sha256 "$archive" "$expected"
+    else
+      warn "no entry for ${asset} in checksums.txt — skipping verification"
+    fi
   else
-    warn "no checksum available for temporal_cli ${temporal_os}_${temporal_arch} — skipping verification"
+    warn "no checksums.txt available for temporal v${resolved_version} — skipping verification"
   fi
   tar -xzf "$archive" -C "$WORK_DIR"
   install -m 0755 "$WORK_DIR/temporal" "$INSTALL_DIR/temporal"
   log "Installed temporal ${resolved_version} → $INSTALL_DIR/temporal"
+}
+
+install_deno() {
+  if command -v deno >/dev/null; then
+    log "deno already on PATH ($(command -v deno)) — skipping"
+    return
+  fi
+  local deno_os deno_arch
+  case "$(uname -s)" in
+    Linux)  deno_os="unknown-linux-gnu" ;;
+    Darwin) deno_os="apple-darwin" ;;
+    CYGWIN*|MINGW*|MSYS*)
+      warn "Deno auto-install is not supported on Windows — install it manually from https://deno.com/"
+      return
+      ;;
+    *) warn "unsupported OS for deno install — skipping"; return ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  deno_arch="x86_64" ;;
+    arm64|aarch64) deno_arch="aarch64" ;;
+    *) warn "unsupported architecture for deno install — skipping"; return ;;
+  esac
+
+  local resolved_version="${DENO_VERSION:-$DEFAULT_DENO_VERSION}"
+  local asset="deno-${deno_arch}-${deno_os}.zip"
+  local archive="$WORK_DIR/deno.zip"
+  local url="https://github.com/${DENO_REPO}/releases/download/v${resolved_version}/${asset}"
+  log "Downloading Deno v${resolved_version}"
+  download "$url" "$archive"
+
+  local sums="$WORK_DIR/deno.zip.sha256sum"
+  if download "${url}.sha256sum" "$sums" 2>/dev/null; then
+    local expected
+    expected="$(awk '{print $1}' "$sums" | head -n1)"
+    verify_sha256 "$archive" "$expected"
+  else
+    warn "no checksum file available for ${asset} — skipping verification"
+  fi
+
+  command -v unzip >/dev/null || die "unzip is required to extract deno"
+  unzip -q -o "$archive" -d "$WORK_DIR"
+  install -m 0755 "$WORK_DIR/deno" "$INSTALL_DIR/deno"
+  log "Installed deno ${resolved_version} → $INSTALL_DIR/deno"
 }
 
 ensure_path() {
@@ -286,6 +288,7 @@ while [[ $# -gt 0 ]]; do
     --prefix|--dir)     CORI_INSTALL_DIR="$2"; shift 2 ;;
     --repo)             CORI_REPO="$2"; shift 2 ;;
     --temporal-version) TEMPORAL_VERSION="$2"; shift 2 ;;
+    --deno-version)     DENO_VERSION="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^set -euo pipefail/p' "$0" | sed -n 's/^# \{0,1\}//p' | sed '$d'
       exit 0
@@ -307,6 +310,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 install_cori
 install_temporal
+install_deno
 ensure_path
 
 log "Done. Try:"
