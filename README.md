@@ -3,65 +3,52 @@
 
 ### Turn one-off agent conversations into deterministic, re-runnable workflows.
 
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https://raw.githubusercontent.com/cori-do/cori/main/Cargo.toml&query=$.workspace.package.version&label=version&prefix=v&color=blue)](https://github.com/cori-do/cori/blob/main/Cargo.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
 
 
-**You describe a task to an agent once. Cori captures it as a typed TypeScript
-workflow you can run from your terminal — every time, the same way, with a
-full trace of what happened.**
-
-
-
+Describe a task to an agent once. Cori captures it as a typed TypeScript
+workflow you can re-run from your terminal — same way every time, with a
+full trace.
 
 ```bash
 cori run ./translate_product_sheets_fr
 cori run cori-do/workflows/code_only
 ```
 
-> Status: `v0.2.10-dev` — APIs may change.
-
 ---
 
 ## Why Cori
 
-- **No registry, no UI.** Workflows are folders. Run them by path or by git ref.
-- **Deterministic.** The agent writes the workflow at design time. At runtime
-  there's no LLM in the loop unless a step explicitly asks for one.
-- **Typed end to end.** Steps are TypeScript with [Zod](https://zod.dev) schemas.
-  Inputs and outputs are validated at every boundary.
-- **Safe by default.** Every external call (CLI, HTTP, MCP, OAuth) goes through
-  a broker. Credentials never touch workflow code.
-- **Reliable.** Backed by [Temporal](https://temporal.io) — retries, resumes,
-  and a JSON trace of every run.
+- **Folders, not a registry.** Run workflows by path or git ref.
+- **No LLM at runtime.** The agent authors once; execution is deterministic.
+- **Typed end to end.** TypeScript + [Zod](https://zod.dev) at every boundary.
+- **Brokered side effects.** Credentials never touch workflow code.
+- **Temporal-backed.** Retries, resumes, JSON trace per run — see [Temporal](https://temporal.io).
 
 ---
 
-## Install
+## Install & try it
 
 ```bash
 curl -fsSL https://cli.cori.do/install.sh | bash
+cori run cori-do/workflows/hello_world
 ```
 
-Or build from source:
+First run auto-spawns a local Temporal dev server, compiles the workflow,
+and writes a trace to `~/.cori/runs/`. No credentials needed.
+
+<details>
+<summary>Build from source</summary>
 
 ```bash
 cargo build --release --workspace
 pnpm install && pnpm build
 ```
 
----
-
-## Quickstart
-
-Run the bundled demo — no credentials, no setup:
-
-```bash
-cori run examples/hello_world
-```
-
-That's it. Cori auto-spawns a local Temporal dev server the first time, compiles
-the workflow, runs three steps, and writes a trace to `~/.cori/runs/`.
+</details>
 
 ---
 
@@ -76,13 +63,10 @@ Learn more at [docs.cori.do](https://docs.cori.do).
 ```text
 cori run <path-or-ref>     Run a workflow
 cori check <path-or-ref>   Validate without running
-cori show <path-or-ref>    Inspect a workflow + recent runs
-cori runs list|show        Browse run history
 cori work                  Stay online as a worker
-cori login <capability>    Sign into a CLI or OAuth provider
-cori status                Show machine identity, workers, endpoint
-cori config get|set        Edit ~/.cori/config.toml
 ```
+
+Full command reference at [docs.cori.do](https://docs.cori.do).
 
 Pass parameters inline:
 
@@ -146,7 +130,7 @@ to teach your agent how to author them. To install the skill into your agent, ru
 
 ---
 
-## Where things live
+## On-disk layout
 
 ```text
 ~/.cori/
@@ -161,7 +145,7 @@ No SQLite, no hidden state. Everything Cori knows is a file you can read.
 
 ---
 
-## Multi-machine
+## Run steps on other machines
 
 Need a step to run on a machine with a specific CLI or credential? Start a
 worker there:
@@ -176,25 +160,6 @@ cori run ./pull_notion_pages
 
 Cori routes each step to the right machine via Temporal task queues derived
 from authenticated identity. Cross-user dispatch is impossible by construction.
-
----
-
-## Repo layout
-
-```text
-crates/        Rust workspace
-  cori-cli         the `cori` binary
-  cori-worker      Temporal worker (workflow + activities)
-  cori-compiler    manifest + step parsing → compiled DAG
-  cori-broker      trust boundary for all side effects
-  cori-protocol    wire types
-  cori-manifest    manifest YAML schema
-packages/      pnpm workspace
-  sdk              @cori-do/sdk — what step files import
-  runner           runtime for sandboxed `code` steps
-skills/        agent skills for authoring workflows
-examples/      reference workflows
-```
 
 ---
 
