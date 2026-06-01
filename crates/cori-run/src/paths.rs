@@ -68,8 +68,3 @@ pub fn trust_file() -> Result<PathBuf> {
 pub fn schedules_dir() -> Result<PathBuf> {
     Ok(home()?.join("schedules"))
 }
-
-/// `~/.cori/state/console.json` — runtime location of the active Console.
-pub fn console_state_file() -> Result<PathBuf> {
-    Ok(state_dir()?.join("console.json"))
-}

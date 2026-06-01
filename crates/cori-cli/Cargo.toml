@@ -28,11 +28,9 @@ cori-protocol.workspace = true
 cori-broker.workspace = true
 cori-worker.workspace = true
 cori-run = { path = "../cori-run" }
-cori-console.workspace = true
 tokio.workspace = true
 comfy-table.workspace = true
 chrono-humanize.workspace = true
-webbrowser.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

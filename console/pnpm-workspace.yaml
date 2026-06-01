@@ -1,0 +1,8 @@
+# Single-package "workspace" — needed only so pnpm reads the
+# `onlyBuiltDependencies` setting below. The frontend is not part of
+# the parent `cori/` pnpm workspace by design (see §5.9 of the
+# implementation guide).
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

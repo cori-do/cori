@@ -1,0 +1,37 @@
+[package]
+name = "cori-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cori — Manage your repeatable workflows."
+
+[lib]
+name = "cori_console_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+notify.workspace = true
+
+cori-run.workspace = true
+cori-protocol.workspace = true
+cori-broker.workspace = true
+cori-worker.workspace = true
+cori-compiler.workspace = true
+cori-manifest.workspace = true

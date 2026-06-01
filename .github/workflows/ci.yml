@@ -26,8 +26,19 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
-      - name: cargo build
-        run: cargo build --workspace --all-targets
+      - name: Install Linux Tauri deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf
+      - name: cargo build (CLI + workspace, excluding desktop)
+        # cori-console (Tauri) requires the bundled temporal sidecar
+        # binary at console/src-tauri/binaries/temporal-<triple> to
+        # build. The placeholder stubs committed for development are
+        # not viable artefacts to ship. Build it from desktop-release.yml
+        # where the real binary gets downloaded.
+        run: cargo build --workspace --exclude cori-console --all-targets
       - name: cori --version
         run: cargo run -p cori-cli -- --version
 
@@ -45,10 +56,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
+      - name: Install Linux Tauri deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # cori-console excluded — same reason as the build job above.
+        run: cargo clippy --workspace --exclude cori-console --all-targets -- -D warnings
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude cori-console
 
   ts-build:
     name: TypeScript build + lint

@@ -63,9 +63,6 @@ jobs:
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build Console SPA
-        run: pnpm --filter @cori-do/console build
-
       - name: Install aarch64 Linux cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |

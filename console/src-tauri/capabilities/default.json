@@ -1,0 +1,34 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Cori main window — IPC + scoped sidecar spawn.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "temporal",
+          "sidecar": true,
+          "args": [
+            "server",
+            "start-dev",
+            "--port",
+            { "validator": "^\\d+$" },
+            "--ui-port",
+            { "validator": "^\\d+$" },
+            "--headless",
+            "--db-filename",
+            { "validator": ".*" },
+            "--log-level",
+            { "validator": "^(error|warn|info|debug)$" }
+          ]
+        }
+      ]
+    },
+    "shell:allow-kill",
+    "opener:default"
+  ]
+}

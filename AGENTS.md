@@ -21,7 +21,7 @@ Do not re-litigate these without explicit human approval.
 3. **Single execution path.** The old in-process executor was deleted during the Temporal migration. Do not reintroduce it, do not feature-flag a parallel path. Temporal is the only runtime.
 4. **DAG in `WorkflowInput`.** The full compiled DAG (including per-step `task_queue` assigned by the planner) is serialized into `WorkflowInput.compiled_dag` at workflow start. The workflow body never reads disk — that would break determinism on replay.
 5. **Broker is the trust boundary.** Every external side effect (`std::process::Command`, HTTP, MCP, OAuth) goes through [crates/cori-broker](crates/cori-broker/src/lib.rs). Activity handlers are thin wrappers over broker functions via `tokio::task::spawn_blocking` (the broker is sync; the Temporal worker is async).
-6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (Console-registered cron schedules — fired by the cron driver inside `cori work`), `state/console.json` (runtime location of the Console — port + pid, never the token), `config.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
+6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (cron schedules — fired by the cron driver inside the Cori Console desktop app or `cori work`), `config.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
 7. **Identity-derived task queues.** Queue names are `cori.user.<user_id>` (`Person` identity, from `OsUser` in v1) or `cori.service.<pool>` (`Service`, from `cori work --shared <name>`). Helpers live in [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) (`task_queue_for`, `identity_from_queue`). **Cross-user dispatch is impossible by construction** — Temporal's matching layer physically separates queues. The old `cori-default` constant is gone; do not reintroduce a default queue.
 8. **Two-place ownership enforcement (defense in depth).** (a) The planner routes each step to a queue derived from authenticated identity — physical isolation. (b) The broker resolves credentials keyed by `user_id` in `WorkflowInput` — token isolation. Both checks must stay; do not collapse to one.
 9. **Worker presence is Temporal-native.** Use `DescribeTaskQueue` only on human-frequency paths (`cori status`, `cori check`). Never per-step. The v1 fallback for cluster presence is reading `~/.cori/cluster/<queue>.json` files published by `cori work`. **Do not** use Temporal Worker Versioning / Build IDs for capability routing — versioning is reserved for future Cori-binary rollout. **Do not** introduce Nexus in v1 (noted as v2 possibility).
@@ -39,8 +39,7 @@ cori run <path-or-ref> [--json] [--dry-run] [--update] [--yes] [<param>=<value>.
 cori check <path-or-ref> [--update] [--yes]                # preflight only
 cori show <path-or-ref>                                    # inspect workflow + recent runs
 cori runs list|show                                        # read run history
-cori work [--shared <name>] [--no-console] [--console]     # put this machine in the loop +
-          [--console-port <port>] [--console-open]         #   serve Cori Console on 127.0.0.1
+cori work [--shared <name>]                                # put this machine in the loop (headless)
 cori login <capability>                                    # OAuth/CLI sign-in
 cori status                                                # machine: endpoint + identity + caps + workers + pinned remotes
 cori config get|set                                        # ~/.cori/config.toml access
@@ -70,10 +69,11 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
                    ActivityTrace, TokenUsage, task_queue_for, …)
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
-  runner/     Deno script that hosts `code` activities
-  console/         @cori-do/console — React Router v7 SPA (`ssr: false`).
-                   `pnpm --filter @cori-do/console build` → build/client/,
-                   embedded into cori-console by rust-embed at compile time.
+  runner/          Deno script that hosts `code` activities
+console/                               Cori Console — Tauri v2 desktop app
+  src-tauri/       Rust crate `cori-console` (tray-resident shell, bundled Temporal sidecar,
+                   in-process worker, IPC commands)
+  app/             React Router v7 SPA (`ssr: false`) served by the Tauri webview
 skills/            Cori agent skills (authored via `npx skills add cori-do/cori`)
 examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
 scripts/install.sh
@@ -95,7 +95,7 @@ cargo test --workspace
 pnpm -r lint && pnpm -r typecheck && pnpm -r test
 ```
 
-**Build ordering for the Console**: `pnpm --filter @cori-do/console build` must run **before** `cargo build -p cori-console` so the SPA assets exist at the path `cori-console/build.rs` embeds via `rust-embed`. The build script will emit a `cargo:warning` and write a placeholder `index.html` if the assets are missing — the binary still compiles, but `/` serves a "console not built" splash until you run the SPA build.
+**Building the desktop app** (`console/`): run `pnpm install && pnpm --dir console build` to install frontend deps and produce `console/build/client/`. Then `cargo tauri build` from `console/src-tauri/` produces the bundled installer for the host platform. For development use `cargo tauri dev` (or `pnpm --dir console dev`), which starts the Vite dev server and the Tauri shell with hot reload.
 
 CI builds on Linux/Mac/Windows; tests run on Linux only.
 
@@ -250,11 +250,10 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
                            #              <repo_or_subpath_leaf>-<short(host/repo//subpath)> (remote)
   credentials/             # OAuth/CLI TOKEN METADATA only (expiry, owner). Tokens → OS keychain.
   cluster/<queue>.json     # capability reports published by `cori work` (v1 cluster-presence hack)
-  schedules/<id>.json      # schedule intent — read by the cron driver inside `cori work`
-                           #   (id = sha256(source + schedule)[..12]). Console CRUDs this.
+  schedules/<id>.json      # schedule intent — read by the cron driver inside the desktop app
+                           #   or `cori work` (id = sha256(source + schedule)[..12])
   runtime/                 # cached Deno binary + node_modules
-  state/                   # temporal-dev.pid, dev-engine-announced marker,
-                           # console.json (port + started_at + pid; NO token)
+  state/                   # temporal-dev.pid, dev-engine-announced marker
 ```
 
 No SQLite, no schema, no migrations. Cross-trace queries are filesystem walks. If a hot path ever needs an index, add a rebuildable file under `cache/` — never promote files back to a system of record.
@@ -270,7 +269,7 @@ Remote-workflow auth: Cori never stores git credentials. SSH (`git@host:repo`) u
 
 Push back if asked to add any of these during v1 work:
 
-- Multi-user web management plane, cost dashboards, RBAC, audit logs, multi-user orgs. **Carve-out:** Cori Console (`crates/cori-console` + `packages/console`) is a single-user local web UI served by `cori work` on `127.0.0.1` only — it is a read-and-trigger surface, not a multi-user management plane. Don't widen it beyond that.
+- Multi-user web management plane, cost dashboards, RBAC, audit logs, multi-user orgs. **Carve-out:** Cori Console (`console/`) is a single-user local desktop app — a Tauri v2 binary that bundles Temporal and runs an in-process worker. Read + trigger only; no cloud, no RBAC, no cost plane.
 - Cori cloud workers; only self-hosted workers
 - Serverless adapter (Lambda/Cloudflare)
 - Hub / marketplace for shared workflows

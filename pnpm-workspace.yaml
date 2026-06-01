@@ -1,5 +1,6 @@
 packages:
-  - "packages/*"
+  - "packages/runner"
+  - "packages/sdk"
 allowBuilds:
   esbuild: true
 onlyBuiltDependencies:

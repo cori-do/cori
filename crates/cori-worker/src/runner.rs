@@ -14,6 +14,8 @@
 //! current task can block for the workflow's lifetime — the per-run
 //! CLI pattern handles this by giving each `cori run` its own runtime.
 
+use std::future::Future;
+
 use anyhow::Result;
 use temporalio_client::{WorkflowCancelOptions, WorkflowGetResultOptions, WorkflowStartOptions};
 use temporalio_sdk::{Worker, WorkerOptions};
@@ -132,5 +134,38 @@ pub async fn serve_worker_until_signal(rt: &CoriTemporalRuntime) -> Result<()> {
     };
 
     let (_, _) = tokio::join!(signal_listener, worker_fut);
+    Ok(())
+}
+
+/// Like [`serve_worker_until_signal`] but driven by an injected
+/// cancellation future instead of `ctrl_c`. Used by the desktop app's
+/// tray "Quit" handler, where the cancellation source is a oneshot
+/// channel rather than a signal.
+pub async fn serve_worker_until_cancelled<F>(rt: &CoriTemporalRuntime, cancel: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
+    let worker_options = WorkerOptions::new(rt.task_queue.clone())
+        .register_workflow::<CoriWorkflow>()
+        .register_activities(CoriActivities)
+        .build();
+    let mut worker = Worker::new(&rt.core, (*rt.client).clone(), worker_options)
+        .map_err(|e| anyhow::anyhow!("constructing Temporal worker: {e}"))?;
+    let shutdown_handle = worker.shutdown_handle();
+    info!(task_queue = %rt.task_queue, "cori worker polling (cancellable)");
+
+    let cancel_listener = async {
+        cancel.await;
+        warn!("cancellation received — shutting down worker");
+        shutdown_handle();
+    };
+
+    let worker_fut = async {
+        if let Err(e) = worker.run().await {
+            warn!(error = %e, "temporal worker exited with error");
+        }
+    };
+
+    let (_, _) = tokio::join!(cancel_listener, worker_fut);
     Ok(())
 }

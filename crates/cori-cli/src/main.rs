@@ -59,28 +59,11 @@ enum Command {
     /// service worker (queue `cori.service.<name>`) whose credentials
     /// become usable by any authorized user whose run routes here.
     ///
-    /// Also serves Cori Console on `127.0.0.1:<port>` by default
-    /// (off by default under `--shared`; pass `--console` to enable
-    /// there). The startup banner prints the tokenized URL exactly
-    /// once; the token is in-memory only.
+    /// Headless: the GUI lives in the Cori Console desktop app.
     Work {
         /// Run as a shared service worker named `<name>`.
         #[arg(long, value_name = "NAME")]
         shared: Option<String>,
-        /// Don't serve Cori Console. Worker-only.
-        #[arg(long)]
-        no_console: bool,
-        /// Force-serve Cori Console even with `--shared` (where it is
-        /// off by default).
-        #[arg(long)]
-        console: bool,
-        /// Override the Console port. Default 7878; falls back to an
-        /// ephemeral free port if the chosen one is taken.
-        #[arg(long, value_name = "PORT")]
-        console_port: Option<u16>,
-        /// Open the default browser at the tokenized URL on startup.
-        #[arg(long)]
-        console_open: bool,
     },
     /// Sign in to a capability (MCP server, CLI, LLM provider).
     ///
@@ -196,19 +179,7 @@ fn main() -> anyhow::Result<()> {
                 json,
             } => commands::runs::show(&run_id, activity.as_deref(), full, json),
         },
-        Some(Command::Work {
-            shared,
-            no_console,
-            console,
-            console_port,
-            console_open,
-        }) => commands::work::work(commands::work::WorkOpts {
-            shared,
-            no_console,
-            force_console: console,
-            console_port,
-            console_open,
-        }),
+        Some(Command::Work { shared }) => commands::work::work(commands::work::WorkOpts { shared }),
         Some(Command::Login { capability }) => commands::login::login(&capability),
         Some(Command::Check {
             path,
