@@ -135,7 +135,7 @@ jobs:
         with:
           name: cori-console-${{ matrix.target }}
           path: |
-            console/src-tauri/target/${{ matrix.target }}/release/bundle/**/*
+            target/${{ matrix.target }}/release/bundle/**/*
           if-no-files-found: error
 
   release:
