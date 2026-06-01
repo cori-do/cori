@@ -1,7 +1,7 @@
 {
   "name": "cori-console",
   "private": true,
-  "version": "0.1.2-dev",
+  "version": "0.1.3-dev",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
@@ -30,8 +30,5 @@
     "vite": "^7.0.4",
     "@tauri-apps/cli": "^2"
   },
-  "engines": { "node": ">=20" },
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
+  "engines": { "node": ">=20" }
 }

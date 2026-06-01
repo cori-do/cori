@@ -116,7 +116,7 @@ jobs:
 
       - name: Install frontend deps
         working-directory: console
-        run: pnpm install --ignore-workspace --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build the Tauri app
         working-directory: console
