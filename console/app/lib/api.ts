@@ -120,13 +120,47 @@ export interface RunListEntry extends RunTrace {
   utc: string;
 }
 
+/** Mirrors `cori_protocol::trace::WorkflowSource` — kind-tagged. */
+export type WorkflowSource =
+  | { kind: "local"; path: string }
+  | {
+      kind: "remote";
+      host: string;
+      repo: string;
+      subpath: string;
+      ref: string;
+      sha: string;
+    };
+
 export interface RecentWorkflow {
   key: string;
+  /** Manifest id — routing key, not display text. Use `name` if present. */
   workflow_id: string;
-  source?: unknown;
+  /** Manifest's human-friendly name. Absent when the manifest isn't
+   *  resolvable on disk right now (file moved, remote cache evicted). */
+  name?: string;
+  source?: WorkflowSource | null;
   last_run_at: string;
   last_status: string;
   run_count: number;
+}
+
+/**
+ * Reconstruct a re-runnable source string from a recorded WorkflowSource.
+ * Mirrors `cori_run::remote::refspec` so the round-trip stays stable.
+ *
+ *   • local  → the absolute (or recorded) path
+ *   • remote → `host/repo[/subpath]@ref` (or `host/repo[/subpath]` if
+ *              ref is empty, which means "latest semver tag")
+ */
+export function sourceToCli(s: WorkflowSource | null | undefined): string | null {
+  if (!s) return null;
+  if (s.kind === "local") return s.path || null;
+  if (s.kind === "remote") {
+    const base = s.subpath ? `${s.host}/${s.repo}/${s.subpath}` : `${s.host}/${s.repo}`;
+    return s.ref ? `${base}@${s.ref}` : base;
+  }
+  return null;
 }
 
 // ---------- Workflow preflight types -----------------------------------
@@ -306,6 +340,78 @@ export const recordTrust = (args: {
   ref_str: string;
   sha: string;
 }) => call<Record<string, never>>("record_trust", args);
+
+// ---------- Search bar ------------------------------------------------
+
+export type PeekKind = "filter" | "local" | "remote";
+
+export interface PeekResult {
+  kind: PeekKind;
+  /** Tilde-expanded path (local) or host-prefixed ref (remote shorthand). */
+  normalized: string;
+  /** Only meaningful when kind === "local". */
+  local_exists: boolean;
+  /** True when the local path is a directory containing manifest.md
+   *  — i.e. the path names a workflow folder, not just any directory.
+   *  Only meaningful when kind === "local"; absent otherwise. */
+  is_workflow_dir?: boolean;
+  /** Set to "github.com" for bare owner/repo shorthand. */
+  default_host?: string;
+}
+
+export const peekSource = (input: string) =>
+  call<PeekResult>("peek_source", { input });
+
+export type DirEntryKind = "dir" | "workflow" | "file";
+
+export interface DirEntry {
+  name: string;
+  kind: DirEntryKind;
+  path: string;
+  /** Present only when true; symlinks are never followed. */
+  symlink?: boolean;
+}
+
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  entries: DirEntry[];
+}
+
+export const listDir = (path: string) =>
+  call<DirListing>("list_dir", { path });
+
+export const getLastLocalDir = () => call<string>("get_last_local_dir");
+
+// ---------- Remote repo browsing (Phase 4) ----------------------------
+
+export interface RemoteWorkflowEntry {
+  /** In-repo path (forward-slashes), relative to repo root. */
+  subpath: string;
+  name: string;
+  description: string;
+}
+
+export interface RemoteListing {
+  host: string;
+  /** owner/repo. */
+  repo: string;
+  /** The subpath the user originally targeted (may be empty). */
+  spec_subpath: string;
+  /** What the user typed after `@` (may be empty — latest semver). */
+  ref_str: string;
+  /** Resolved sha. Use `sha.slice(0, 8)` for the breadcrumb pin. */
+  sha: string;
+  workflows: RemoteWorkflowEntry[];
+}
+
+export const listRemoteWorkflows = (refStr: string, update = false) =>
+  call<RemoteListing>("list_remote_workflows", {
+    ref_str: refStr,
+    update,
+  });
+
+// ---------- Workers + schedules ----------------------------------------
 
 export const listWorkers = () => call<WorkersResponse>("list_workers");
 

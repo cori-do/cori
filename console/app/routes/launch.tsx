@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router";
 import { Channel } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   isIpcError,
   recordTrust,
@@ -12,32 +13,43 @@ import {
   type StepSummary,
   type WorkflowPreflight,
 } from "../lib/api";
+import { openRun } from "../lib/windows";
 
 export function meta() {
   return [{ title: "Run a workflow — Cori" }];
 }
 
-export default function RunPage() {
-  const [source, setSource] = useState("");
+export default function LaunchPage() {
+  const [searchParams] = useSearchParams();
+  const initialSource = searchParams.get("source") ?? "";
+
+  const [source, setSource] = useState(initialSource);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<WorkflowPreflight | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>({});
-  const [dryRun, setDryRun] = useState(false);
   const [consent, setConsent] = useState<ConsentRequired | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const navigate = useNavigate();
 
-  async function inspect(e: React.FormEvent) {
-    e.preventDefault();
-    if (!source.trim()) return;
+  // If the launch window was opened with a source pre-filled (the
+  // normal case — openLaunch always passes one), auto-inspect on
+  // mount so the user lands on the form directly.
+  useEffect(() => {
+    if (initialSource.trim().length > 0) {
+      void inspectSource(initialSource);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function inspectSource(s: string) {
+    if (!s.trim()) return;
     setLoading(true);
     setError(null);
     setPreflight(null);
     setParams({});
     setConsent(null);
     try {
-      const pf = await resolveWorkflow({ source });
+      const pf = await resolveWorkflow({ source: s });
       setPreflight(pf);
       const defaults: Record<string, unknown> = {};
       for (const p of pf.manifest.parameters) {
@@ -55,6 +67,11 @@ export default function RunPage() {
     }
   }
 
+  async function inspect(e: React.FormEvent) {
+    e.preventDefault();
+    await inspectSource(source);
+  }
+
   async function trustAndRetry() {
     if (!consent) return;
     setSubmitting(true);
@@ -68,7 +85,7 @@ export default function RunPage() {
         sha: consent.sha,
       });
       setConsent(null);
-      await inspect({ preventDefault() {} } as React.FormEvent);
+      await inspectSource(source);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : isIpcError(e) ? e.message : String(e));
     } finally {
@@ -82,17 +99,20 @@ export default function RunPage() {
     setSubmitting(true);
     setError(null);
     try {
-      // A no-op channel — run-live.tsx re-subscribes once we navigate
-      // there. The replay buffer on the Rust side preserves events that
-      // arrive before the next subscriber attaches.
+      // No-op channel — the run window calls subscribe_run with its own
+      // channel and the Rust-side replay buffer holds events that fire
+      // before it attaches.
       const channel = new Channel<RunEvent>();
       const res = await ipcStartRun({
         source,
         params,
-        dry_run: dryRun,
+        // dry-run is currently CLI-only in the Console; keep the IPC
+        // contract intact by always passing false.
+        dry_run: false,
         on_event: channel,
       });
-      navigate(`/runs/live/${encodeURIComponent(res.run_id)}`);
+      await openRun(res.run_id);
+      await getCurrentWebviewWindow().close();
     } catch (e: unknown) {
       if (isIpcError(e) && e.code === "consent_required") {
         setConsent(e.details as ConsentRequired);
@@ -105,126 +125,128 @@ export default function RunPage() {
   }
 
   return (
-    <>
-      <form onSubmit={inspect} className="card">
-        <label
-          htmlFor="source"
-          style={{ display: "block", fontSize: 13, color: "var(--muted)", marginBottom: 6 }}
-        >
-          Path or git ref
-        </label>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            id="source"
-            type="text"
-            placeholder="./examples/hello_world or github.com/org/workflows/translate@v1"
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            style={{
-              flex: 1,
-              padding: "8px 10px",
-              border: "1px solid var(--rule)",
-              borderRadius: 6,
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-            }}
-          />
-          <button type="submit" disabled={loading || !source.trim()} className="btn">
-            {loading ? "Inspecting…" : "Inspect"}
-          </button>
+    <div className="launch">
+      <header className="launch-head" data-tauri-drag-region>
+        <div className="launch-head-title" data-tauri-drag-region>
+          Run a workflow
         </div>
-        {error && <p className="hint" style={{ color: "var(--red)" }}>{error}</p>}
-      </form>
+      </header>
 
-      {consent && (
-        <ConsentModal
-          consent={consent}
-          onTrust={trustAndRetry}
-          onCancel={() => setConsent(null)}
-          submitting={submitting}
-        />
-      )}
+      <main className="launch-body">
+        <form onSubmit={inspect} className="card">
+          <label
+            htmlFor="source"
+            style={{ display: "block", fontSize: 13, color: "var(--muted)", marginBottom: 6 }}
+          >
+            Path or git ref
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              id="source"
+              type="text"
+              placeholder="./examples/hello_world or github.com/org/workflows/translate@v1"
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              style={{
+                flex: 1,
+                padding: "8px 10px",
+                border: "1px solid var(--rule)",
+                borderRadius: 6,
+                fontFamily: "var(--font-mono)",
+                fontSize: 13,
+              }}
+            />
+            <button type="submit" disabled={loading || !source.trim()} className="btn">
+              {loading ? "Inspecting…" : "Inspect"}
+            </button>
+          </div>
+          {error && <p className="hint" style={{ color: "var(--red)" }}>{error}</p>}
+        </form>
 
-      {preflight && (
-        <>
-          <h2>{preflight.manifest.name}</h2>
-          {preflight.manifest.description && (
-            <p className="hint">{preflight.manifest.description}</p>
-          )}
+        {consent && (
+          <ConsentModal
+            consent={consent}
+            onTrust={trustAndRetry}
+            onCancel={() => setConsent(null)}
+            submitting={submitting}
+          />
+        )}
 
-          {preflight.has_builtin_step && (
-            <div className="card" style={{ borderColor: "var(--amber)" }}>
-              <strong style={{ color: "var(--amber)" }}>
-                ⚠ Builtin step deferred in v1
-              </strong>
-              <p className="hint" style={{ marginBottom: 0 }}>
-                This workflow uses a <code>builtin</code> step (
-                <code>map</code> / <code>for_each</code> / <code>branch</code> /{" "}
-                <code>parallel</code> / <code>wait</code>). The runtime short-
-                circuits builtin steps in v1 — the run will produce a
-                "deferred" trace entry instead of executing the step body.
-              </p>
-            </div>
-          )}
+        {preflight && (
+          <>
+            <h2>{preflight.manifest.name}</h2>
+            {preflight.manifest.description && (
+              <p className="hint">{preflight.manifest.description}</p>
+            )}
 
-          {preflight.missing_capabilities.length > 0 && (
-            <div className="card" style={{ borderColor: "var(--red)" }}>
-              <strong style={{ color: "var(--red)" }}>
-                ✗ Missing capabilities
-              </strong>
-              <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13 }}>
-                {preflight.missing_capabilities.map((m, i) => (
-                  <li key={i}>{m}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <Steps steps={preflight.steps} />
-
-          <form onSubmit={startRun}>
-            <h2>Parameters</h2>
-            {preflight.manifest.parameters.length === 0 ? (
-              <div className="empty">No parameters declared.</div>
-            ) : (
-              <div className="card">
-                {preflight.manifest.parameters.map((p) => (
-                  <ParamRow
-                    key={p.name}
-                    param={p}
-                    value={params[p.name]}
-                    onChange={(v) =>
-                      setParams((prev) => ({ ...prev, [p.name]: v }))
-                    }
-                  />
-                ))}
+            {preflight.has_builtin_step && (
+              <div className="card" style={{ borderColor: "var(--amber)" }}>
+                <strong style={{ color: "var(--amber)" }}>
+                  ⚠ Builtin step deferred in v1
+                </strong>
+                <p className="hint" style={{ marginBottom: 0 }}>
+                  This workflow uses a <code>builtin</code> step (
+                  <code>map</code> / <code>for_each</code> / <code>branch</code> /{" "}
+                  <code>parallel</code> / <code>wait</code>). The runtime short-
+                  circuits builtin steps in v1 — the run will produce a
+                  "deferred" trace entry instead of executing the step body.
+                </p>
               </div>
             )}
 
-            <div className="card" style={{ display: "flex", gap: 16, alignItems: "center" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={dryRun}
-                  onChange={(e) => setDryRun(e.target.checked)}
-                />
-                <span>
-                  <strong>Dry run</strong> — validate the plan without executing
-                </span>
-              </label>
-              <div style={{ flex: 1 }} />
-              <button
-                type="submit"
-                className="btn primary"
-                disabled={submitting || !preflight.ready || preflight.has_builtin_step}
+            {preflight.missing_capabilities.length > 0 && (
+              <div className="card" style={{ borderColor: "var(--red)" }}>
+                <strong style={{ color: "var(--red)" }}>
+                  ✗ Missing capabilities
+                </strong>
+                <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13 }}>
+                  {preflight.missing_capabilities.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <Steps steps={preflight.steps} />
+
+            <form onSubmit={startRun}>
+              <h2>Parameters</h2>
+              {preflight.manifest.parameters.length === 0 ? (
+                <div className="empty">No parameters declared.</div>
+              ) : (
+                <div className="card">
+                  {preflight.manifest.parameters.map((p) => (
+                    <ParamRow
+                      key={p.name}
+                      param={p}
+                      value={params[p.name]}
+                      onChange={(v) =>
+                        setParams((prev) => ({ ...prev, [p.name]: v }))
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+
+              <div
+                className="card"
+                style={{ display: "flex", justifyContent: "flex-end" }}
               >
-                {submitting ? "Starting…" : dryRun ? "Validate" : "Run workflow"}
-              </button>
-            </div>
-          </form>
-        </>
-      )}
-    </>
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={
+                    submitting || !preflight.ready || preflight.has_builtin_step
+                  }
+                >
+                  {submitting ? "Starting…" : "Run workflow"}
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+      </main>
+    </div>
   );
 }
 

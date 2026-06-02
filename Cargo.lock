@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "cori-broker"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cori-cli"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "cori-compiler"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "cori-manifest",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "cori-console"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -866,6 +866,7 @@ dependencies = [
  "cori-protocol",
  "cori-run",
  "cori-worker",
+ "dirs",
  "notify",
  "serde",
  "serde_json",
@@ -874,6 +875,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "tauri-plugin-window-state",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -881,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "cori-ledger"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -890,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "cori-manifest"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -904,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "cori-protocol"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "cori-manifest",
@@ -914,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "cori-run"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -944,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "cori-worker"
-version = "0.3.1-dev"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5185,6 +5187,21 @@ dependencies = [
  "tracing",
  "windows-sys 0.60.2",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-window-state"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73736611e14142408d15353e21e3cca2f12a3cfb523ad0ce85999b6d2ef1a704"
+dependencies = [
+ "bitflags 2.11.1",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

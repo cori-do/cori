@@ -105,6 +105,14 @@ pub fn assign_queues(
 ) -> Result<Vec<StepAssignment>, PlacementError> {
     let mut summary: Vec<StepAssignment> = Vec::with_capacity(compiled.steps.len());
 
+    // Snapshot CLI caps before the mutable iter — we need to consult them
+    // inside the loop without re-borrowing `compiled`.
+    let cli_caps: std::collections::HashSet<&str> = compiled
+        .required_cli_binaries
+        .iter()
+        .map(String::as_str)
+        .collect();
+
     for step in compiled.steps.iter_mut() {
         let (queue, reason) = match &step.placement {
             Placement::Anywhere => match requesting {
@@ -131,13 +139,17 @@ pub fn assign_queues(
                 if let Some(r) = cluster.first_service_with(id) {
                     (r.task_queue.clone(), AssignReason::ServicePool)
                 } else if let WorkerIdentity::Person { user_id } = requesting {
-                    if let Some(r) = cluster.first_user_with(user_id, id) {
+                    // CLI caps for Person identity always route to the
+                    // requesting user's own queue. Declaration is enforced
+                    // by the compiler; presence is verified at dispatch
+                    // (PATH probe in cori-broker::cli). The published
+                    // capability report's CLI list is for Service-pool
+                    // selection above, not for self-routing.
+                    if cli_caps.contains(id.as_str()) {
+                        (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
+                    } else if let Some(r) = cluster.first_user_with(user_id, id) {
                         (r.task_queue.clone(), AssignReason::RequestingUser)
-                    } else if cluster
-                        .person_report(user_id)
-                        .map(|_| true)
-                        .unwrap_or(false)
-                    {
+                    } else if cluster.person_report(user_id).is_some() {
                         return Err(PlacementError::MissingCapability {
                             step: step.activity_id.clone(),
                             capability: id.clone(),
@@ -368,6 +380,35 @@ mod tests {
         };
         let err = assign_queues(&mut compiled, &me, &cluster).unwrap_err();
         assert!(matches!(err, PlacementError::MissingCapability { .. }));
+    }
+
+    #[test]
+    fn cli_cap_routes_to_person_user_queue_even_when_report_omits_it() {
+        // Regression: the console worker (and `cori work`) publish a
+        // CapabilityReport built with an empty `wanted_clis`, so the
+        // report's CLI list is empty. Before this fix, the planner would
+        // see a person_report that doesn't advertise `curl` and return
+        // MissingCapability. Now it must route to the user's own queue
+        // and let the worker's PATH probe answer the real question.
+        let me = person("jean");
+        let mut cluster = ClusterView::default();
+        cluster.add_self(report_with(
+            me.clone(),
+            vec![("local_fs", CapabilityKind::LocalFs)],
+        ));
+        let mut compiled = CompiledWorkflow {
+            manifest: manifest(),
+            steps: vec![step(
+                "01_curl",
+                StepKind::Cli,
+                Placement::RequiresCapability { id: "curl".into() },
+            )],
+            required_cli_binaries: vec!["curl".into()],
+            required_mcp_servers: vec![],
+            required_llm_providers: vec![],
+        };
+        let summary = assign_queues(&mut compiled, &me, &cluster).unwrap();
+        assert_eq!(summary[0].task_queue, "cori.user.jean");
     }
 
     #[test]

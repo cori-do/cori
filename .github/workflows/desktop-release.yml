@@ -18,6 +18,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TEMPORAL_VERSION: "1.7.0"
+  # Keep in sync with scripts/install.sh's DEFAULT_DENO_VERSION.
+  DENO_VERSION: "2.8.1"
 
 jobs:
   build:
@@ -105,6 +107,56 @@ jobs:
           else
             cp temporal "${dest_dir}/temporal-${TARGET}"
             chmod +x "${dest_dir}/temporal-${TARGET}"
+          fi
+
+      - name: Download Deno sidecar
+        # Mirrors the Temporal sidecar step. Deno publishes per-target
+        # `.zip` assets whose names already match the cargo target
+        # triple, so the asset is computed from $TARGET directly.
+        # Integrity is verified against the publisher's `.sha256sum`
+        # file (same approach as scripts/install.sh) rather than a
+        # hard-coded matrix entry — when bumping DENO_VERSION you do
+        # not need to re-pin per-platform SHAs.
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          asset="deno-${TARGET}.zip"
+          base="https://github.com/denoland/deno/releases/download/v${DENO_VERSION}"
+          url="${base}/${asset}"
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          echo "Downloading ${url}"
+          curl -fL --retry 3 -o "${asset}" "${url}"
+
+          echo "Downloading ${url}.sha256sum"
+          curl -fL --retry 3 -o "${asset}.sha256sum" "${url}.sha256sum"
+          expected=$(awk '{print $1}' "${asset}.sha256sum" | head -n1)
+          if [ -z "${expected}" ]; then
+            echo "Could not parse expected SHA from ${asset}.sha256sum" >&2
+            exit 1
+          fi
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "${asset}" | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 "${asset}" | awk '{print $1}')
+          fi
+          if [ "${actual}" != "${expected}" ]; then
+            echo "SHA-256 mismatch for ${asset}: expected ${expected}, got ${actual}" >&2
+            exit 1
+          fi
+
+          unzip -q "${asset}"
+
+          dest_dir="${GITHUB_WORKSPACE}/console/src-tauri/binaries"
+          mkdir -p "${dest_dir}"
+          if [[ "${TARGET}" == *windows* ]]; then
+            cp deno.exe "${dest_dir}/deno-${TARGET}.exe"
+          else
+            cp deno "${dest_dir}/deno-${TARGET}"
+            chmod +x "${dest_dir}/deno-${TARGET}"
           fi
 
       - name: Install Linux deps

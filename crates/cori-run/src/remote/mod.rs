@@ -5,6 +5,7 @@
 //! that the regular workflow loader can compile and execute.
 
 pub mod git;
+pub mod listing;
 pub mod pins;
 pub mod refspec;
 pub mod trust;
@@ -19,6 +20,7 @@ use crate::paths;
 // WorkflowSource is now in cori-protocol; re-export for callers.
 pub use cori_protocol::WorkflowSource;
 
+pub use listing::{RemoteRepoListing, RemoteWorkflowEntry, list_workflows};
 pub use refspec::{ArgClass, RemoteRef, RemoteRefKind, classify_arg};
 
 const DEFAULT_HOSTS: &[&str] = &["github.com", "gitlab.com", "bitbucket.org"];
@@ -81,7 +83,70 @@ fn ensure_host_allowed(host: &str) -> Result<()> {
     );
 }
 
-fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
+fn resolve_remote(spec: RemoteRef, update: bool) -> Result<Resolved> {
+    let RemoteCheckout {
+        checkout,
+        sha,
+        newly_pinned,
+    } = resolve_remote_to_checkout(&spec, update)?;
+
+    let workflow_dir = if spec.subpath.is_empty() {
+        checkout.clone()
+    } else {
+        checkout.join(&spec.subpath)
+    };
+    if !workflow_dir.join("manifest.md").is_file() {
+        bail!(
+            "no manifest.md at {}/{}{}@{} (resolved sha {}). Check the path inside the \
+             repo, or try a different ref.",
+            spec.host,
+            spec.repo,
+            if spec.subpath.is_empty() {
+                String::new()
+            } else {
+                format!("/{}", spec.subpath)
+            },
+            spec.ref_str_display(),
+            &sha[..short(&sha)],
+        );
+    }
+
+    Ok(Resolved {
+        workflow_dir,
+        source: WorkflowSource::Remote {
+            host: spec.host.clone(),
+            repo: spec.repo.clone(),
+            subpath: spec.subpath.clone(),
+            ref_str: spec.ref_str.clone(),
+            sha: sha.clone(),
+        },
+        remote: Some(ResolvedRemote {
+            spec,
+            sha,
+            newly_pinned,
+        }),
+    })
+}
+
+/// Outcome of resolving a remote spec to a cached, on-disk checkout —
+/// the shared prefix of [`resolve_remote`] (which then demands a
+/// manifest at the subpath) and [`listing::list_workflows`] (which
+/// walks the checkout for manifests instead).
+pub(crate) struct RemoteCheckout {
+    /// The repo's cached checkout root — `~/.cori/cache/remote/<host>/<repo>/<sha>/`.
+    pub checkout: PathBuf,
+    pub sha: String,
+    #[allow(dead_code)]
+    pub newly_pinned: bool,
+}
+
+/// Resolve `spec`'s ref to a sha (respecting pins.json + `--update`),
+/// ensure the sha is checked out locally, and return both. Network is
+/// only touched when no pin exists or `update == true`.
+pub(crate) fn resolve_remote_to_checkout(
+    spec: &RemoteRef,
+    update: bool,
+) -> Result<RemoteCheckout> {
     let remote_root = paths::remote_cache_dir()?;
     std::fs::create_dir_all(&remote_root)
         .with_context(|| format!("creating `{}`", remote_root.display()))?;
@@ -93,7 +158,7 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
     let mut newly_pinned = false;
     let sha = if let Some(existing) = existing_pin.clone() {
         if update {
-            let resolved = resolve_ref_to_sha(&spec)?;
+            let resolved = resolve_ref_to_sha(spec)?;
             if matches!(spec.kind, RemoteRefKind::ExactSha | RemoteRefKind::ExactTag) {
                 if resolved != existing {
                     bail!(
@@ -120,56 +185,29 @@ fn resolve_remote(mut spec: RemoteRef, update: bool) -> Result<Resolved> {
             existing
         }
     } else {
-        let resolved = resolve_ref_to_sha(&spec)?;
+        let resolved = resolve_ref_to_sha(spec)?;
         pins.set(pin_key.clone(), resolved.clone());
         pins::save(&pins)?;
         newly_pinned = true;
         resolved
     };
 
-    let checkout = ensure_checkout(&spec, &sha)?;
+    let checkout = ensure_checkout(spec, &sha)?;
 
-    let workflow_dir = if spec.subpath.is_empty() {
-        checkout.clone()
-    } else {
-        checkout.join(&spec.subpath)
-    };
-    if !workflow_dir.join("manifest.md").is_file() {
-        bail!(
-            "no manifest.md at {}/{}{}@{} (resolved sha {}). Check the path inside the \
-             repo, or try a different ref.",
-            spec.host,
-            spec.repo,
-            if spec.subpath.is_empty() {
-                String::new()
-            } else {
-                format!("/{}", spec.subpath)
-            },
-            spec.ref_str_display(),
-            &sha[..short(&sha)],
-        );
-    }
-
-    let _ = &mut spec;
-
-    Ok(Resolved {
-        workflow_dir,
-        source: WorkflowSource::Remote {
-            host: spec.host.clone(),
-            repo: spec.repo.clone(),
-            subpath: spec.subpath.clone(),
-            ref_str: spec.ref_str.clone(),
-            sha: sha.clone(),
-        },
-        remote: Some(ResolvedRemote {
-            spec,
-            sha,
-            newly_pinned,
-        }),
+    Ok(RemoteCheckout {
+        checkout,
+        sha,
+        newly_pinned,
     })
 }
 
-fn short(s: &str) -> usize {
+/// Visible to siblings (e.g. [`listing`]) so they can use the same
+/// host-allowlist gate the CLI does.
+pub(crate) fn ensure_host_allowed_pub(host: &str) -> Result<()> {
+    ensure_host_allowed(host)
+}
+
+pub(crate) fn short(s: &str) -> usize {
     8.min(s.len())
 }
 

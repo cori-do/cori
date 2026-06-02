@@ -1,12 +1,8 @@
 // Theme management.
 //
-// Default: respect `prefers-color-scheme`. Manual toggle persists to
-// `localStorage` and overrides the system preference until the user
-// clears it.
-//
-// The no-flash boot script in `root.tsx`'s `<Layout>` applies the
-// initial class synchronously before paint, so loading the page on a
-// dark system doesn't flash light.
+// Default: respect `prefers-color-scheme`. Manual override persists to
+// `localStorage` under the same key the no-flash boot script in
+// `root.tsx` reads (`cori-theme`).
 
 export type ThemeChoice = "system" | "light" | "dark";
 

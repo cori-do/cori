@@ -8,8 +8,6 @@ import {
   useRouteError,
 } from "react-router";
 
-import { Sidebar } from "./components/sidebar";
-import { Topbar } from "./components/topbar";
 import "./styles/base.css";
 
 // Runs synchronously in <head> before paint to avoid a light flash on
@@ -31,6 +29,9 @@ export function HydrateFallback() {
   );
 }
 
+// No global sidebar/topbar: each window loads one route and renders
+// its own full-bleed chrome. See §6.2 of the launcher implementation
+// guide.
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
@@ -42,13 +43,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>
       <body>
-        <div className="app-shell">
-          <Sidebar />
-          <div className="app-main">
-            <Topbar />
-            <main className="page">{children}</main>
-          </div>
-        </div>
+        {children}
         <ScrollRestoration />
         <Scripts />
       </body>
@@ -76,7 +71,7 @@ export function ErrorBoundary() {
   }
 
   return (
-    <div className="card error">
+    <div className="card error" style={{ margin: 24 }}>
       <h1>{title}</h1>
       <pre>{detail}</pre>
     </div>

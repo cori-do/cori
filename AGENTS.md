@@ -70,7 +70,9 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
   runner/          Deno script that hosts `code` activities
-console/                               Cori Console — Tauri v2 desktop app
+console/                               Cori Console — Tauri v2 desktop app (launcher-first
+                                       multi-window: tray-toggled launcher persists; launch /
+                                       run / manage windows open on demand)
   src-tauri/       Rust crate `cori-console` (tray-resident shell, bundled Temporal sidecar,
                    in-process worker, IPC commands)
   app/             React Router v7 SPA (`ssr: false`) served by the Tauri webview

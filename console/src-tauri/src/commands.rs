@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_protocol::trace::RunTrace;
+use cori_protocol::trace::{RunTrace, WorkflowSource};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 use cori_run::{paths, planner, remote, resolve_llm_credentials};
 use cori_worker::runtime::preflight_check;
@@ -235,7 +235,16 @@ fn is_safe_segment(s: &str) -> bool {
 #[derive(Serialize)]
 pub struct RecentWorkflow {
     pub key: String,
+    /// The manifest's `id` field — load-bearing for routing, not for
+    /// display. Use `name` for human-facing rendering and fall back to
+    /// this only when the manifest isn't resolvable on disk.
     pub workflow_id: String,
+    /// Human-friendly title from the manifest's `name` field. Resolved
+    /// best-effort from the source on disk (the cached remote checkout
+    /// for remote sources); `None` when the manifest can't be read
+    /// right now (file moved, remote cache evicted, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Value>,
     pub last_run_at: DateTime<Utc>,
@@ -298,9 +307,11 @@ fn collect_recents(runs_root: &Path) -> anyhow::Result<Vec<RecentWorkflow>> {
         }
 
         if let Some(t) = latest {
+            let name = t.source.as_ref().and_then(manifest_name_for_source);
             out.push(RecentWorkflow {
                 key,
                 workflow_id: t.workflow_id,
+                name,
                 source: serde_json::to_value(&t.source).ok(),
                 last_run_at: t.started_at,
                 last_status: t.status,
@@ -310,6 +321,37 @@ fn collect_recents(runs_root: &Path) -> anyhow::Result<Vec<RecentWorkflow>> {
     }
     out.sort_by_key(|e| Reverse(e.last_run_at));
     Ok(out)
+}
+
+/// Best-effort: read the manifest at the source's on-disk location and
+/// return its `name` field. Returns `None` when the manifest can't be
+/// read or parsed (file moved, remote cache evicted, malformed YAML,
+/// etc.) — callers fall back to `workflow_id` for display.
+fn manifest_name_for_source(source: &WorkflowSource) -> Option<String> {
+    let manifest_path = match source {
+        WorkflowSource::Local { path } => PathBuf::from(path).join("manifest.md"),
+        WorkflowSource::Remote {
+            host,
+            repo,
+            subpath,
+            sha,
+            ..
+        } => {
+            let mut p = paths::remote_cache_dir().ok()?.join(host).join(repo).join(sha);
+            if !subpath.is_empty() {
+                p = p.join(subpath);
+            }
+            p.join("manifest.md")
+        }
+    };
+    let src = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest = cori_manifest::parse_manifest(&src).ok()?;
+    let name = manifest.name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 // ---------- get_stack_status ----------

@@ -1,15 +1,21 @@
-# Platform-suffixed Temporal CLI binaries are large (~500 MB on macOS)
-# and not source. They are either:
+# Platform-suffixed sidecar binaries are large (Temporal ~500 MB,
+# Deno ~100 MB on macOS) and not source. They are either:
 #   - downloaded by `console/scripts/fetch-temporal-binaries.sh`
+#     and `console/scripts/fetch-deno-binaries.sh`
 #   - or fetched per-platform inside the desktop-release.yml CI workflow
 #
-# Local dev: copy your system `temporal` into the matching slot, e.g.
+# Local dev: copy your system binary into the matching slot, e.g.
 #   cp "$(which temporal)" temporal-aarch64-apple-darwin
+#   cp "$(which deno)"     deno-aarch64-apple-darwin
 #
 # Track README.md and any scripts; ignore the binaries themselves.
 temporal-*-apple-darwin
 temporal-*-unknown-linux-gnu
 temporal-*-pc-windows-msvc
 temporal-*-pc-windows-msvc.exe
+deno-*-apple-darwin
+deno-*-unknown-linux-gnu
+deno-*-pc-windows-msvc
+deno-*-pc-windows-msvc.exe
 !*.md
 !*.sh

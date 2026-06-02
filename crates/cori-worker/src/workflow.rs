@@ -326,7 +326,7 @@ impl CoriWorkflow {
                         break;
                     }
 
-                    let msg = format!("{e}");
+                    let msg = describe_activity_error(&e);
                     activities.push(ActivitySummary {
                         activity_id: step.activity_id.clone(),
                         step_name: step.name.clone(),
@@ -372,6 +372,36 @@ impl CoriWorkflow {
     ) {
         self.completed_reauths.insert(args.server_id);
     }
+}
+
+/// Render an [`ActivityExecutionError`] into a human-readable string by
+/// walking the cause chain. The outer `Display` impl only surfaces the
+/// generic wrapper message Temporal stamps on every activity failure
+/// (typically `"Activity task failed"`); the broker-side error text and
+/// `type_name` we packed in [`crate::activities::broker_error_to_activity_error`]
+/// live one layer deeper as an [`IncomingError::Application`].
+fn describe_activity_error(err: &ActivityExecutionError) -> String {
+    let mut parts: Vec<String> = vec![format!("{err}")];
+    let mut cur = err.cause();
+    while let Some(inner) = cur {
+        let prefix = match inner {
+            IncomingError::Application(a) => a
+                .type_name()
+                .map(|t| format!("[{t}] "))
+                .unwrap_or_default(),
+            IncomingError::Timeout(_) => "[timeout] ".to_string(),
+            IncomingError::Cancelled(_) => "[cancelled] ".to_string(),
+            IncomingError::Terminated(_) => "[terminated] ".to_string(),
+            IncomingError::Server(_) => "[server] ".to_string(),
+            _ => String::new(),
+        };
+        let message = &inner.failure().message;
+        if !message.is_empty() {
+            parts.push(format!("{prefix}{message}"));
+        }
+        cur = inner.cause();
+    }
+    parts.join(" — ")
 }
 
 /// Extract [`NeedsReauthDetails`] from an activity execution error

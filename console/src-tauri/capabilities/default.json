@@ -1,11 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Cori main window — IPC + scoped sidecar spawn.",
-  "windows": ["main"],
+  "description": "Cori launcher-first multi-window — IPC + window spawning + scoped sidecar spawn.",
+  "windows": ["launcher", "launch-*", "run-*", "manage"],
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "core:webview:allow-create-webview-window",
     {
       "identifier": "shell:allow-execute",
       "allow": [

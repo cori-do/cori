@@ -90,7 +90,9 @@ resolve_version() {
   fi
   log "Resolving latest Cori release tag…"
 
-  local api_url="https://api.github.com/repos/${CORI_REPO}/releases/latest"
+  # List releases (not /releases/latest) so we can skip non-CLI tags like
+  # `desktop-vX.Y.Z` and pick the newest `vX.Y.Z[-prerelease]` tag instead.
+  local api_url="https://api.github.com/repos/${CORI_REPO}/releases?per_page=100"
   local body http_code curl_args=(-sSL -w '\n%{http_code}' -H 'Accept: application/vnd.github+json')
   [[ -n "${GITHUB_TOKEN:-}" ]] && curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 
@@ -108,9 +110,12 @@ resolve_version() {
     die "could not determine latest Cori release (set CORI_VERSION=vX.Y.Z to pin a tag, or export GITHUB_TOKEN if rate-limited)"
   fi
 
-  CORI_TAG="$(printf '%s' "$body" | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
-  [[ -n "$CORI_TAG" ]] || die "could not parse tag_name from GitHub API response"
+  CORI_TAG="$(printf '%s' "$body" \
+    | grep '"tag_name"' \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$' \
+    | head -n1)"
+  [[ -n "$CORI_TAG" ]] || die "could not find a semver-tagged Cori release (set CORI_VERSION=vX.Y.Z to pin a tag)"
   log "Latest release: $CORI_TAG"
 }
 

@@ -1,10 +1,10 @@
 # Tauri sidecar binaries
 
-This directory holds the bundled `temporal` CLI for each supported target triple. The current files are **placeholder stubs** — they let the Tauri build script verify the paths exist, but they cannot actually start a Temporal dev server.
+This directory holds two bundled binaries for each supported target triple — the **Temporal CLI** (used as the dev server sidecar) and **Deno** (used by the broker to execute `code` step bodies). Both are declared in `tauri.conf.json` under `bundle.externalBin`.
 
-## Before shipping
+The current files (when present) are **placeholder stubs** that let the Tauri build script verify the paths exist; they cannot actually run a Temporal dev server or execute a Deno script. Real binaries are populated by the fetch scripts (local dev) or by CI (release builds).
 
-Procure the real Temporal CLI binary for each target triple and replace the stubs:
+## Layout
 
 ```
 binaries/
@@ -12,17 +12,48 @@ binaries/
   temporal-x86_64-apple-darwin
   temporal-x86_64-pc-windows-msvc.exe
   temporal-x86_64-unknown-linux-gnu
+  temporal-aarch64-unknown-linux-gnu
+  deno-aarch64-apple-darwin
+  deno-x86_64-apple-darwin
+  deno-x86_64-pc-windows-msvc.exe
+  deno-x86_64-unknown-linux-gnu
+  deno-aarch64-unknown-linux-gnu
 ```
 
-Download from <https://github.com/temporalio/cli/releases> — pick a recent stable release, verify the SHA against the GitHub release page, and `chmod +x` the Unix binaries. License: Apache 2.0; add an entry to `NOTICE` in this repo when shipping.
+Tauri's bundler resolves `bundle.externalBin: ["binaries/temporal", "binaries/deno"]` per host triple at build time by appending the current target triple to each name. The per-triple files in this directory are what those entries resolve to.
+
+## Local dev
+
+Two helper scripts copy your system binaries into the matching host-triple slot:
+
+```bash
+./scripts/fetch-temporal-binaries.sh
+./scripts/fetch-deno-binaries.sh
+```
+
+The scripts only populate the slot for your current host; cross-target slots stay as stubs (or empty). That's fine — `cargo tauri dev` only reads the host's slot.
+
+## Procurement (release builds)
+
+Replace the stubs with the real binaries for each target triple. Upstream releases:
+
+- **Temporal CLI** — <https://github.com/temporalio/cli/releases>. License: Apache 2.0; add an entry to `NOTICE` when shipping.
+- **Deno** — <https://github.com/denoland/deno/releases>. License: MIT; add an entry to `NOTICE` when shipping.
+
+Verify the SHA against each release page, `chmod +x` the Unix binaries.
 
 ## Why platform-suffixed names
 
-Tauri's bundler resolves `bundle.externalBin: ["binaries/temporal"]` per host triple at build time by appending the current target triple. The `tauri.conf.json` `bundle.externalBin` field stays as `binaries/temporal` — the per-triple files in this directory are what it resolves to.
+Tauri's bundler picks the right host-triple file at build time. The `tauri.conf.json` `bundle.externalBin` entries stay as the bare names (`binaries/temporal`, `binaries/deno`) — the per-triple files in this directory are what they resolve to. At install time, Tauri strips the triple suffix so the production app sees `<exe_dir>/temporal` and `<exe_dir>/deno`.
 
-## For development
+## How the Console finds each binary at runtime
 
-`cargo tauri dev` reads the host triple's file. On Apple Silicon that's `temporal-aarch64-apple-darwin`. With the placeholder stub the supervisor will start, fail readiness probe, log a Degraded status, and back off — exactly the supervisor failure path. To exercise the real path locally, either:
+- **Temporal** is spawned by `supervisor.rs` via `app.shell().sidecar("temporal")` — the Tauri shell plugin handles path resolution.
+- **Deno** is invoked by the broker (in the `cori-broker` crate, which is Tauri-agnostic) via `std::process::Command`. The console's `worker.rs` computes the bundled deno's filesystem path (see `src/sidecars.rs`) and sets `CORI_DENO` before the broker's `Runtime::resolve` runs — the broker then picks it up over `$PATH` lookup.
 
-- Replace the stub with a real Temporal binary, **or**
-- Run `temporal server start-dev` in another terminal so `temporal_endpoint::resolve()` finds it on `127.0.0.1:7233` and the supervisor short-circuits without ever spawning the sidecar.
+## Without the binaries
+
+`cargo tauri dev` will start, the Temporal supervisor will fail readiness probe and back off, and any workflow with a `code` step will fail dispatch with `RuntimeUnavailable`. To exercise either path locally without a full procurement:
+
+- Run `temporal server start-dev` in another terminal so the supervisor short-circuits without spawning the sidecar, **and / or**
+- Run `./scripts/fetch-deno-binaries.sh` (or `export CORI_DENO=$(which deno)`).

@@ -1,6 +1,7 @@
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { listRuns, type RunListEntry } from "../lib/api";
 import { formatCost, formatDuration, formatRelative } from "../lib/format";
+import { openRun } from "../lib/windows";
 
 interface LoaderData {
   runs: RunListEntry[];
@@ -44,8 +45,8 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
 
       {runs.length === 0 ? (
         <div className="empty">
-          No runs recorded yet. Start one from{" "}
-          <Link to="/run">Run</Link> or via{" "}
+          No runs recorded yet. Launch one from the Cori launcher (recents
+          or path/ref input), or via{" "}
           <code>cori run &lt;path-or-ref&gt;</code>.
         </div>
       ) : (
@@ -62,21 +63,26 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
           </thead>
           <tbody>
             {runs.map((r) => (
-              <tr key={r.run_id} className="row-link">
-                <RowCell run={r}>
+              <tr
+                key={r.run_id}
+                className="row-link"
+                onClick={() =>
+                  void openRun(r.run_id, { key: r.key, utc: r.utc })
+                }
+                style={{ cursor: "pointer" }}
+              >
+                <td>
                   <span title={r.started_at}>{formatRelative(r.started_at)}</span>
-                </RowCell>
-                <RowCell run={r}>
+                </td>
+                <td>
                   <strong>{r.workflow_id}</strong>
-                </RowCell>
-                <RowCell run={r}>
+                </td>
+                <td>
                   <span className={`pill ${pillFor(r.status)}`}>{r.status}</span>
-                </RowCell>
-                <RowCell run={r}>{formatDuration(r.duration_ms)}</RowCell>
-                <RowCell run={r}>{formatCost(r.cost?.total_eur)}</RowCell>
-                <RowCell run={r} mono>
-                  {r.run_id.slice(0, 8)}
-                </RowCell>
+                </td>
+                <td>{formatDuration(r.duration_ms)}</td>
+                <td>{formatCost(r.cost?.total_eur)}</td>
+                <td className="mono">{r.run_id.slice(0, 8)}</td>
               </tr>
             ))}
           </tbody>
@@ -84,35 +90,10 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
       )}
 
       <p className="hint">
-        Click any row for the full step-by-step trace. Same data{" "}
-        <code>cori runs show &lt;run_id&gt;</code> prints.
+        Click any row to open the full step-by-step trace in its own window.
+        Same data <code>cori runs show &lt;run_id&gt;</code> prints.
       </p>
     </>
-  );
-}
-
-function RowCell({
-  run,
-  children,
-  mono,
-}: {
-  run: RunListEntry;
-  children: React.ReactNode;
-  mono?: boolean;
-}) {
-  return (
-    <td className={mono ? "mono" : undefined}>
-      <Link
-        to={`/runs/${encodeURIComponent(run.key)}/${encodeURIComponent(run.utc)}`}
-        style={{
-          color: "inherit",
-          textDecoration: "none",
-          display: "block",
-        }}
-      >
-        {children}
-      </Link>
-    </td>
   );
 }
 

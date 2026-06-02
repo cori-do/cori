@@ -51,6 +51,23 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
         .await
         .context("joining deno bootstrap")??;
 
+    // If we shipped a bundled Deno sidecar with the Tauri app, point
+    // the broker at it via `CORI_DENO` so the in-process worker doesn't
+    // depend on the user having Deno on `$PATH`. Explicit env wins —
+    // a user override (e.g. for development against a tip-of-tree
+    // Deno) is preserved. The broker still falls back to `<runtime>/deno`
+    // and `$PATH` if neither env nor sidecar is present.
+    if std::env::var_os("CORI_DENO").is_none()
+        && let Some(deno) = crate::sidecars::bundled_deno()
+    {
+        // SAFETY: set_var on this single-threaded setup path runs
+        // before any worker thread is spawned that might call getenv.
+        unsafe {
+            std::env::set_var("CORI_DENO", deno.as_os_str());
+        }
+        info!(path = %deno.display(), "using bundled deno sidecar");
+    }
+
     let runtime_root = paths::runtime_dir()?;
     let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
         anyhow::anyhow!(

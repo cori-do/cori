@@ -4,11 +4,13 @@
 //!
 //! 1. Invoke the runner in `cli_command` mode to materialise the argv +
 //!    optional env additions from the user's `command(input)` builder.
-//! 2. Check the resolved binary against the worker's capability whitelist
-//!    (computed by [`crate::capabilities`]). The whitelist comes from the
-//!    workflow's `tools_required` declaration, so a step trying to spawn
-//!    `kubectl` from a workflow that only declared `gws` is refused
-//!    *before* the process spawns.
+//! 2. Resolve the binary on the worker's PATH. Declaration is enforced by
+//!    the compiler (`tools_required` is mandatory and checked at `cori
+//!    check`), so by dispatch time the only question left is "is this
+//!    binary actually present on this worker?". We try the pre-discovered
+//!    map first as a fast path, then fall back to a live PATH probe — so
+//!    a worker that started before discovery knew about this CLI (e.g.
+//!    the long-running console worker) still resolves it correctly.
 //! 3. Spawn the binary with `std::process::Command`, capturing stdout,
 //!    stderr, and exit code.
 //! 4. Invoke the runner in `cli_parse` mode to translate stdout into the
@@ -62,18 +64,24 @@ pub fn run(
             stack: None,
         })?;
 
-    // 2. Capability check.
+    // 2. Resolve binary. Fast path: the startup snapshot. Fall back to a
+    //    live PATH probe — the compiler already enforced declaration in
+    //    `tools_required`, so this only catches "binary not actually on
+    //    PATH for this worker process," which is the honest question.
     let resolved_bin: PathBuf = match capabilities.cli_binaries.get(&binary) {
         Some(p) => p.clone(),
-        None => {
-            return Err(BrokerError::CapabilityDenied {
-                kind: "CLI",
-                name: binary.clone(),
-                hint: format!(
-                    "binary `{binary}` is not in the workflow's `tools_required` whitelist or is not installed on PATH"
-                ),
-            });
-        }
+        None => match crate::capabilities::which_on_path(&binary) {
+            Some(p) => p,
+            None => {
+                return Err(BrokerError::CapabilityDenied {
+                    kind: "CLI",
+                    name: binary.clone(),
+                    hint: format!(
+                        "binary `{binary}` declared in `tools_required` but not found on this worker's PATH"
+                    ),
+                });
+            }
+        },
     };
 
     // 2b. Per-CLI auth check (Phase 5). For known CLIs that carry their

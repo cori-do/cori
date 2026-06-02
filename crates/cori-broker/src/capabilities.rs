@@ -101,7 +101,7 @@ pub fn discover_mcp_for_login(home: &Path) -> BTreeMap<String, McpServerConfig> 
 }
 
 /// Minimal cross-platform PATH lookup. Avoids adding a `which` dependency.
-fn which_on_path(name: &str) -> Option<PathBuf> {
+pub fn which_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     let suffixes: &[&str] = if cfg!(windows) {
         &["", ".exe", ".cmd", ".bat"]
