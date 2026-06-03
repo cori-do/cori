@@ -132,7 +132,11 @@ jobs:
 
           echo "Downloading ${url}.sha256sum"
           curl -fL --retry 3 -o "${asset}.sha256sum" "${url}.sha256sum"
-          expected=$(awk '{print $1}' "${asset}.sha256sum" | head -n1)
+          # Deno's Windows .sha256sum is PowerShell Get-FileHash output
+          # (multi-line `Algorithm/Hash/Path` with uppercase hex), not the
+          # standard `<hash>  <filename>` format used on Linux/macOS. Grep
+          # any 64-char hex sequence and lowercase it to handle both.
+          expected=$(grep -oiE '[a-f0-9]{64}' "${asset}.sha256sum" | head -n1 | tr 'A-Z' 'a-z')
           if [ -z "${expected}" ]; then
             echo "Could not parse expected SHA from ${asset}.sha256sum" >&2
             exit 1

@@ -264,10 +264,7 @@ fn read_dir_entries(dir: &Path) -> anyhow::Result<Vec<DirEntryDto>> {
         }
 
         let path = entry.path();
-        let symlink = entry
-            .file_type()
-            .map(|t| t.is_symlink())
-            .unwrap_or(false);
+        let symlink = entry.file_type().map(|t| t.is_symlink()).unwrap_or(false);
 
         // Never follow symlinks. Treat them as plain files with a flag.
         // (`symlink_metadata` doesn't follow either — but we want
@@ -408,9 +405,6 @@ mod tests {
     fn three_segments_no_host_falls_back_to_filter() {
         // `acme/flows/sub` looks like a path but has no marker and no
         // host segment — fall back to filter.
-        assert!(matches!(
-            classify("acme/flows/sub").kind,
-            PeekKind::Filter
-        ));
+        assert!(matches!(classify("acme/flows/sub").kind, PeekKind::Filter));
     }
 }

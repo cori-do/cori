@@ -3,8 +3,8 @@
 //! walk / manifest-parse logic all lives in `cori-run`; this module
 //! only handles deserialization, error mapping, and async dispatch.
 
-use cori_run::remote::{RemoteWorkflowEntry, list_workflows};
 use cori_run::remote::refspec::parse_remote_ref;
+use cori_run::remote::{RemoteWorkflowEntry, list_workflows};
 use serde::Serialize;
 
 use crate::error::{IpcError, IpcResult};

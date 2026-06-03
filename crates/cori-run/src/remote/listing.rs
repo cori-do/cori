@@ -89,7 +89,12 @@ pub fn list_workflows(spec: &RemoteRef, update: bool) -> Result<RemoteRepoListin
 
     let mut workflows: Vec<RemoteWorkflowEntry> = Vec::new();
     let walk_start = std::time::Instant::now();
-    walk_for_manifests(&walk_root, &checkout.checkout, MAX_WALK_DEPTH, &mut workflows);
+    walk_for_manifests(
+        &walk_root,
+        &checkout.checkout,
+        MAX_WALK_DEPTH,
+        &mut workflows,
+    );
     let walk_ms = walk_start.elapsed().as_millis();
     workflows.sort_by(|a, b| a.subpath.cmp(&b.subpath));
 

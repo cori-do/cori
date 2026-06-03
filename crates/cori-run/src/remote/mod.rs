@@ -143,10 +143,7 @@ pub(crate) struct RemoteCheckout {
 /// Resolve `spec`'s ref to a sha (respecting pins.json + `--update`),
 /// ensure the sha is checked out locally, and return both. Network is
 /// only touched when no pin exists or `update == true`.
-pub(crate) fn resolve_remote_to_checkout(
-    spec: &RemoteRef,
-    update: bool,
-) -> Result<RemoteCheckout> {
+pub(crate) fn resolve_remote_to_checkout(spec: &RemoteRef, update: bool) -> Result<RemoteCheckout> {
     let remote_root = paths::remote_cache_dir()?;
     std::fs::create_dir_all(&remote_root)
         .with_context(|| format!("creating `{}`", remote_root.display()))?;

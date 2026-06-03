@@ -262,7 +262,10 @@ install_deno() {
   local sums="$WORK_DIR/deno.zip.sha256sum"
   if download "${url}.sha256sum" "$sums" 2>/dev/null; then
     local expected
-    expected="$(awk '{print $1}' "$sums" | head -n1)"
+    # Deno's Windows .sha256sum is PowerShell Get-FileHash output with
+    # uppercase hex; Linux/macOS use the standard `<hash>  <file>` form.
+    # Grep any 64-char hex run and lowercase it to cover both.
+    expected="$(grep -oiE '[a-f0-9]{64}' "$sums" | head -n1 | tr 'A-Z' 'a-z')"
     verify_sha256 "$archive" "$expected"
   else
     warn "no checksum file available for ${asset} — skipping verification"

@@ -385,10 +385,9 @@ fn describe_activity_error(err: &ActivityExecutionError) -> String {
     let mut cur = err.cause();
     while let Some(inner) = cur {
         let prefix = match inner {
-            IncomingError::Application(a) => a
-                .type_name()
-                .map(|t| format!("[{t}] "))
-                .unwrap_or_default(),
+            IncomingError::Application(a) => {
+                a.type_name().map(|t| format!("[{t}] ")).unwrap_or_default()
+            }
             IncomingError::Timeout(_) => "[timeout] ".to_string(),
             IncomingError::Cancelled(_) => "[cancelled] ".to_string(),
             IncomingError::Terminated(_) => "[terminated] ".to_string(),

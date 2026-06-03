@@ -337,7 +337,11 @@ fn manifest_name_for_source(source: &WorkflowSource) -> Option<String> {
             sha,
             ..
         } => {
-            let mut p = paths::remote_cache_dir().ok()?.join(host).join(repo).join(sha);
+            let mut p = paths::remote_cache_dir()
+                .ok()?
+                .join(host)
+                .join(repo)
+                .join(sha);
             if !subpath.is_empty() {
                 p = p.join(subpath);
             }

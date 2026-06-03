@@ -138,15 +138,16 @@ pub fn run() {
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Open launcher", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "open_history", "History…", true, None::<&str>)?;
-    let schedules =
-        MenuItem::with_id(app, "open_schedules", "Schedules…", true, None::<&str>)?;
+    let schedules = MenuItem::with_id(app, "open_schedules", "Schedules…", true, None::<&str>)?;
     let workers = MenuItem::with_id(app, "open_workers", "Workers…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Cori", true, None::<&str>)?;
     let sep_top = PredefinedMenuItem::separator(app)?;
     let sep_bot = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&show, &sep_top, &history, &schedules, &workers, &sep_bot, &quit],
+        &[
+            &show, &sep_top, &history, &schedules, &workers, &sep_bot, &quit,
+        ],
     )?;
 
     let tray_icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
