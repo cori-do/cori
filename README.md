@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://assets.cori.do/cori-logo.png" alt="Cori Logo" width="140" />
+<img src="https://assets.cori.do/cori-logo-white.png" alt="Cori Logo" width="140" />
 
 ### Turn one-off agent conversations into deterministic, re-runnable workflows.
 
