@@ -226,7 +226,15 @@ try {
 
 // deno-lint-ignore no-explicit-any
 function defaultFromZod(schema: any): unknown {
-  if (!schema || typeof schema !== "object" || !schema._def) {
+  if (!schema || typeof schema !== "object") {
+    return null;
+  }
+  // Zod 4 reorganised internals: `_def.typeName` is gone, replaced by
+  // `_zod.def.type`. Dispatch to the v4 walker when those internals exist.
+  if (schema._zod?.def) {
+    return defaultFromZodV4(schema);
+  }
+  if (!schema._def) {
     return null;
   }
   const def = schema._def;
@@ -301,6 +309,91 @@ function defaultFromZod(schema: any): unknown {
   }
 }
 
+// Zod 4 variant of `defaultFromZod`. Walks `_zod.def`, whose `type` field
+// replaces v3's `_def.typeName`.
+// deno-lint-ignore no-explicit-any
+function defaultFromZodV4(schema: any): unknown {
+  const def = schema._zod?.def;
+  if (!def) return null;
+  switch (def.type) {
+    case "string":
+      return "";
+    case "number":
+    case "int":
+    case "bigint":
+      return 0;
+    case "boolean":
+      return false;
+    case "date":
+      return new Date(0).toISOString();
+    case "null":
+    case "nullable":
+      return null;
+    case "undefined":
+    case "void":
+    case "any":
+    case "unknown":
+    case "never":
+    case "nan":
+      return null;
+    case "default":
+    case "prefault":
+      try {
+        return typeof def.defaultValue === "function"
+          ? def.defaultValue()
+          : def.defaultValue;
+      } catch {
+        return defaultFromZodV4(def.innerType);
+      }
+    case "optional":
+    case "nonoptional":
+    case "readonly":
+    case "catch":
+      return defaultFromZodV4(def.innerType);
+    case "array":
+      return [];
+    case "tuple":
+      return (def.items ?? []).map((s: unknown) => defaultFromZodV4(s));
+    case "enum": {
+      const vals = Object.values(def.entries ?? {});
+      return vals.length ? vals[0] : null;
+    }
+    case "literal":
+      return (def.values ?? [])[0] ?? null;
+    case "union": {
+      const opts = def.options ?? [];
+      return opts.length ? defaultFromZodV4(opts[0]) : null;
+    }
+    case "intersection":
+      return {
+        ...((defaultFromZodV4(def.left) as object) ?? {}),
+        ...((defaultFromZodV4(def.right) as object) ?? {}),
+      };
+    case "record":
+    case "map":
+    case "set":
+      return def.type === "set" ? [] : {};
+    case "pipe":
+      return defaultFromZodV4(def.out ?? def.in);
+    case "lazy":
+      try {
+        return defaultFromZodV4(def.getter ? def.getter() : null);
+      } catch {
+        return null;
+      }
+    case "object": {
+      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(shape ?? {})) {
+        out[k] = defaultFromZodV4(shape[k]);
+      }
+      return out;
+    }
+    default:
+      return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // zod -> JSON Schema converter (minimal)
 // ---------------------------------------------------------------------------
@@ -314,7 +407,14 @@ function defaultFromZod(schema: any): unknown {
 
 // deno-lint-ignore no-explicit-any
 function jsonSchemaFromZod(schema: any): Record<string, unknown> {
-  if (!schema || typeof schema !== "object" || !schema._def) {
+  if (!schema || typeof schema !== "object") {
+    return {};
+  }
+  // Zod 4 internals live under `_zod.def` (with `_def.typeName` removed).
+  if (schema._zod?.def) {
+    return jsonSchemaFromZodV4(schema);
+  }
+  if (!schema._def) {
     return {};
   }
   const def = schema._def;
@@ -399,6 +499,112 @@ function jsonSchemaFromZod(schema: any): Record<string, unknown> {
         // ZodOptional / ZodDefault.
         const inner = child?._def?.typeName;
         if (inner !== "ZodOptional" && inner !== "ZodDefault") {
+          required.push(k);
+        }
+      }
+      const out: Record<string, unknown> = {
+        type: "object",
+        properties,
+        additionalProperties: false,
+      };
+      if (required.length) out.required = required;
+      return out;
+    }
+    default:
+      return {};
+  }
+}
+
+// Zod 4 variant of `jsonSchemaFromZod`. Walks `_zod.def` and emits the same
+// Draft-07-compatible shape (objects carry `additionalProperties: false`).
+// deno-lint-ignore no-explicit-any
+function jsonSchemaFromZodV4(schema: any): Record<string, unknown> {
+  const def = schema._zod?.def;
+  if (!def) return {};
+  switch (def.type) {
+    case "string":
+      return { type: "string" };
+    case "number":
+      return { type: "number" };
+    case "int":
+    case "bigint":
+      return { type: "integer" };
+    case "boolean":
+      return { type: "boolean" };
+    case "date":
+      return { type: "string", format: "date-time" };
+    case "null":
+      return { type: "null" };
+    case "any":
+    case "unknown":
+      return {};
+    case "undefined":
+    case "void":
+      return { type: "null" };
+    case "literal": {
+      const vals = def.values ?? [];
+      return vals.length === 1 ? { const: vals[0] } : { enum: vals };
+    }
+    case "enum":
+      return { type: "string", enum: Object.values(def.entries ?? {}) };
+    case "optional":
+    case "nullable":
+    case "default":
+    case "prefault":
+    case "catch":
+    case "nonoptional":
+    case "readonly":
+      return jsonSchemaFromZodV4(def.innerType);
+    case "pipe":
+      return jsonSchemaFromZodV4(def.out ?? def.in);
+    case "lazy":
+      try {
+        return jsonSchemaFromZodV4(def.getter ? def.getter() : null);
+      } catch {
+        return {};
+      }
+    case "array":
+      return { type: "array", items: jsonSchemaFromZodV4(def.element) };
+    case "tuple": {
+      const items = (def.items ?? []).map((s: unknown) =>
+        jsonSchemaFromZodV4(s)
+      );
+      const out: Record<string, unknown> = {
+        type: "array",
+        items,
+        minItems: items.length,
+      };
+      if (!def.rest) out.maxItems = items.length;
+      return out;
+    }
+    case "union":
+      return {
+        anyOf: (def.options ?? []).map((s: unknown) => jsonSchemaFromZodV4(s)),
+      };
+    case "intersection":
+      return {
+        allOf: [
+          jsonSchemaFromZodV4(def.left),
+          jsonSchemaFromZodV4(def.right),
+        ],
+      };
+    case "record":
+    case "map":
+      return {
+        type: "object",
+        additionalProperties: def.valueType
+          ? jsonSchemaFromZodV4(def.valueType)
+          : true,
+      };
+    case "object": {
+      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
+      for (const k of Object.keys(shape ?? {})) {
+        const child = shape[k];
+        properties[k] = jsonSchemaFromZodV4(child);
+        const inner = child?._zod?.def?.type;
+        if (inner !== "optional" && inner !== "default") {
           required.push(k);
         }
       }

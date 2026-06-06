@@ -80,7 +80,7 @@ impl LlmProvider for OpenAiProvider {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "cori_response",
-                    "schema": schema,
+                    "schema": sanitize_openai_schema(schema),
                     "strict": true,
                 }
             });
@@ -331,6 +331,31 @@ fn sanitize_gemini_schema(schema: &JsonValue) -> JsonValue {
             JsonValue::Object(out)
         }
         JsonValue::Array(a) => JsonValue::Array(a.iter().map(sanitize_gemini_schema).collect()),
+        other => other.clone(),
+    }
+}
+
+/// OpenAI's strict `json_schema` response format requires every object to set
+/// `additionalProperties: false` and to list **all** of its properties in
+/// `required`. Zod-derived schemas omit both, so apply them recursively.
+fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
+    match schema {
+        JsonValue::Object(m) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in m {
+                out.insert(k.clone(), sanitize_openai_schema(v));
+            }
+            if out.get("type").and_then(|t| t.as_str()) == Some("object") {
+                out.insert("additionalProperties".to_string(), JsonValue::Bool(false));
+                if let Some(props) = out.get("properties").and_then(|p| p.as_object()) {
+                    let required: Vec<JsonValue> =
+                        props.keys().map(|k| JsonValue::String(k.clone())).collect();
+                    out.insert("required".to_string(), JsonValue::Array(required));
+                }
+            }
+            JsonValue::Object(out)
+        }
+        JsonValue::Array(a) => JsonValue::Array(a.iter().map(sanitize_openai_schema).collect()),
         other => other.clone(),
     }
 }
