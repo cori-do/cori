@@ -8,6 +8,7 @@
 //! missing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use cori_protocol::{WorkerIdentity, task_queue_for};
@@ -103,20 +104,38 @@ pub fn discover_mcp_for_login(home: &Path) -> BTreeMap<String, McpServerConfig> 
 /// Minimal cross-platform PATH lookup. Avoids adding a `which` dependency.
 pub fn which_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
+    which_on_path_in(name, &path_var)
+}
+
+fn which_on_path_in(name: &str, path_var: &OsStr) -> Option<PathBuf> {
     let suffixes: &[&str] = if cfg!(windows) {
         &["", ".exe", ".cmd", ".bat"]
     } else {
         &[""]
     };
-    for dir in std::env::split_paths(&path_var) {
+    for dir in std::env::split_paths(path_var) {
         for sfx in suffixes {
             let cand = dir.join(format!("{name}{sfx}"));
-            if cand.is_file() {
+            if is_executable_file(&cand) {
                 return Some(cand);
             }
         }
     }
     None
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// A missing capability, surfaced before a run starts.
@@ -334,4 +353,34 @@ impl CapabilityReport {
 /// [`CapabilityReport`] for the given identity.
 pub fn report(identity: WorkerIdentity, caps: &Capabilities) -> CapabilityReport {
     CapabilityReport::from_capabilities(identity, caps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn which_on_path_skips_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let shadow_dir = temp.path().join("shadow");
+        let executable_dir = temp.path().join("executable");
+        fs::create_dir_all(&shadow_dir).expect("shadow dir");
+        fs::create_dir_all(&executable_dir).expect("executable dir");
+
+        let shadow = shadow_dir.join("tool");
+        let executable = executable_dir.join("tool");
+        fs::write(&shadow, "not executable").expect("shadow file");
+        fs::write(&executable, "#!/bin/sh\n").expect("executable file");
+        fs::set_permissions(&shadow, fs::Permissions::from_mode(0o644))
+            .expect("shadow permissions");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("executable permissions");
+
+        let path = std::env::join_paths([shadow_dir, executable_dir]).expect("PATH");
+        assert_eq!(which_on_path_in("tool", &path), Some(executable));
+    }
 }

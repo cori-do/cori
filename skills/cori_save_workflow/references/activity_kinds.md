@@ -66,9 +66,39 @@ export default step.cli({
 Key fields:
 
 - **`command`** is a function from input → string array. Cori passes it to the OS as argv — no shell, no injection. Always return an array, never a single string.
+- **argv[0] is the capability boundary.** It must be a string literal naming the actual executable Cori should discover and spawn, and that exact name must be in `tools_required`. Do not put generic dispatchers such as `env`, `sh`, `bash`, or `xargs` first merely to launch a dynamic executable path.
 - **`parse`** is required for non-trivial output. If the CLI returns plain text and the step's `Output` is `{ stdout: string }`, you can omit `parse` and Cori uses the raw stdout.
 - **`env`** (optional) lets you inject env vars without leaking them into logs.
 - **`timeout_ms`** (optional) default 60_000.
+
+If an earlier step creates an executable whose path is only known at runtime, keep a stable declared interpreter as argv[0] and pass arguments without a shell. For example, to run a generated Python virtualenv:
+
+```ts
+command: ({ venv_python }) => [
+  "python3",
+  "-c",
+  "import subprocess, sys; subprocess.run([sys.argv[1], *sys.argv[2:]], check=True)",
+  venv_python,
+  "-m",
+  "pip",
+  "install",
+  "networkx",
+],
+```
+
+Declare `tools_required: [python3]`. Do not rewrite this as `["env", venv_python, ...]`: that declares and validates the launcher instead of the tool the workflow actually relies on, and PATH shadowing can turn it into a spawn-time permission failure.
+
+For longer inline Python programs, build the `-c` argument with newline joins:
+
+```ts
+[
+  "import subprocess, sys",
+  "cmd = [sys.argv[1], *sys.argv[2:]]",
+  "if cmd: subprocess.run(cmd, check=True)",
+].join("\n")
+```
+
+Do not use `.join("; ")` when the program contains compound statements such as `if`, `for`, `try`, or `def`; Python rejects those after a semicolon. Syntax-check the final assembled snippet separately, because `cori check` validates the CLI step and capability declaration but does not parse embedded interpreter code.
 
 When the CLI doesn't exist on the worker, Cori fails the activity with a clear "binary not found" error before scheduling. Workflow registration also fails early if `tools_required` lists a binary the worker doesn't have — surface this with the suggestion `cori workers status`.
 
