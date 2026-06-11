@@ -357,7 +357,9 @@ pub fn report(identity: WorkerIdentity, caps: &Capabilities) -> CapabilityReport
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use std::fs;
 
     #[cfg(unix)]
