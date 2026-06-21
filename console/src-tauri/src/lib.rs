@@ -34,7 +34,69 @@ use crate::state::AppState;
 
 const LAUNCHER_LABEL: &str = "launcher";
 
+/// Recover the login shell's `PATH` when launched from a GUI context.
+///
+/// macOS (and Linux) apps started from Finder/Dock/Spotlight inherit a
+/// minimal `PATH` — typically `/usr/bin:/bin:/usr/sbin:/sbin` — that omits
+/// Homebrew (`/opt/homebrew/bin`, `/usr/local/bin`) and other user-managed
+/// locations. Every CLI probe in the broker reads this process `PATH`:
+/// capability discovery (`cori_broker::capabilities`), `cli`-step execution
+/// (`cori_broker::cli`), the Deno runtime, and the Temporal CLI. The upshot
+/// is a binary like `gws` that sits on the user's shell `PATH` looks
+/// "missing" to the launcher and any run that needs it fails to start.
+///
+/// Resolve the login shell's `PATH` once at startup and merge it into the
+/// process environment so all downstream probes see what a terminal sees.
+/// Best-effort: any failure leaves the inherited `PATH` untouched.
+#[cfg(unix)]
+fn repair_path_from_login_shell() {
+    use std::collections::BTreeSet;
+    use std::process::Command;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+    // Run an interactive login shell so it sources the user's profile
+    // (`.zprofile`/`.zshrc`, `.bash_profile`/`.bashrc`) where `PATH` is
+    // usually assembled, then print it. Markers fence the value off from
+    // any noise a profile script may echo to stdout.
+    const MARKER: &str = "__CORI_PATH__";
+    let script = format!("printf '{MARKER}'; printf '%s' \"$PATH\"; printf '{MARKER}'");
+    let output = match Command::new(&shell).args(["-ilc", &script]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resolved = match stdout.split(MARKER).nth(1).map(str::trim) {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+
+    // Merge login-shell entries ahead of the inherited ones, de-duplicating
+    // while preserving order.
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    let merged: Vec<&str> = resolved
+        .split(':')
+        .chain(current.split(':'))
+        .filter(|dir| !dir.is_empty() && seen.insert(*dir))
+        .collect();
+    let merged = merged.join(":");
+
+    // SAFETY: called as the first statement of `run()`, before any threads
+    // are spawned, so there is no concurrent access to the environment.
+    unsafe { std::env::set_var("PATH", merged) };
+}
+
+#[cfg(not(unix))]
+fn repair_path_from_login_shell() {}
+
 pub fn run() {
+    // GUI launches inherit a minimal PATH; recover the login shell's PATH
+    // before anything probes it. Must stay first — see the fn doc and the
+    // `set_var` SAFETY note (no threads may exist yet).
+    repair_path_from_login_shell();
+
     // tauri-plugin-single-instance MUST be the first plugin on Windows
     // for the focus-existing-window behaviour to fire on relaunch.
     tauri::Builder::default()
