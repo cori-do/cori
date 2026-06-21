@@ -25,7 +25,7 @@ impl CliAuthAdapter for GwsAdapter {
 
     fn check(&self) -> AuthState {
         let out = match Command::new("gws")
-            .args(["auth", "list", "--format=value(account)"])
+            .args(["auth", "status"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
