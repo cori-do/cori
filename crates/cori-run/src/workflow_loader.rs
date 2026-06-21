@@ -42,7 +42,7 @@ pub fn resolve_arg(arg: &str, update: bool) -> Result<(Resolved, LoadedWorkflow)
 
 fn load_with_source(
     path: &Path,
-    source: WorkflowSource,
+    mut source: WorkflowSource,
     remote_spec: Option<RemoteRef>,
 ) -> Result<LoadedWorkflow> {
     let abs = path
@@ -50,6 +50,14 @@ fn load_with_source(
         .with_context(|| format!("resolving workflow path `{}`", path.display()))?;
     if !abs.is_dir() {
         bail!("`{}` is not a directory", abs.display());
+    }
+    // Persist local sources as absolute paths. A relative path (e.g. a bare
+    // `harmonize_product_sizes`) recorded in the run history can't be re-opened
+    // from the launcher: its working directory differs, so the path is
+    // misclassified as a remote git ref. Anchoring to the canonical path keeps
+    // recents re-runnable from anywhere.
+    if let WorkflowSource::Local { path: p } = &mut source {
+        *p = abs.to_string_lossy().into_owned();
     }
     let manifest_path = abs.join("manifest.md");
     if !manifest_path.is_file() {
