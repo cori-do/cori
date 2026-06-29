@@ -22,7 +22,7 @@ impl Config {
         let doc = if path.exists() {
             let src = std::fs::read_to_string(path)
                 .with_context(|| format!("reading `{}`", path.display()))?;
-            src.parse::<Value>()
+            toml::from_str::<Value>(&src)
                 .with_context(|| format!("parsing TOML in `{}`", path.display()))?
         } else {
             Value::Table(toml::map::Map::new())
