@@ -48,15 +48,20 @@ If `cori --version` fails, surface the install path: `curl -fsSL https://cli.cor
 ```
 <workflow_name>/
 ├── manifest.md              YAML frontmatter + prose: what, why, parameters
+├── deno.json                import map (@cori-do/sdk + zod) + `deno task test`
 ├── types.ts                 (optional) shared TypeScript types for step I/O
 ├── steps/
 │   ├── 01_<name>.ts         one TS file per step, numeric prefix = execution order
 │   ├── 02_<name>.ts
 │   └── ...
-└── tests/                   (optional) vitest tests + captured fixtures
+└── tests/                   (optional) `deno test` files + captured fixtures
     ├── <step>.test.ts
     └── fixtures/*.json
 ```
+
+**Test and tool with Deno, not Node.** Cori's runtime already *requires* Deno — `cori run` executes every `code` step inside a Deno sandbox, and the broker refuses to run without a Deno binary. So Deno is guaranteed present, and Node/npm is not otherwise needed. **Do not emit a `package.json` / `node_modules` / `vitest` harness** — it adds a second toolchain purely for tests and, worse, resolves imports differently from the runtime (Node walks `node_modules`; the Deno runtime uses a fixed import map). A `package.json`-based test can pass while the step fails at runtime.
+
+Instead emit a workflow-root **`deno.json`** whose import map mirrors the runtime's, and write tests as `Deno.test(...)`. Because tests then run on the *same engine with the same resolution rules* as production, a passing test is a faithful proxy for a passing run — it even catches a bad bare import that the runtime would reject. See Step 5 for the `deno.json` template and the test command.
 
 Each step file declares exactly one of five **activity kinds**:
 
@@ -145,7 +150,29 @@ Create the directory layout. Use the `@cori-do/sdk` templates from [`references/
 - Has a one-line `description` (becomes the activity name in the run trace)
 - Default-exports the `step.<kind>({…})` call
 
-Capture real I/O from the conversation as fixtures under `tests/fixtures/`. For `code` activities, generate a vitest-compatible unit test that pins the expected output. Users who want to verify before running can `npx vitest tests/` inside the workflow directory. This is the trust layer for whoever reviews the workflow later.
+Capture real I/O from the conversation as fixtures under `tests/fixtures/`. For `code` activities, generate a `Deno.test` unit test that pins the expected output. Users who want to verify before running can `deno task test` inside the workflow directory. This is the trust layer for whoever reviews the workflow later.
+
+**Write a `deno.json` at the workflow root** so the `@cori-do/sdk` and `zod` imports in every step and test resolve — the same way the runtime resolves them. The SDK and zod are published on the public npm registry; the import map points at them with `npm:` specifiers, exactly mirroring the runtime's own import map. No `npm install`, no `node_modules` — Deno fetches and caches on first run. Template:
+
+```json
+{
+  "imports": {
+    "@cori-do/sdk": "npm:@cori-do/sdk@^0.2.4",
+    "zod": "npm:zod@^4.4.3"
+  },
+  "tasks": {
+    "test": "deno test --no-check --allow-read --allow-env --allow-net=registry.npmjs.org,esm.sh,jsr.io tests/"
+  }
+}
+```
+
+Notes:
+
+- **Mirror the runtime's resolution.** The runner runs `code` steps with an import map of exactly `@cori-do/sdk` + `zod` and network limited to `registry.npmjs.org,esm.sh,jsr.io`. The `test` task uses the same allow-net allowlist, so a `code` step that legitimately imports an `npm:`/`jsr:`/`esm.sh` package (see `references/activity_kinds.md`) resolves in tests just as it will at runtime — and a *bad* bare import fails the test with the same error the runtime would raise. That parity is the whole point of testing with Deno.
+- **`--no-check`** skips type-checking at test time (the SDK types `run`'s return loosely, so a strict check trips on `result.foo`). The test still executes the real `run` logic. This matches how a JS test runner behaves.
+- **Pin versions to current.** Check with `npm view @cori-do/sdk version`. `zod` must satisfy the SDK's peer range (`^4.x` at time of writing); a mismatched major (e.g. `zod@3`) is a silent break.
+- **Test files** import the step with an explicit `.ts` extension (`import step from "../steps/03_x.ts"`), assert with `jsr:@std/assert`, and import fixtures with `import data from "./fixtures/x.json" with { type: "json" }`. See `references/example_workflow.md` for a full test.
+- **Deno is assumed present** (Cori can't run without it). If `deno --version` fails, surface `curl -fsSL https://deno.land/install.sh | sh` — but if Cori is installed at all, Deno already is.
 
 ### Step 6: Write the manifest
 
@@ -250,6 +277,12 @@ One offer per conversation, max. Don't nag.
 **`cori check` fails on a TS step file.** Read the error, locate the offending step, fix it (most often a type mismatch, missing `@cori-do/sdk` import, or wrong zod schema), re-run `cori check`.
 
 **`cori check` says a CLI binary is missing from `tools_required`.** The compiler enforces the declaration. Add the binary to the manifest's `tools_required` list and re-check.
+
+**`deno test` reports `Import "<pkg>" not a dependency and not in import map`.** A step or test imports a bare package name that isn't `@cori-do/sdk` or `zod`. This is the runtime telling you the step would *also* fail under `cori run` — Deno tests resolve exactly like the runtime. Fix the import: use `@cori-do/sdk`/`zod`, a no-import global, or (if a third-party library is genuinely needed) an explicit `npm:<pkg>@<ver>` / `jsr:` / `https://esm.sh/` specifier. Do not "fix" it by adding a `package.json` — that only hides the failure until runtime. If `@cori-do/sdk` itself isn't resolving, the workflow is missing its `deno.json` (Step 5) or has no network to `registry.npmjs.org`.
+
+**`deno test` fails with a type error (`TS…`).** Run via `deno task test` (the template task passes `--no-check`). The SDK types a step's `run` return loosely, so strict type-checking trips on field access in assertions; `--no-check` runs the real logic without type-gating, matching how a JS test runner behaves.
+
+**No `node_modules`, no `package.json`, nothing to gitignore.** Deno caches `npm:`/`jsr:` modules in its own global cache, not in the workflow folder. The folder stays clean — just `deno.json` plus the workflow files. `cori run` ignores the workflow's `deno.json` anyway (it uses the runtime's own import map); that file exists only for local `deno test` and editor IntelliSense.
 
 **A step kind looks wrong on review.** Better to re-decompose than to ship a workflow with an `llm` step that should have been `code` (or vice versa). Fix at Step 7 (review) before disk write.
 

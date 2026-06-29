@@ -9,6 +9,7 @@ Read this once before you generate your first workflow in a session. It's faster
 ```
 <chosen_path>/translate_product_sheets_fr/
 ├── manifest.md
+├── deno.json
 ├── types.ts
 ├── steps/
 │   ├── 01_read_source_rows.ts
@@ -81,6 +82,22 @@ Produce a French version of the source product tab in the same spreadsheet, pres
 - Batched 50 rows/call is the right size for gpt-4o-mini at typical row sizes. Larger batches caused parse failures during authoring.
 - "Strict" GPSR means missing operator contact alone is enough for NOK. Do not soften without explicit instruction.
 - `dry_run: true` runs everything except step 5 — useful when iterating on translation prompts.
+```
+
+## `deno.json`
+
+The import map mirrors the runtime's, so every `import { step } from "@cori-do/sdk"` in `steps/` and `tests/` resolves the same way it will under `cori run`. No `npm install`, no `node_modules` — Deno fetches and caches `npm:` modules itself. Run the tests with `deno task test` from the workflow root.
+
+```json
+{
+  "imports": {
+    "@cori-do/sdk": "npm:@cori-do/sdk@^0.2.4",
+    "zod": "npm:zod@^4.4.3"
+  },
+  "tasks": {
+    "test": "deno test --no-check --allow-read --allow-env --allow-net=registry.npmjs.org,esm.sh,jsr.io tests/"
+  }
+}
 ```
 
 ## `types.ts`
@@ -301,32 +318,30 @@ export default step.cli({
 ## `tests/03_check_gpsr.test.ts`
 
 ```ts
-import { describe, it, expect } from "vitest";
-import checkGpsr from "../steps/03_check_gpsr";
-import translatedRows from "./fixtures/translated_rows.json";
+import { assertEquals, assertMatch } from "jsr:@std/assert";
+import checkGpsr from "../steps/03_check_gpsr.ts";
+import translatedRows from "./fixtures/translated_rows.json" with { type: "json" };
 
-describe("check_gpsr", () => {
-  it("returns OK when operator_contact and safety_info_fr are both present", async () => {
-    const result = await checkGpsr.run({ translations: [translatedRows.complete] });
-    expect(result.checks[0].check).toBe("OK");
-    expect(result.checks[0].invalid_reason).toBeNull();
-  });
+Deno.test("check_gpsr: OK when operator_contact and safety_info_fr are both present", async () => {
+  const result = await checkGpsr.run({ translations: [translatedRows.complete] });
+  assertEquals(result.checks[0].check, "OK");
+  assertEquals(result.checks[0].invalid_reason, null);
+});
 
-  it("returns NOK when operator_contact is missing", async () => {
-    const result = await checkGpsr.run({ translations: [translatedRows.missing_operator] });
-    expect(result.checks[0].check).toBe("NOK");
-    expect(result.checks[0].invalid_reason).toMatch(/opérateur/);
-  });
+Deno.test("check_gpsr: NOK when operator_contact is missing", async () => {
+  const result = await checkGpsr.run({ translations: [translatedRows.missing_operator] });
+  assertEquals(result.checks[0].check, "NOK");
+  assertMatch(result.checks[0].invalid_reason, /opérateur/);
+});
 
-  it("returns NOK when safety_info_fr is missing", async () => {
-    const result = await checkGpsr.run({ translations: [translatedRows.missing_safety] });
-    expect(result.checks[0].check).toBe("NOK");
-    expect(result.checks[0].invalid_reason).toMatch(/sécurité/);
-  });
+Deno.test("check_gpsr: NOK when safety_info_fr is missing", async () => {
+  const result = await checkGpsr.run({ translations: [translatedRows.missing_safety] });
+  assertEquals(result.checks[0].check, "NOK");
+  assertMatch(result.checks[0].invalid_reason, /sécurité/);
 });
 ```
 
-`tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run with `npx vitest tests/` from inside the workflow directory.
+Note the Deno idioms: explicit `.ts` extension on the step import, `with { type: "json" }` on the fixture import, and `jsr:@std/assert` for assertions. `tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run `deno task test` from inside the workflow directory; the `deno.json` import map is what makes the `@cori-do/sdk` import resolve — the same resolution the runtime uses, so a green test means the step's imports will load under `cori run` too.
 
 ## What this example demonstrates
 

@@ -190,7 +190,17 @@ Key fields:
 - **`run`** is a pure function from input → output. No `fetch`, no `Deno.readFile`, no `process.env`. If you find yourself needing those, the step is `cli` or `mcp_tool`, not `code`.
 - **`run` can be async** if the transform itself is async (e.g. parsing a large blob with a streaming parser), but the sandbox blocks all network/disk syscalls. The async-ness is for CPU-bound async libraries, not for I/O.
 
-`code` steps are the easiest to test. Always generate a `tests/<step>.test.ts` alongside, using a captured fixture from the conversation. The tests are vitest-compatible — the user can run `npx vitest tests/` to verify before triggering the workflow.
+### What a `code` step may import
+
+`code` steps run in a Deno subprocess launched with a **fixed import map** and a tight permission set (`--allow-read --allow-env --allow-net=registry.npmjs.org,esm.sh,jsr.io` — no write, no subprocess). The import map contains exactly two entries: `@cori-do/sdk` and `zod`. The runner resolves your step's imports against *that map* — never against any `node_modules`. So:
+
+- **Default: import only `@cori-do/sdk`, `zod`, and JS/Web/Deno globals that need no import** — `JSON`, `Intl`, `Date`, `Math`, `RegExp`, `Map`/`Set`, `structuredClone`, `TextEncoder`, `crypto.subtle`, `URL`, etc. Most pure transforms need nothing more.
+- **`node:*` imports are forbidden** and `cori check` rejects them with a hard error. The sandbox also lacks the permissions those modules want.
+- **Need a third-party library? Use an explicit registry specifier**, not a bare name: `npm:<pkg>@<ver>`, `jsr:<scope>/<pkg>`, or `https://esm.sh/<pkg>@<ver>`. The prefix is what lets Deno reach the allowlisted hosts. The package must be **pure JS/Wasm** — native addons or anything touching `node:fs`/`net`/`child_process` will fail under the sandbox. A bare `import _ from "lodash"` does **not** work at runtime; it must be `import _ from "npm:lodash@4"`. Prefer moving dependency-heavy work into a `cli` step (where the binary owns its deps) when you can.
+
+### Testing `code` steps (with Deno, not Node)
+
+`code` steps are the easiest to test. Always generate a `tests/<step>.test.ts` alongside, using a captured fixture from the conversation. Write tests as `Deno.test(...)` with `jsr:@std/assert`, and run them with `deno task test` (defined in the workflow `deno.json`). **Do not use Node/vitest/`package.json`.** Testing under Deno means tests resolve imports with the *same import map and the same allow-net allowlist as the runtime* — so a passing test proves the step's imports actually load under `cori run`, and a bad bare import fails the test with the identical error the runtime would raise. A Node/vitest test would resolve `lodash` from `node_modules` and pass, masking a step that breaks at runtime. See the skill's Step 5 for the `deno.json` template and `references/example_workflow.md` for a full test file.
 
 ---
 
