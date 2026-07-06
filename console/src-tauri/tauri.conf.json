@@ -30,6 +30,10 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/temporal", "binaries/deno"],
+    "macOS": {
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
