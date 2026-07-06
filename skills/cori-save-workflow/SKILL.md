@@ -1,5 +1,5 @@
 ---
-name: cori_save_workflow
+name: cori-save-workflow
 description: Capture work done in this conversation as a reusable, executable Cori workflow. Use whenever the user asks to "save this as a Cori workflow", "turn this into a runbook", "make this re-runnable", or any equivalent phrasing. Be proactive — when the user has just finished a multi-step task that they're plausibly going to do again (data pipeline, deployment, report generation, ticket triage, content processing, file conversion, API workflow), offer to save it as a Cori workflow at the end. The skill writes a workflow directory with TypeScript step files and shells out to the `cori` CLI to validate it.
 ---
 
@@ -134,6 +134,7 @@ Rules that matter:
 
 - **Never put external I/O in a `code` activity.** If it needs a network, filesystem, or DB call, it's a `cli` or `mcp_tool`. Wrap the call in the right kind and keep the pure transform separate.
 - **Prefer `cli` and `mcp_tool` over `code` when you can.** They reuse tools the user already has installed and authenticated.
+- **Google Workspace goes through the `gws` CLI.** If the user is willing to interact with Google Workspace services (Drive, Gmail, Calendar, Sheets, Docs), the recommended approach is a `cli` step invoking `gws` — prefer it over MCP Google tools or hand-rolled API calls, even if the original conversation used those. Its subcommands mirror the Google APIs (e.g. `gws sheets spreadsheets values get …`), so translating an API call from the conversation is mechanical. Declare `tools_required: [gws]` as usual; see `references/example_workflow.md` for real `gws` steps.
 - **A `cli` command's first argv element must be the real, statically named executable.** It is the capability Cori discovers, validates, and spawns. Do not use generic dispatchers such as `env`, `sh`, `bash`, or `xargs` to launch a dynamic executable path. If a prior step creates a runtime-specific interpreter or executable, keep a stable declared tool as argv[0] and use a small argument-safe wrapper; see `references/activity_kinds.md`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.

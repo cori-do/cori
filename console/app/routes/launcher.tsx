@@ -1067,7 +1067,7 @@ function Welcome() {
       <section className="welcome-section">
         <h3 className="welcome-subtitle">Create your first workflow</h3>
         <p className="welcome-body">
-          Install the <code>cori_save_workflow</code> agent skill, then
+          Install the <code>cori-save-workflow</code> agent skill, then
           ask your AI assistant to save a workflow with you.
         </p>
         <button

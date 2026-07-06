@@ -2,7 +2,7 @@
 
 **Audience:** code assistants (Claude Code, Cursor, Copilot) editing Cori itself, not authoring workflows with Cori. This file is the single source of truth for how Cori is structured today and what conventions to follow. Read it end-to-end before touching code.
 
-If you're trying to design a Cori workflow `cori_save_workflow`, you want [skills/cori_save_workflow/SKILL.md](skills/cori_save_workflow/SKILL.md), not this file.
+If you're trying to design a Cori workflow `cori-save-workflow`, you want [skills/cori-save-workflow/SKILL.md](skills/cori-save-workflow/SKILL.md), not this file.
 
 ---
 
@@ -228,8 +228,8 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 | A new step kind | Start with `StepKind` in [cori-protocol](crates/cori-protocol/src/lib.rs), then the SDK ([packages/sdk](packages/sdk/src/index.ts)), then the compiler parser ([cori-compiler/src/step_parser.rs](crates/cori-compiler/src/step_parser.rs)), then a broker module + an activity handler. Update the workflow dispatch loop last. |
 | A new CLI verb | [crates/cori-cli/src/commands/](crates/cori-cli/src/commands) + wire it in [main.rs](crates/cori-cli/src/main.rs). |
 | A new LLM provider | [crates/cori-broker/src/llm/providers.rs](crates/cori-broker/src/llm/providers.rs). Add credential resolution to the same module, pricing to `pricing.rs`. |
-| A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skills/cori_save_workflow/references/manifest_schema.md](skills/cori_save_workflow/references/manifest_schema.md) in lockstep. |
-| Trace shape changes | The trace types live in [crates/cori-protocol/src/trace.rs](crates/cori-protocol/src/trace.rs) (`RunTrace`, `ActivityTrace`, `TokenUsage`). Update `skills/cori_save_workflow/references/trace_interpretation.md` too. |
+| A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skills/cori-save-workflow/references/manifest_schema.md](skills/cori-save-workflow/references/manifest_schema.md) in lockstep. |
+| Trace shape changes | The trace types live in [crates/cori-protocol/src/trace.rs](crates/cori-protocol/src/trace.rs) (`RunTrace`, `ActivityTrace`, `TokenUsage`). Update `skills/cori-save-workflow/references/trace_interpretation.md` too. |
 | A new `Placement` variant or routing rule | [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) for the enum, [crates/cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs) for how it's inferred, [crates/cori-run/src/planner.rs](crates/cori-run/src/planner.rs) for how it maps to a queue. |
 | A new CLI auth adapter | [crates/cori-broker/src/cli_auth/](crates/cori-broker/src/cli_auth) — one tiny adapter per known CLI. |
 | A new OAuth flow | [crates/cori-broker/src/oauth/](crates/cori-broker/src/oauth) (`flow/pkce.rs`, `flow/device.rs`, `flow/client_credentials.rs`, `flow/dcr.rs`, `metadata.rs`). |

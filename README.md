@@ -124,7 +124,7 @@ Four step kinds, covering everything:
 | `mcp`  | Call a tool on an MCP server                  |
 | `llm`  | Ask an LLM (only when you explicitly opt in)  |
 
-See [examples/](examples/) for full working workflows, or [skills/cori_save_workflow/SKILL.md](skills/cori_save_workflow/SKILL.md)
+See [examples/](examples/) for full working workflows, or [skills/cori-save-workflow/SKILL.md](skills/cori-save-workflow/SKILL.md)
 to teach your agent how to author them. To install the skill into your agent, run
 `npx skills add cori-do/cori`.
 
