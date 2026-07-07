@@ -6,6 +6,7 @@
 //! the tray "Quit" handler to drain them in order.
 
 mod browse;
+mod cli_install;
 mod commands;
 mod error;
 mod events;
@@ -179,6 +180,8 @@ pub fn run() {
             commands::get_run,
             commands::list_recent_workflows,
             commands::get_stack_status,
+            cli_install::cli_install_status,
+            cli_install::install_cli,
             browse::peek_source,
             browse::list_dir,
             browse::get_last_local_dir,

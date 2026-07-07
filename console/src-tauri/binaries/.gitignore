@@ -2,7 +2,9 @@
 # Deno ~100 MB on macOS) and not source. They are either:
 #   - downloaded by `console/scripts/fetch-temporal-binaries.sh`
 #     and `console/scripts/fetch-deno-binaries.sh`
-#   - or fetched per-platform inside the desktop-release.yml CI workflow
+#   - built by `console/scripts/build-cli-binary.sh` (cori CLI)
+#   - or fetched/built per-platform inside the desktop-release.yml CI
+#     workflow
 #
 # Local dev: copy your system binary into the matching slot, e.g.
 #   cp "$(which temporal)" temporal-aarch64-apple-darwin
@@ -17,5 +19,9 @@ deno-*-apple-darwin
 deno-*-unknown-linux-gnu
 deno-*-pc-windows-msvc
 deno-*-pc-windows-msvc.exe
+cori-cli-*-apple-darwin
+cori-cli-*-unknown-linux-gnu
+cori-cli-*-pc-windows-msvc
+cori-cli-*-pc-windows-msvc.exe
 !*.md
 !*.sh

@@ -429,6 +429,29 @@ export const setScheduleEnabled = (args: { id: string; enabled: boolean }) =>
 export const deleteSchedule = (args: { id: string }) =>
   call<Record<string, never>>("delete_schedule", args);
 
+// ---------- CLI install (Install `cori` command in PATH) ----------------
+
+export interface CliInstallStatus {
+  /** This app bundle ships the CLI sidecar (false in dev builds). */
+  bundled: boolean;
+  /** Where `cori` currently resolves on PATH, if anywhere. */
+  installed_path: string | null;
+  /** The installed `cori` is the one this app manages. */
+  managed: boolean;
+}
+
+export interface InstallCliResult {
+  path: string;
+  created: boolean;
+  /** When false, the install dir isn't on PATH — tell the user. */
+  on_path: boolean;
+}
+
+export const getCliInstallStatus = () =>
+  call<CliInstallStatus>("cli_install_status");
+
+export const installCli = () => call<InstallCliResult>("install_cli");
+
 // ---------- Global event subscriptions ---------------------------------
 
 export const onStackStatus = (

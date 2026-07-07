@@ -6,9 +6,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { MiddleTruncate } from "../components/middle-truncate";
 import { ThemeIconButton } from "../components/theme-icon-button";
 import {
+  getCliInstallStatus,
   getLastLocalDir,
   getStackStatus,
   getStatus,
+  installCli,
   isIpcError,
   listDir,
   listRecentWorkflows,
@@ -536,6 +538,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       <footer className="launcher-foot">
         <StackBadge stack={stack} status={status} />
         <div className="launcher-foot-actions">
+          <CliInstallAction />
           <button
             type="button"
             className="btn"
@@ -1099,6 +1102,79 @@ function formatErr(e: unknown): string {
   if (isIpcError(e)) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+// ─── CLI install ──────────────────────────────────────────────────────────
+
+/**
+ * "Install CLI" footer action. Rendered only when this bundle ships
+ * the CLI sidecar AND `cori` isn't already on PATH — users who
+ * installed via install.sh (or already clicked this) never see it.
+ */
+function CliInstallAction() {
+  const [visible, setVisible] = useState(false);
+  const [phase, setPhase] = useState<
+    | { kind: "idle" }
+    | { kind: "busy" }
+    | { kind: "done"; path: string; onPath: boolean }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  useEffect(() => {
+    let cancelled = false;
+    getCliInstallStatus()
+      .then((s) => {
+        if (!cancelled) setVisible(s.bundled && !s.installed_path);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!visible) return null;
+
+  if (phase.kind === "done") {
+    return (
+      <span
+        className="launcher-foot-note"
+        title={
+          phase.onPath
+            ? `Installed at ${phase.path}`
+            : `Installed at ${phase.path} — add its directory to your PATH to use it`
+        }
+      >
+        ✓ cori installed{phase.onPath ? "" : " (not on PATH)"}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn"
+      disabled={phase.kind === "busy"}
+      onClick={() => {
+        setPhase({ kind: "busy" });
+        installCli()
+          .then((r) =>
+            setPhase({ kind: "done", path: r.path, onPath: r.on_path }),
+          )
+          .catch((e) => setPhase({ kind: "error", message: formatErr(e) }));
+      }}
+      title={
+        phase.kind === "error"
+          ? `Install failed: ${phase.message} — click to retry`
+          : "Put the `cori` command on your PATH so terminals and agents can use it"
+      }
+    >
+      {phase.kind === "busy"
+        ? "Installing…"
+        : phase.kind === "error"
+          ? "Install CLI ✗"
+          : "Install CLI"}
+    </button>
+  );
 }
 
 // ─── Footer + icons ───────────────────────────────────────────────────────

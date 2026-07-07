@@ -174,6 +174,28 @@ jobs:
         working-directory: console
         run: pnpm install --frozen-lockfile
 
+      - name: Build cori CLI sidecar
+        # Bundled into the app as `cori-cli` (the bare name would
+        # collide with the `Cori` app binary on case-insensitive
+        # filesystems) and exposed as `cori` on the user's PATH by the
+        # launcher's "Install CLI" action. Built before the Tauri app
+        # so it shares the same rust-cache and target dir.
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release -p cori-cli --target "${TARGET}"
+
+          dest_dir="${GITHUB_WORKSPACE}/console/src-tauri/binaries"
+          mkdir -p "${dest_dir}"
+          if [[ "${TARGET}" == *windows* ]]; then
+            cp "target/${TARGET}/release/cori.exe" "${dest_dir}/cori-cli-${TARGET}.exe"
+          else
+            cp "target/${TARGET}/release/cori" "${dest_dir}/cori-cli-${TARGET}"
+            chmod +x "${dest_dir}/cori-cli-${TARGET}"
+          fi
+
       - name: Write App Store Connect API key
         if: runner.os == 'macOS'
         shell: bash

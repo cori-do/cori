@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/temporal", "binaries/deno"],
+    "externalBin": ["binaries/temporal", "binaries/deno", "binaries/cori-cli"],
     "macOS": {
       "hardenedRuntime": true,
       "entitlements": "entitlements.plist"
