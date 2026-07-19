@@ -65,7 +65,27 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
     let stripped = strip_comments(source);
     let mut errors: Vec<ParseError> = Vec::new();
 
-    // 1. Locate `export default step.<kind>(`.
+    // 1. Require the canonical SDK import. The runtime import map exposes
+    //    `@cori-do/sdk`; accepting a lookalike package here would make
+    //    `cori check` pass and then fail only when Deno imports the step.
+    let sdk_import_re =
+        Regex::new(r#"(?m)^\s*import\s*\{[^}]*\bstep\b[^}]*\}\s*from\s*["']@cori-do/sdk["']\s*;?"#)
+            .expect("static regex");
+    if !sdk_import_re.is_match(&stripped) {
+        let reason = if stripped.contains("@cori/sdk") {
+            "invalid SDK import `@cori/sdk` — use `import { step } from \"@cori-do/sdk\";`"
+        } else {
+            "missing canonical SDK import `import { step } from \"@cori-do/sdk\";`"
+        };
+        let line = stripped
+            .lines()
+            .position(|line| line.contains("@cori/sdk"))
+            .map(|index| index + 1)
+            .unwrap_or(1);
+        errors.push(ParseError::new(reason).at(line).field("import"));
+    }
+
+    // 2. Locate `export default step.<kind>(`.
     let header_re = Regex::new(r"export\s+default\s+step\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
         .expect("static regex");
     let cap = match header_re.captures(&stripped) {
@@ -90,7 +110,7 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         }
     };
 
-    // 2. Carve out the call's argument span — balance parentheses/braces
+    // 3. Carve out the call's argument span — balance parentheses/braces
     //    starting from just after the `(`.
     let open_paren = cap.get(0).unwrap().end();
     let args_span = match extract_balanced(&stripped, open_paren - 1, '(', ')') {
@@ -101,8 +121,12 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
             )]);
         }
     };
+    let args_line_offset = stripped[..open_paren]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
 
-    // 3. Pull `description` out of the options object.
+    // 4. Pull `description` out of the options object.
     let description = match extract_string_field(args_span, "description") {
         Some(s) => s,
         None => {
@@ -116,14 +140,14 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
 
     let route = extract_string_field(args_span, "route");
 
-    // 4. Kind-agnostic scalar metadata shared by every step kind
+    // 5. Kind-agnostic scalar metadata shared by every step kind
     //    (`BaseStepOpts` in the SDK).
     let mut metadata = JsonMap::new();
     if let Some(retries) = extract_retries_field(args_span) {
         metadata.insert("retries".into(), JsonValue::Object(retries));
     }
 
-    // 5. Kind-specific scalar metadata.
+    // 6. Kind-specific scalar metadata.
     match kind {
         StepKind::Cli => {
             if let Some(bin) = extract_cli_binary(args_span) {
@@ -136,6 +160,7 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
                     .field("command"),
                 );
             }
+            errors.extend(validate_cli_parse_context(args_span, args_line_offset));
         }
         StepKind::McpTool => {
             if let Some(server) = extract_string_field(args_span, "server") {
@@ -170,7 +195,7 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         StepKind::Code | StepKind::Builtin => {}
     }
 
-    // 6. Code-step import audit: scan the *full* source (not just the call)
+    // 7. Code-step import audit: scan the *full* source (not just the call)
     //    for `node:*` imports. Done with a simple line scan.
     if kind == StepKind::Code {
         let banned = find_node_imports(&stripped);
@@ -223,13 +248,19 @@ fn strip_comments(source: &str) -> String {
                 out.push(b);
                 i += 1;
             }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+            b'/' if i + 1 < bytes.len()
+                && bytes[i + 1] == b'/'
+                && !is_backslash_escaped(bytes, i) =>
+            {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     out.push(b' ');
                     i += 1;
                 }
             }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+            b'/' if i + 1 < bytes.len()
+                && bytes[i + 1] == b'*'
+                && !is_backslash_escaped(bytes, i) =>
+            {
                 let mut j = i + 2;
                 while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
                     j += 1;
@@ -247,6 +278,20 @@ fn strip_comments(source: &str) -> String {
         }
     }
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+}
+
+/// JavaScript regex literals escape `/` with a backslash. Without this
+/// check, the closing `\/` in a pattern such as `/\//g` combines with the
+/// regex terminator into `//`, which a comment-only scanner mistakes for a
+/// line comment and then hides the rest of the step file.
+fn is_backslash_escaped(bytes: &[u8], index: usize) -> bool {
+    let mut backslashes = 0;
+    let mut cursor = index;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
 }
 
 /// Given a source string and the byte offset of an opening `(` (or `{` or
@@ -288,6 +333,141 @@ fn extract_balanced(s: &str, open_at: usize, open: char, close: char) -> Option<
         i += 1;
     }
     None
+}
+
+/// Validate the SDK contract for the optional second `parse` argument.
+/// CLI parsing happens after the command has completed and receives only
+/// `{ stderr, exitCode }`; workflow input is deliberately not re-injected.
+fn validate_cli_parse_context(body: &str, line_offset: usize) -> Vec<ParseError> {
+    let mut errors = Vec::new();
+    let named_context = Regex::new(
+        r"parse\s*:\s*(?:async\s*)?\(\s*[^,()]+\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*=>",
+    )
+    .expect("static regex");
+    if let Some(captures) = named_context.captures(body) {
+        let signature = captures.get(0).expect("whole regex match");
+        let context_name = captures.get(1).expect("parse context capture").as_str();
+        let callback_body = &body[signature.end()..];
+        let mut reported = Vec::new();
+        for (property, offset) in member_properties(callback_body, context_name) {
+            if matches!(property.as_str(), "stderr" | "exitCode") || reported.contains(&property) {
+                continue;
+            }
+            reported.push(property.clone());
+            let line = line_offset
+                + body[..signature.end() + offset]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                + 1;
+            errors.push(invalid_parse_context_property(&property, line));
+        }
+        return errors;
+    }
+
+    let destructured_context =
+        Regex::new(r"parse\s*:\s*(?:async\s*)?\(\s*[^,()]+\s*,\s*\{([^{}]*)\}\s*\)\s*=>")
+            .expect("static regex");
+    if let Some(captures) = destructured_context.captures(body) {
+        let signature = captures.get(0).expect("whole regex match");
+        let bindings = captures.get(1).expect("parse context bindings").as_str();
+        let line = line_offset
+            + body[..signature.start()]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+            + 1;
+        for binding in bindings
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            let property = binding
+                .trim_start_matches("...")
+                .split([':', '='])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if !matches!(property, "stderr" | "exitCode") {
+                errors.push(invalid_parse_context_property(property, line));
+            }
+        }
+    }
+    errors
+}
+
+fn invalid_parse_context_property(property: &str, line: usize) -> ParseError {
+    ParseError::new(format!(
+        "CLI `parse` receives only `(stdout, {{ stderr, exitCode }})`; workflow input property `{property}` is unavailable — derive output from stdout or return a fixed acknowledgement"
+    ))
+    .at(line)
+    .field("parse")
+}
+
+/// Return `object.property` accesses outside quoted strings. This small
+/// lexical scan avoids treating diagnostic text such as `"ctx.input"` as
+/// executable property access while keeping the v1 parser dependency-light.
+fn member_properties(source: &str, object: &str) -> Vec<(String, usize)> {
+    let bytes = source.as_bytes();
+    let object_bytes = object.as_bytes();
+    let mut properties = Vec::new();
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' && index + 1 < bytes.len() {
+                index += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(object_bytes)
+            && (index == 0 || !is_js_identifier_byte(bytes[index - 1]))
+            && (index + object_bytes.len() == bytes.len()
+                || !is_js_identifier_byte(bytes[index + object_bytes.len()]))
+        {
+            let mut cursor = index + object_bytes.len();
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor + 1 < bytes.len() && bytes[cursor] == b'?' && bytes[cursor + 1] == b'.' {
+                cursor += 2;
+            } else if cursor < bytes.len() && bytes[cursor] == b'.' {
+                cursor += 1;
+            } else {
+                index += object_bytes.len();
+                continue;
+            }
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let property_start = cursor;
+            while cursor < bytes.len() && is_js_identifier_byte(bytes[cursor]) {
+                cursor += 1;
+            }
+            if cursor > property_start {
+                properties.push((source[property_start..cursor].to_string(), property_start));
+            }
+            index = cursor;
+            continue;
+        }
+        index += 1;
+    }
+    properties
+}
+
+fn is_js_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 /// Extract a top-level `field: "literal"` from an options-object body.
@@ -607,6 +787,59 @@ mod tests {
     }
 
     #[test]
+    fn rejects_workflow_input_read_from_cli_parse_context() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.cli({
+  description: "update messages",
+  command: ({ message_ids }) => ["gws", "gmail", JSON.stringify(message_ids)],
+  parse: (_stdout, input) => ({ updated_message_ids: input.message_ids }),
+});"#;
+        let errors = parse(src).unwrap_err();
+        let error = errors
+            .iter()
+            .find(|error| error.reason.contains("message_ids"))
+            .expect("invalid parse context diagnostic");
+        assert_eq!(error.field.as_deref(), Some("parse"));
+        assert_eq!(error.line, Some(5));
+        assert!(error.reason.contains("fixed acknowledgement"));
+    }
+
+    #[test]
+    fn accepts_supported_cli_parse_context_properties() {
+        let named = r#"import { step } from "@cori-do/sdk";
+export default step.cli({
+  description: "check result",
+  command: () => ["gws", "version"],
+  parse: (_stdout, context) => ({ stderr: context.stderr, exit_code: context.exitCode }),
+});"#;
+        assert!(parse(named).is_ok());
+
+        let destructured = r#"import { step } from "@cori-do/sdk";
+export default step.cli({
+  description: "check result",
+  command: () => ["gws", "version"],
+  parse: (_stdout, { stderr, exitCode }) => ({ stderr, exit_code: exitCode }),
+});"#;
+        assert!(parse(destructured).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsupported_destructured_cli_parse_context_property() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.cli({
+  description: "update messages",
+  command: () => ["gws", "gmail"],
+  parse: (_stdout, { message_ids }) => ({ updated_message_ids: message_ids }),
+});"#;
+        let errors = parse(src).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.reason.contains("message_ids"))
+        );
+    }
+
+    #[test]
     fn parses_mcp_step() {
         let src = "import { step } from \"@cori-do/sdk\";\nexport default step.mcp_tool({ description: \"post\", server: \"slack\", tool: \"chat_postMessage\", args: () => ({}) });";
         let p = parse(src).unwrap();
@@ -631,6 +864,18 @@ mod tests {
     }
 
     #[test]
+    fn regex_with_escaped_slash_is_not_mistaken_for_a_comment() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.code({
+  description: "encode",
+  run: () => "value".replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+});"#;
+        let parsed = parse(src).unwrap();
+        assert_eq!(parsed.kind, StepKind::Code);
+        assert_eq!(parsed.description, "encode");
+    }
+
+    #[test]
     fn parses_builtin_map() {
         let src = "import { step } from \"@cori-do/sdk\";\nexport default step.map({ description: \"each\", apply: x });";
         let p = parse(src).unwrap();
@@ -643,6 +888,27 @@ mod tests {
             "import { step } from \"@cori-do/sdk\";\nexport default step.code({ run: (x) => x });";
         let errs = parse(src).unwrap_err();
         assert!(errs.iter().any(|e| e.reason.contains("description")));
+    }
+
+    #[test]
+    fn rejects_legacy_sdk_import() {
+        let src = "import { step } from \"@cori/sdk\";\nexport default step.code({ description: \"square\", run: (x) => x });";
+        let errs = parse(src).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|error| error.reason.contains("@cori-do/sdk"))
+        );
+        assert_eq!(errs[0].line, Some(1));
+    }
+
+    #[test]
+    fn rejects_missing_sdk_import() {
+        let src = "export default step.code({ description: \"square\", run: (x) => x });";
+        let errs = parse(src).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|error| error.reason.contains("canonical SDK import"))
+        );
     }
 
     #[test]

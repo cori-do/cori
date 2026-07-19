@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use cori_broker::capabilities::{self, Capabilities, Capability, CapabilityKind, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_broker::runtime as broker_runtime;
 use cori_protocol::{CompiledWorkflow, Placement, StepKind, WorkerIdentity, task_queue_for};
 
 use cori_run::remote;
@@ -75,14 +74,8 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
         )?;
     }
 
-    cli_runtime::ensure_installed()?;
-    let runtime_root = paths::runtime_dir()?;
-    let _runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
-        anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
-             export CORI_DENO=$(which deno)"
-        )
-    })?;
+    let runtime = cli_runtime::resolve()?;
+    cli_runtime::validate_workflow_sources(&runtime, &loaded.absolute_path, &loaded.compiled)?;
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;

@@ -6,10 +6,28 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use cori_compiler::{CompileError, compile};
 use cori_protocol::{CompiledWorkflow, WorkflowSource};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::paths;
 use crate::remote::{RemoteRef, Resolved};
+
+/// Bump whenever compiler validation or output semantics change. Cache keys
+/// remain path/content-derived; the envelope makes rebuildable entries from
+/// an older compiler safely miss without changing that locked key shape.
+const COMPILER_CACHE_FORMAT_VERSION: u32 = 1;
+
+#[derive(Deserialize)]
+struct CacheEntry {
+    format_version: u32,
+    compiled: CompiledWorkflow,
+}
+
+#[derive(Serialize)]
+struct CacheEntryRef<'a> {
+    format_version: u32,
+    compiled: &'a CompiledWorkflow,
+}
 
 /// Outcome of [`load`]: the compiled DAG and a few derived strings the
 /// run pipeline reuses.
@@ -77,12 +95,13 @@ fn load_with_source(
 
     let cache_path = paths::cache_dir()?.join(format!("{cache_key}.json"));
     if let Ok(bytes) = std::fs::read(&cache_path)
-        && let Ok(compiled) = serde_json::from_slice::<CompiledWorkflow>(&bytes)
+        && let Ok(entry) = serde_json::from_slice::<CacheEntry>(&bytes)
+        && entry.format_version == COMPILER_CACHE_FORMAT_VERSION
     {
         return Ok(LoadedWorkflow {
             folder_name,
             absolute_path: abs,
-            compiled,
+            compiled: entry.compiled,
             content_hash,
             from_cache: true,
             source,
@@ -158,7 +177,11 @@ fn write_cache(path: &Path, compiled: &CompiledWorkflow) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("cache path has no parent"))?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating `{}`", parent.display()))?;
-    let bytes = serde_json::to_vec(compiled).context("serializing compiled workflow")?;
+    let bytes = serde_json::to_vec(&CacheEntryRef {
+        format_version: COMPILER_CACHE_FORMAT_VERSION,
+        compiled,
+    })
+    .context("serializing compiled workflow cache entry")?;
     let mut tmp = parent.join(format!(
         ".tmp-{}-{}",
         std::process::id(),
@@ -178,4 +201,39 @@ fn format_compile_errors(errors: Vec<CompileError>) -> anyhow::Error {
         s.push_str(&format!("  · {e}\n"));
     }
     anyhow!(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn cache_envelope_rejects_legacy_unversioned_compiled_workflow() {
+        let temp = tempdir().expect("temporary workflow directory");
+        std::fs::create_dir(temp.path().join("steps")).expect("steps directory");
+        std::fs::write(
+            temp.path().join("manifest.md"),
+            "---\nid: cache_test\nname: Cache test\ndescription: cache envelope\ncreated: 2026-07-15\nversion: 1\ntools_required: [echo]\n---\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            temp.path().join("steps/01_echo.ts"),
+            "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"echo\", command: () => [\"echo\", \"ok\"] });\n",
+        )
+        .expect("step");
+        let compiled = compile(temp.path()).expect("compiled workflow");
+
+        let legacy = serde_json::to_vec(&compiled).expect("legacy cache bytes");
+        assert!(serde_json::from_slice::<CacheEntry>(&legacy).is_err());
+
+        let current = serde_json::to_vec(&CacheEntryRef {
+            format_version: COMPILER_CACHE_FORMAT_VERSION,
+            compiled: &compiled,
+        })
+        .expect("versioned cache bytes");
+        let decoded = serde_json::from_slice::<CacheEntry>(&current).expect("cache entry");
+        assert_eq!(decoded.format_version, COMPILER_CACHE_FORMAT_VERSION);
+        assert_eq!(decoded.compiled, compiled);
+    }
 }

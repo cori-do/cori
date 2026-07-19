@@ -11,7 +11,7 @@
  * Zod is the only supported schema library for v1.
  */
 
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
+import type { infer as ZodInfer, ZodTypeAny } from "zod";
 
 // ---------------------------------------------------------------------------
 // Kinds & shared shapes
@@ -67,6 +67,8 @@ export interface CliStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 }
 
 export interface CliStepDef extends StepDef<"cli"> {
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
   readonly command: (input: unknown) => readonly string[];
   readonly parse?: CliStepOpts<ZodTypeAny, ZodTypeAny>["parse"];
   readonly env?: Record<string, string>;
@@ -88,6 +90,8 @@ export interface McpStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 export interface McpStepDef extends StepDef<"mcp_tool"> {
   readonly server: string;
   readonly tool: string;
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
   readonly args: (input: unknown) => Record<string, unknown>;
 }
 
@@ -103,6 +107,8 @@ export interface CodeStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 }
 
 export interface CodeStepDef extends StepDef<"code"> {
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
   readonly run: (input: unknown) => unknown;
 }
 
@@ -191,6 +197,8 @@ export const step = {
   ): CliStepDef {
     return {
       ...base("cli", opts),
+      input: opts.input,
+      output: opts.output,
       command: opts.command as (input: unknown) => readonly string[],
       parse: opts.parse,
       env: opts.env,
@@ -204,6 +212,8 @@ export const step = {
       ...base("mcp_tool", opts),
       server: opts.server,
       tool: opts.tool,
+      input: opts.input,
+      output: opts.output,
       args: opts.args as (input: unknown) => Record<string, unknown>,
     };
   },
@@ -213,6 +223,8 @@ export const step = {
   ): CodeStepDef {
     return {
       ...base("code", opts),
+      input: opts.input,
+      output: opts.output,
       run: opts.run as (input: unknown) => unknown,
     };
   },
@@ -250,4 +262,3 @@ export const step = {
     return { ...base("builtin", opts), builtin: "wait" };
   },
 } as const;
-

@@ -343,7 +343,32 @@ fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
         JsonValue::Object(m) => {
             let mut out = serde_json::Map::new();
             for (k, v) in m {
+                if matches!(k.as_str(), "$schema" | "$id") {
+                    continue;
+                }
                 out.insert(k.clone(), sanitize_openai_schema(v));
+            }
+            // `const` is valid JSON Schema without `type`, but OpenAI's
+            // Structured Outputs subset requires a type at every leaf.
+            // Infer it defensively so schemas emitted by older cached
+            // runners remain usable after a Cori binary upgrade.
+            if !out.contains_key("type") {
+                if let Some(schema_type) = out.get("const").and_then(json_schema_type) {
+                    out.insert(
+                        "type".to_string(),
+                        JsonValue::String(schema_type.to_string()),
+                    );
+                } else if let Some(values) = out.get("enum").and_then(JsonValue::as_array)
+                    && let Some(first_type) = values.first().and_then(json_schema_type)
+                    && values
+                        .iter()
+                        .all(|value| json_schema_type(value) == Some(first_type))
+                {
+                    out.insert(
+                        "type".to_string(),
+                        JsonValue::String(first_type.to_string()),
+                    );
+                }
             }
             if out.get("type").and_then(|t| t.as_str()) == Some("object") {
                 out.insert("additionalProperties".to_string(), JsonValue::Bool(false));
@@ -357,6 +382,17 @@ fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
         }
         JsonValue::Array(a) => JsonValue::Array(a.iter().map(sanitize_openai_schema).collect()),
         other => other.clone(),
+    }
+}
+
+fn json_schema_type(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::Null => Some("null"),
+        JsonValue::Bool(_) => Some("boolean"),
+        JsonValue::Number(_) => Some("number"),
+        JsonValue::String(_) => Some("string"),
+        JsonValue::Array(_) => Some("array"),
+        JsonValue::Object(_) => Some("object"),
     }
 }
 
@@ -389,5 +425,32 @@ fn truncate(s: &str, max: usize) -> String {
         let mut t = s[..max].to_string();
         t.push_str("\n…(truncated)");
         t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_schema_infers_type_for_literal_const() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "status": { "const": "triaged" },
+                "attempt": { "enum": [1, 2] }
+            }
+        });
+        let sanitized = sanitize_openai_schema(&schema);
+        assert!(sanitized.get("$schema").is_none());
+        assert_eq!(
+            sanitized.pointer("/properties/status/type"),
+            Some(&json!("string"))
+        );
+        assert_eq!(
+            sanitized.pointer("/properties/attempt/type"),
+            Some(&json!("number"))
+        );
     }
 }

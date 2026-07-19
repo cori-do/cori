@@ -20,8 +20,9 @@
 //!
 //! Note on `tsc --noEmit`: the long-term plan calls for a bundled TypeScript
 //! compiler. That is wired in a later update (a vendored `tsc` ships with the
-//! Cori binary). For now the compiler is purely structural — type
-//! checking is deferred to that work.
+//! Cori binary). The compiler remains purely structural; `cori-run` closes the
+//! executable-workflow gap by running the already-required Deno checker during
+//! preflight, before any activity starts.
 
 mod step_parser;
 
@@ -216,11 +217,13 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         match step_parser::parse(&src) {
             Ok(parsed) => {
                 let activity_id = format!("{:02}_{}", sf.number, sf.name);
-                let depends_on = if idx == 0 {
-                    Vec::new()
-                } else {
-                    vec![compiled_steps[idx - 1].activity_id.clone()]
-                };
+                // A prior file may have failed parsing and therefore not have
+                // produced a compiled step. Keep collecting all diagnostics
+                // without indexing the shorter successful-step vector.
+                let depends_on = compiled_steps
+                    .last()
+                    .map(|step| vec![step.activity_id.clone()])
+                    .unwrap_or_default();
                 let placement = compute_placement(parsed.kind, &parsed.metadata);
                 compiled_steps.push(CompiledStep {
                     activity_id,
@@ -616,6 +619,35 @@ mod tests {
         );
         let errs = compile(tmp.path()).unwrap_err();
         assert!(errs.iter().any(|e| e.reason.contains("description")));
+    }
+
+    #[test]
+    fn parse_error_before_valid_step_returns_diagnostics_instead_of_panicking() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            OK_MANIFEST,
+            &[
+                (
+                    "01_first.ts",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"first\", run: (x) => x });\n",
+                ),
+                (
+                    "02_invalid.ts",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ run: (x) => x });\n",
+                ),
+                (
+                    "03_later.ts",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"later\", run: (x) => x });\n",
+                ),
+            ],
+        );
+
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| { e.file == "steps/02_invalid.ts" && e.reason.contains("description") })
+        );
     }
 
     #[test]

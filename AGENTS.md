@@ -284,7 +284,7 @@ Push back if asked to add any of these during v1 work:
 - A general-purpose secrets vault (the OAuth/CLI token store under `cori-broker::oauth` is scoped to that purpose only)
 - Builtin steps (`map`, `for_each`, `branch`, `parallel`, `wait`) — accepted by the compiler, deferred at runtime
 - Full AST step parsing via swc/oxc — current implementation is regex-based
-- Bundled TypeScript compiler (`tsc --noEmit`) — deferred; compile-time type checking is currently skipped
+- Bundled TypeScript compiler (`tsc --noEmit`) — deferred; preflight uses the already-required Deno checker to validate workflow modules before execution
 - A workflow registry, `cori init`, `cori save`, `cori start`, `cori ls`, `cori rm`, the `cori-default` task queue — removed in the Phase 1 strip and not coming back
 
 ---

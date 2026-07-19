@@ -16,6 +16,9 @@
 //! and a message pointing the user at `deno.land`.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use thiserror::Error;
 
 use crate::BrokerError;
 
@@ -54,6 +57,61 @@ impl Runtime {
             config_path,
         })
     }
+
+    /// Parse and type-check every workflow step without evaluating module code.
+    ///
+    /// Deno already provides the TypeScript runtime used by activities, so this
+    /// closes the gap between the compiler's structural metadata extraction and
+    /// the first activity import without introducing a second TS toolchain.
+    pub fn validate_step_modules(
+        &self,
+        step_files: &[PathBuf],
+    ) -> std::result::Result<(), StepValidationError> {
+        if step_files.is_empty() {
+            return Ok(());
+        }
+
+        let output = Command::new(&self.deno_bin)
+            .arg("check")
+            .arg("--quiet")
+            .arg("--no-lock")
+            .arg("--node-modules-dir=none")
+            .arg("--config")
+            .arg(&self.config_path)
+            .args(step_files)
+            .output()
+            .map_err(StepValidationError::Spawn)?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let diagnostic = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        Err(StepValidationError::Failed {
+            exit_code: output.status.code().unwrap_or(-1),
+            diagnostic: if diagnostic.is_empty() {
+                "Deno returned no diagnostic output".to_string()
+            } else {
+                diagnostic.to_string()
+            },
+        })
+    }
+}
+
+/// Failure from the non-executing TypeScript validation gate.
+#[derive(Debug, Error)]
+pub enum StepValidationError {
+    #[error("failed to start Deno workflow validation: {0}")]
+    Spawn(#[source] std::io::Error),
+
+    #[error("workflow TypeScript validation failed (Deno exit {exit_code}):\n{diagnostic}")]
+    Failed { exit_code: i32, diagnostic: String },
 }
 
 fn locate_deno(runtime_root: &Path) -> crate::Result<PathBuf> {
@@ -102,4 +160,55 @@ fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn validation_surfaces_the_deno_diagnostic() {
+        let temp = tempdir().expect("temporary runtime");
+        let deno = temp.path().join("deno");
+        fs::write(
+            &deno,
+            "#!/bin/sh\nprintf '%s\\n' 'error: SyntaxError: Expression expected at steps/02_bad.ts:13:9' >&2\nexit 1\n",
+        )
+        .expect("fake deno");
+        fs::set_permissions(&deno, fs::Permissions::from_mode(0o755))
+            .expect("fake deno permissions");
+
+        let runtime = Runtime {
+            deno_bin: deno,
+            runner_script: temp.path().join("runner.ts"),
+            config_path: temp.path().join("deno.json"),
+        };
+        let error = runtime
+            .validate_step_modules(&[temp.path().join("steps/02_bad.ts")])
+            .expect_err("validation should fail");
+
+        assert!(matches!(
+            error,
+            StepValidationError::Failed { diagnostic, .. }
+                if diagnostic.contains("steps/02_bad.ts:13:9")
+        ));
+    }
+
+    #[test]
+    fn no_step_files_need_no_subprocess() {
+        let runtime = Runtime {
+            deno_bin: PathBuf::from("does-not-exist"),
+            runner_script: PathBuf::from("runner.ts"),
+            config_path: PathBuf::from("deno.json"),
+        };
+
+        runtime
+            .validate_step_modules(&[])
+            .expect("empty validation should be a no-op");
+    }
 }

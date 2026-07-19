@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="The Core — a loader-led motion and experience direction for Cori Cloud."
+    />
+    <title>The Core — Cori in motion</title>
+
+    <!-- Live design-system sources: this exploration intentionally stays coupled to them. -->
+    <link
+      rel="stylesheet"
+      href="../../../cori-projects/design-system/src/tokens.css"
+    />
+    <link
+      rel="stylesheet"
+      href="../../../cori-projects/design-system/src/components.css"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;700&amp;family=Source+Serif+4:ital,wght@0,400;0,600;1,400&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to the exploration</a>
+
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="Cori Cloud — back to top">
+        <svg class="wordmark-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.75" />
+          <circle cx="12" cy="12" r="3.25" fill="currentColor" />
+        </svg>
+        <span>Cori Cloud</span>
+      </a>
+      <div class="site-header-meta">
+        <span class="cori-eyebrow">Brand motion study · 01</span>
+        <button
+          class="cori-btn cori-btn--ghost cori-btn--sm"
+          id="motion-toggle"
+          type="button"
+          aria-pressed="false"
+        >
+          Pause motion
+        </button>
+        <button
+          class="cori-icon-btn"
+          id="theme-toggle"
+          type="button"
+          aria-label="Switch to dark theme"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            <circle cx="10" cy="10" r="3.2" fill="none" stroke="currentColor" stroke-width="1.4" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-intro">
+          <div>
+            <span class="cori-eyebrow cori-eyebrow--accent">The Core · Cori in motion</span>
+            <h1>Give the work<br /><em>a pulse.</em></h1>
+          </div>
+          <p>
+            Cori Cloud already explains what happened. This direction makes the
+            in-between feel present: one living core for starting, routing,
+            working, waiting, and landing — without hiding the audit trail.
+          </p>
+        </div>
+
+        <div class="experience" aria-label="Interactive Cori run-state exploration">
+          <div class="experience-bar">
+            <div class="run-identity">
+              <svg class="mini-mark" viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.4" />
+                <circle cx="10" cy="10" r="2.65" fill="currentColor" />
+              </svg>
+              <div>
+                <span class="run-name">translate_product_sheets_fr</span>
+                <span class="run-ref">run #12,848 · schedule</span>
+              </div>
+            </div>
+            <div class="run-chrome">
+              <span class="live-signal"><span></span> trace live</span>
+              <span class="cori-badge cori-badge--mono" id="stage-kind">preflight</span>
+            </div>
+          </div>
+
+          <div class="core-stage" id="core-stage">
+            <canvas id="core-canvas" aria-hidden="true"></canvas>
+            <div class="core-fallback" id="core-fallback" aria-hidden="true">
+              <span class="fallback-orbit fallback-orbit--outer"></span>
+              <span class="fallback-orbit fallback-orbit--inner"></span>
+              <span class="fallback-center"></span>
+              <span class="fallback-node fallback-node--one"></span>
+              <span class="fallback-node fallback-node--two"></span>
+            </div>
+
+            <div class="orbit-fact orbit-fact--worker">
+              <span>worker pool</span>
+              <strong id="worker-label">finding a match</strong>
+            </div>
+            <div class="orbit-fact orbit-fact--trace">
+              <span>trace</span>
+              <strong id="trace-label">opening</strong>
+            </div>
+
+            <div class="core-copy" aria-live="polite" aria-atomic="true">
+              <span class="core-kicker" id="state-kicker">Starting the run</span>
+              <h2 id="state-title">Cori is putting the pieces in motion.</h2>
+              <p id="state-detail">Reading the workflow and finding the right worker.</p>
+              <button class="core-state-action" id="state-action" type="button" hidden></button>
+            </div>
+
+            <div class="core-truth">
+              <span id="state-step">before step 01</span>
+              <span aria-hidden="true">·</span>
+              <span id="state-time">0.0s</span>
+              <span aria-hidden="true">·</span>
+              <span id="state-cost">€0.000</span>
+            </div>
+          </div>
+
+          <div class="run-rail">
+            <div class="rail-progress" aria-hidden="true">
+              <span id="rail-progress-fill"></span>
+            </div>
+            <div class="phase-controls" role="group" aria-label="Preview run phases">
+              <button type="button" data-state="start" aria-pressed="true"><span>00</span>Start</button>
+              <button type="button" data-state="fetch" aria-pressed="false"><span>01</span>Read</button>
+              <button type="button" data-state="normalize" aria-pressed="false"><span>02</span>Shape</button>
+              <button type="button" data-state="check" aria-pressed="false"><span>03</span>Check</button>
+              <button type="button" data-state="translate" aria-pressed="false"><span>04</span>Translate</button>
+              <button type="button" data-state="complete" aria-pressed="false"><span>✓</span>Land</button>
+            </div>
+            <button class="replay-button" id="replay-button" type="button">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M13 5.5A5.6 5.6 0 1 0 13.2 10M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              Replay the run
+            </button>
+          </div>
+        </div>
+
+        <p class="interaction-note">
+          Move across the core to bend the field. Choose a phase to inspect it,
+          or let the run play through.
+        </p>
+      </section>
+
+      <section class="scale-story section-shell" aria-labelledby="scale-title">
+        <div class="section-heading">
+          <span class="cori-eyebrow">One behavior · every scale</span>
+          <h2 id="scale-title">A spinner becomes a place,<br />then leaves a trace.</h2>
+          <p>
+            The same mark moves from a 14px row signal, to a hero-scale run
+            ritual, to the final 8px ledger dot. The motion belongs to Cori —
+            not to one decorative screen.
+          </p>
+        </div>
+        <div class="scale-line" aria-label="Motion language across three interface scales">
+          <div class="scale-stop scale-stop--small">
+            <div class="tiny-core" aria-hidden="true"><span></span></div>
+            <div><strong>14px</strong><span>activity row</span></div>
+          </div>
+          <span class="scale-path" aria-hidden="true"></span>
+          <div class="scale-stop scale-stop--hero">
+            <div class="mid-core" aria-hidden="true"><span></span></div>
+            <div><strong>500px</strong><span>run ritual</span></div>
+          </div>
+          <span class="scale-path" aria-hidden="true"></span>
+          <div class="scale-stop scale-stop--dot">
+            <div class="ledger-dot" aria-hidden="true"></div>
+            <div><strong>8px</strong><span>ledger proof</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="moments section-shell" aria-labelledby="moments-title">
+        <div class="section-heading section-heading--split">
+          <div>
+            <span class="cori-eyebrow">New moments for Cori Cloud</span>
+            <h2 id="moments-title">The states between<br />the screens.</h2>
+          </div>
+          <p>
+            Not more dashboard. A small set of authored moments where motion
+            clarifies what the system needs, what it is doing, and when it is
+            safe to look away.
+          </p>
+        </div>
+
+        <div class="moment-grid">
+          <article class="moment-card moment-card--idle">
+            <div class="moment-visual idle-visual" aria-hidden="true">
+              <span class="idle-ring"></span><span class="idle-dot"></span>
+            </div>
+            <span class="moment-index">2a · Nothing moving yet</span>
+            <h3>Quiet is a state, too.</h3>
+            <p>The core breathes once, then rests. No fake work. No anxious spinner.</p>
+            <button class="text-action" type="button" data-jump="start">See the resting core <span>↗</span></button>
+          </article>
+
+          <article class="moment-card moment-card--attention">
+            <div class="moment-visual attention-visual" aria-hidden="true">
+              <span class="attention-arc"></span>
+              <span class="attention-dot"></span>
+              <span class="attention-hand">you</span>
+            </div>
+            <span class="moment-index">2b · Waiting is real</span>
+            <h3>One small decision before I go on.</h3>
+            <p>The orbit opens toward the action. Motion holds instead of pretending to progress.</p>
+            <button class="text-action" type="button" data-jump="attention">Preview the hand-off <span>↗</span></button>
+          </article>
+
+          <article class="moment-card moment-card--landed">
+            <div class="moment-visual landed-visual" aria-hidden="true">
+              <span class="landed-ring"></span><span class="landed-dot"></span>
+              <span class="landed-spark landed-spark--one"></span>
+              <span class="landed-spark landed-spark--two"></span>
+              <span class="landed-spark landed-spark--three"></span>
+            </div>
+            <span class="moment-index">2c · One run, neatly landed</span>
+            <h3>Done — and tucked into the ledger.</h3>
+            <p>The living core resolves into the exact mark, then collapses to a durable receipt.</p>
+            <button class="text-action" type="button" data-jump="complete">Preview the landing <span>↗</span></button>
+          </article>
+
+          <article class="moment-card moment-card--failure">
+            <div class="moment-visual failure-visual" aria-hidden="true">
+              <span class="failure-ring"></span><span class="failure-core"></span><span class="failure-node"></span>
+            </div>
+            <span class="moment-index">2d · A useful failure</span>
+            <h3>Nothing vanished. This step needs another try.</h3>
+            <p>One node falls out of orbit; the rest of the trace stays calm and intact.</p>
+            <button class="text-action" type="button" data-jump="failure">Preview the failure <span>↗</span></button>
+          </article>
+        </div>
+      </section>
+
+      <section class="live-room-section section-shell" aria-labelledby="room-title">
+        <div class="section-heading section-heading--split">
+          <div>
+            <span class="cori-eyebrow">New screen · The Live Room</span>
+            <h2 id="room-title">A run deserves<br />its own room.</h2>
+          </div>
+          <p>
+            A focused layer between “Run now” and the immutable trace. It keeps
+            the supplied Cloud navigation and product facts, but gives the active
+            workflow one clear center of gravity.
+          </p>
+        </div>
+
+        <div class="live-room">
+          <div class="room-topbar">
+            <div class="room-brand">
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.4" />
+                <circle cx="10" cy="10" r="2.65" fill="currentColor" />
+              </svg>
+              <strong>Cori Cloud</strong>
+              <span class="cori-badge cori-badge--mono">veepee-ai</span>
+            </div>
+            <nav class="room-tabs" aria-label="Cori Cloud preview navigation">
+              <a class="is-active" href="#room-title">Activity</a>
+              <a href="#room-title">Estate</a>
+              <a href="#room-title">Schedules</a>
+              <a href="#room-title">Analytics</a>
+            </nav>
+            <span class="room-health"><i></i> 2 worker pools</span>
+          </div>
+
+          <div class="room-body">
+            <div class="room-main">
+              <div class="room-heading">
+                <div>
+                  <span class="cori-eyebrow cori-eyebrow--accent">Run #12,848 · live</span>
+                  <h3>translate_product_sheets_fr</h3>
+                  <p id="room-story">Cori is reading the workflow and finding a worker.</p>
+                </div>
+                <button class="cori-btn" type="button">Open immutable trace</button>
+              </div>
+
+              <div class="room-work">
+                <div class="room-core" aria-hidden="true">
+                  <span class="room-core-orbit"></span>
+                  <span class="room-core-dot"></span>
+                  <span class="room-core-node room-core-node--one"></span>
+                  <span class="room-core-node room-core-node--two"></span>
+                  <span class="room-core-node room-core-node--three"></span>
+                </div>
+                <div class="room-status-copy">
+                  <span class="room-now">Now</span>
+                  <strong id="room-current-step">Preparing the run</strong>
+                  <span id="room-current-meta">Temporal · finding a route</span>
+                </div>
+              </div>
+
+              <ol class="room-steps" id="room-steps">
+                <li data-step="fetch"><span>01</span><div><strong>fetch_sheet</strong><small>gsheet pull · 214 rows</small></div><em>queued</em></li>
+                <li data-step="normalize"><span>02</span><div><strong>normalize</strong><small>typed transform · zod-validated</small></div><em>queued</em></li>
+                <li data-step="check"><span>03</span><div><strong>check_gpsr</strong><small>compliance gate</small></div><em>queued</em></li>
+                <li data-step="translate"><span>04</span><div><strong>translate</strong><small>declared model call</small></div><em>queued</em></li>
+              </ol>
+            </div>
+
+            <aside class="room-receipt" aria-label="Live run facts">
+              <span class="cori-eyebrow">The facts stay still</span>
+              <dl>
+                <div><dt>Actor</dt><dd>schedule</dd></div>
+                <div><dt>Pool</dt><dd>eu-west-hosted</dd></div>
+                <div><dt>Rows</dt><dd>214</dd></div>
+                <div><dt>Elapsed</dt><dd id="receipt-time">0.0s</dd></div>
+                <div><dt>Cost</dt><dd id="receipt-cost">€0.000</dd></div>
+                <div><dt>Agent baseline</dt><dd>€0.155</dd></div>
+              </dl>
+              <div class="receipt-saving">
+                <span>As a Cori workflow</span>
+                <strong id="receipt-saving">still measuring</strong>
+              </div>
+              <p>Motion carries mood. Mono carries proof.</p>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="principles section-shell" aria-labelledby="principles-title">
+        <div class="section-heading">
+          <span class="cori-eyebrow">Motion principles</span>
+          <h2 id="principles-title">Alive, not noisy.</h2>
+        </div>
+        <ol class="principle-list">
+          <li><span>01</span><div><h3>Progress leaves a trace.</h3><p>Every completed orbit becomes a stable fact. The animation never replaces status, elapsed time, or cost.</p></div></li>
+          <li><span>02</span><div><h3>Pauses open; they do not spin.</h3><p>When Cori needs a person, the system physically makes room for them and motion nearly stops.</p></div></li>
+          <li><span>03</span><div><h3>Color is energy before it is decoration.</h3><p>Violet is the core. Cyan and pink travel through it. Green, amber, and red remain semantic.</p></div></li>
+          <li><span>04</span><div><h3>The mark always comes home.</h3><p>Idle and success resolve to the exact orbit-and-core silhouette from the supplied Cloud exploration.</p></div></li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div>
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.4" />
+          <circle cx="10" cy="10" r="2.65" fill="currentColor" />
+        </svg>
+        <span>The Core · Cori in motion</span>
+      </div>
+      <span>Creative direction exploration · July 2026</span>
+    </footer>
+
+    <script src="experience.js"></script>
+  </body>
+</html>

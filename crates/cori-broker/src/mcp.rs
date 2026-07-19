@@ -102,12 +102,21 @@ pub fn run(
 
     // 3. Spawn + call.
     let output = call_tool(server_cfg, &spec.tool, &spec.args, &extra_env)?;
+    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &output)?;
+
+    let mut stderr = args_call.stderr;
+    if !validated.stderr.trim().is_empty() {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&validated.stderr);
+    }
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
-        output,
+        output: validated.output,
         duration: started.elapsed(),
-        stderr: args_call.stderr,
+        stderr,
         cost_eur: None,
         usage: None,
     })

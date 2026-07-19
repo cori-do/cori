@@ -107,6 +107,12 @@ pub enum BrokerError {
         stack: Option<String>,
     },
 
+    #[error("schema validation failed: {message}")]
+    SchemaValidation {
+        message: String,
+        stack: Option<String>,
+    },
+
     #[error("capability denied: {kind} `{name}` — {hint}")]
     CapabilityDenied {
         kind: &'static str,

@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cori Launcher — v3 handoff journey</title>
+    <style>
+      :root {
+        --ink: #12233b;
+        --ink-2: #354e70;
+        --canvas: #eef3f8;
+        --paper: #ffffff;
+        --surface: #f6f8fb;
+        --line: #d8e2ec;
+        --muted: #71839a;
+        --violet: #6757f4;
+        --violet-soft: #efedff;
+        --cyan: #d7f7fb;
+        --green: #13845b;
+        --green-soft: #e7f7ef;
+        --amber: #a66503;
+        --amber-soft: #fff2dc;
+        --red: #b83b5e;
+        --red-soft: #ffeaf0;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; color: var(--ink); background: var(--canvas); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+      code { font-family: var(--mono); }
+
+      .page { width: min(720px, calc(100% - 30px)); margin: 0 auto; padding: 30px 0 64px; }
+      .page-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 29px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+      .page-header h1 { margin: 0; font-size: 17px; letter-spacing: -.025em; }
+      .page-header p { margin: 0; color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+      .screens { display: grid; gap: 51px; }
+      .screen-header { margin: 0 0 13px; }
+      .screen-title { display: flex; align-items: baseline; gap: 9px; margin-bottom: 5px; }
+      .screen-number { color: var(--violet); font-family: var(--mono); font-size: 11px; font-weight: 800; }
+      .screen-header h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
+      .screen-header p { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
+
+      /* The app intentionally stays one narrow, vertical launcher window. */
+      .app { width: min(100%, 520px); overflow: hidden; margin: 0 auto; border: 1px solid #c7d3e0; border-radius: 13px; background: var(--paper); box-shadow: 0 14px 36px rgba(18, 35, 59, .12); }
+      .app-bar { display: flex; align-items: center; min-height: 43px; padding: 0 13px; border-bottom: 1px solid var(--line); background: #fff; }
+      .brand { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 800; }
+      .mark { display: grid; width: 19px; height: 19px; place-items: center; border-radius: 5px; color: #fff; background: var(--violet); font-size: 13px; }
+      .app-name { flex: 1; padding: 0 12px; color: var(--muted); font-size: 10px; text-align: center; }
+      .app-button { border: 1px solid transparent; border-radius: 5px; padding: 4px 6px; color: var(--ink-2); background: transparent; font-size: 9px; font-weight: 800; }
+      .app-button:hover { border-color: var(--line); background: var(--surface); }
+      .app-content { min-height: 420px; padding: 18px 14px 14px; }
+      .app-footer { display: flex; align-items: center; gap: 7px; padding: 9px 13px; border-top: 1px solid var(--line); color: var(--ink-2); background: var(--surface); font-size: 9px; font-weight: 700; }
+      .app-footer span:last-child { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 8px; font-weight: 500; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+
+      .title-row { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+      .title-row h3 { margin: 0; font-size: 16px; letter-spacing: -.025em; }
+      .title-row p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+      .back, .link { border: 0; padding: 0; color: var(--ink-2); background: transparent; font-size: 9px; font-weight: 800; }
+      .link { color: var(--violet); }
+      .back:hover, .link:hover { text-decoration: underline; }
+      .section-label { display: flex; align-items: center; justify-content: space-between; margin: 17px 0 7px; color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+      .pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 4px 7px; font-size: 9px; font-weight: 800; white-space: nowrap; }
+      .pill::before { width: 5px; height: 5px; border-radius: 50%; background: currentColor; content: ""; }
+      .pill.ok { color: var(--green); background: var(--green-soft); }
+      .pill.warn { color: var(--amber); background: var(--amber-soft); }
+      .pill.bad { color: var(--red); background: var(--red-soft); }
+      .pill.neutral { color: var(--ink-2); background: #edf2f6; }
+      .pill.source { color: #5b4cab; background: var(--violet-soft); font-family: var(--mono); }
+      .pill.neutral::before, .pill.source::before { display: none; }
+      .primary, .secondary { border-radius: 6px; padding: 8px 10px; font-size: 10px; font-weight: 800; }
+      .primary { border: 1px solid var(--violet); color: #fff; background: var(--violet); box-shadow: 0 4px 10px rgba(103, 87, 244, .2); }
+      .primary:hover { background: #5748dc; }
+      .primary:disabled { cursor: wait; opacity: .72; }
+      .secondary { border: 1px solid var(--line); color: var(--ink); background: #fff; }
+      .secondary:hover { background: var(--surface); }
+
+      /* 00 Agent harness */
+      .harness { width: min(100%, 520px); overflow: hidden; margin: 0 auto; border: 1px solid #283e5b; border-radius: 13px; background: #101e31; box-shadow: 0 14px 36px rgba(18, 35, 59, .16); }
+      .harness-bar { display: flex; align-items: center; height: 40px; padding: 0 13px; border-bottom: 1px solid rgba(255,255,255,.12); color: #c8d5e6; font-size: 10px; font-weight: 800; }
+      .harness-dot { width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #8e7eff; }
+      .harness-content { padding: 18px 15px; }
+      .agent-message { margin: 0 0 12px; color: #dce6f1; font-size: 11px; line-height: 1.55; }
+      .agent-message code { color: #bdb5ff; font-size: 9px; }
+      .handoff-card { padding: 12px; border: 1px solid rgba(190,182,255,.4); border-radius: 8px; background: rgba(103,87,244,.14); }
+      .handoff-card h3 { margin: 0 0 3px; color: #fff; font-size: 12px; }
+      .handoff-card p { margin: 0; color: #bfcbe0; font-size: 9px; line-height: 1.45; }
+      .handoff-source { display: block; overflow: hidden; margin: 10px 0; color: #bdb5ff; font-family: var(--mono); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+      .handoff-actions { display: flex; gap: 6px; }
+      .harness .primary { border-color: #a99fff; background: #8072ff; }
+      .harness .secondary { border-color: rgba(255,255,255,.2); color: #dce6f1; background: transparent; }
+      .handoff-status { display: none; margin-top: 9px; color: #9df1c4; font-size: 9px; font-weight: 800; }
+      .handoff-status.visible { display: block; }
+
+      /* 01 Handoff received */
+      .origin { display: flex; align-items: center; gap: 7px; margin-bottom: 13px; color: var(--ink-2); font-size: 9px; }
+      .origin-mark { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 5px; color: #fff; background: #1f3048; font-family: var(--mono); font-size: 8px; font-weight: 800; }
+      .workflow-card { padding: 13px; border: 1px solid #d6d1ff; border-radius: 9px; background: linear-gradient(135deg, var(--violet-soft), #fff 74%); }
+      .workflow-card h4 { margin: 8px 0 4px; font-size: 15px; letter-spacing: -.02em; }
+      .workflow-card p { margin: 0; color: var(--ink-2); font-size: 9px; line-height: 1.45; }
+      .source-line { display: flex; align-items: center; gap: 6px; margin: 11px 0; padding-top: 10px; border-top: 1px solid #ddd8ff; }
+      .source-line code { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+      .handoff-note { margin-top: 13px; padding: 10px; border-left: 3px solid var(--violet); border-radius: 0 6px 6px 0; color: var(--ink-2); background: var(--surface); font-size: 9px; line-height: 1.45; }
+      .handoff-note strong { color: var(--ink); }
+
+      /* 02 Remote only */
+      .remote-address { padding: 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink-2); background: var(--surface); font-family: var(--mono); font-size: 9px; }
+      .resolved { display: grid; grid-template-columns: 24px 1fr; gap: 8px; margin-top: 11px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; }
+      .resolved-icon { display: grid; width: 23px; height: 23px; place-items: center; border-radius: 50%; color: var(--green); background: var(--green-soft); font-size: 11px; font-weight: 900; }
+      .resolved strong { display: block; font-size: 10px; }
+      .resolved p { margin: 2px 0 0; color: var(--muted); font-size: 8px; line-height: 1.4; }
+      .resolved code { color: var(--ink-2); font-size: 8px; }
+      .trust-callout { margin-top: 11px; padding: 10px; border: 1px solid #f0d9aa; border-radius: 7px; background: var(--amber-soft); }
+      .trust-callout strong { display: block; color: #704600; font-size: 10px; }
+      .trust-callout p { margin: 3px 0 0; color: #8f6310; font-size: 8px; line-height: 1.45; }
+      .trust-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 11px; }
+      .trusted-state { display: none; margin-top: 9px; padding: 8px 9px; border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 9px; font-weight: 800; }
+      .trusted-state.visible { display: block; }
+
+      /* 03 Setup only when necessary */
+      .gate { padding: 13px; border: 1px solid #f0d9aa; border-radius: 9px; background: var(--amber-soft); }
+      .gate h4 { margin: 7px 0 4px; color: #704600; font-size: 14px; letter-spacing: -.015em; }
+      .gate p { margin: 0; color: #8d620e; font-size: 9px; line-height: 1.45; }
+      .gate-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #efd8a8; }
+      .why { margin-top: 13px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+      .why summary { padding: 9px 10px; color: var(--ink-2); background: var(--surface); font-size: 9px; font-weight: 800; cursor: pointer; }
+      .why p { margin: 0; padding: 8px 10px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+      .connected { display: none; margin-top: 10px; padding: 9px 10px; border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 9px; font-weight: 800; }
+      .connected.visible { display: block; }
+
+      /* 04 Confirm */
+      .workflow-heading { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+      .workflow-heading h4 { margin: 7px 0 3px; font-size: 15px; letter-spacing: -.02em; }
+      .workflow-heading code { display: block; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+      .impact { margin-top: 12px; padding: 11px; border-left: 3px solid var(--violet); border-radius: 0 7px 7px 0; background: var(--surface); }
+      .impact strong { display: block; font-size: 10px; }
+      .impact p { margin: 3px 0 0; color: var(--ink-2); font-size: 9px; line-height: 1.45; }
+      .input-row { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: 11px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; }
+      .input-row strong { display: block; font-size: 10px; }
+      .input-row span { display: block; margin-top: 2px; color: var(--muted); font-size: 8px; }
+      .input-row code { max-width: 195px; overflow: hidden; color: var(--ink-2); font-size: 8px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+      .ready-check { display: flex; align-items: center; gap: 6px; margin-top: 11px; color: var(--green); font-size: 9px; font-weight: 800; }
+      .ready-check::before { display: grid; width: 16px; height: 16px; place-items: center; border-radius: 50%; background: var(--green-soft); content: "✓"; }
+      .confirm { display: flex; justify-content: space-between; align-items: center; gap: 9px; margin-top: 13px; }
+      .confirm p { margin: 0; max-width: 230px; color: var(--muted); font-size: 8px; line-height: 1.35; }
+      .launch-note { display: none; margin-top: 9px; padding: 8px 9px; border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 9px; font-weight: 800; }
+      .launch-note.visible { display: block; }
+
+      /* 05 Running */
+      .run-summary { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border-radius: 7px; color: var(--ink-2); background: var(--surface); font-size: 9px; }
+      .run-summary strong { color: var(--ink); }
+      .steps { margin: 16px 0 0; padding: 0; list-style: none; }
+      .step { position: relative; display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding-bottom: 15px; }
+      .step:not(:last-child)::before { position: absolute; top: 24px; left: 11px; width: 1px; height: calc(100% - 7px); background: #d7e1eb; content: ""; }
+      .step-mark { position: relative; z-index: 1; display: grid; width: 23px; height: 23px; place-items: center; border: 1px solid #c7d3e0; border-radius: 50%; color: var(--muted); background: #fff; font-size: 8px; font-weight: 800; }
+      .step strong { display: block; font-size: 10px; }
+      .step p { margin: 2px 0 0; color: var(--muted); font-size: 8px; }
+      .step time { color: var(--muted); font-family: var(--mono); font-size: 8px; }
+      .step[data-state="running"] .step-mark { border-color: var(--violet); color: var(--violet); background: var(--violet-soft); animation: pulse 1s infinite; }
+      .step[data-state="done"] .step-mark { border-color: var(--green); color: var(--green); background: var(--green-soft); font-size: 0; }
+      .step[data-state="done"] .step-mark::after { content: "✓"; font-size: 10px; }
+      @keyframes pulse { 50% { opacity: .42; } }
+      .run-message { min-height: 31px; margin-top: 4px; padding: 8px 9px; border-radius: 6px; color: var(--ink-2); background: var(--surface); font-size: 9px; }
+      .run-message strong { color: var(--ink); }
+      .run-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+
+      /* 06 Result / return */
+      .success { padding: 14px; border-radius: 8px; color: #fff; background: var(--ink); }
+      .success .pill { margin-bottom: 8px; color: #c7f7dc; background: rgba(100,225,159,.14); }
+      .success h4 { margin: 0 0 4px; font-size: 15px; letter-spacing: -.02em; }
+      .success p { margin: 0; color: #bbcadc; font-size: 9px; }
+      .result-row { display: flex; justify-content: space-between; gap: 9px; padding: 10px 0; border-bottom: 1px solid #eaf0f5; color: var(--ink-2); font-size: 9px; }
+      .result-row strong { color: var(--ink); }
+      .result-actions { display: flex; gap: 6px; margin-top: 12px; }
+      .return { margin-top: 14px; padding: 11px; border: 1px solid #d7d2ff; border-radius: 8px; background: var(--violet-soft); }
+      .return h5 { margin: 0 0 3px; font-size: 10px; }
+      .return p { margin: 0; color: var(--ink-2); font-size: 8px; line-height: 1.45; }
+      .return-actions { display: flex; gap: 6px; margin-top: 9px; }
+      .copy-state { display: none; margin-top: 8px; color: var(--green); font-size: 8px; font-weight: 800; }
+      .copy-state.visible { display: block; }
+      .repeat { margin-top: 13px; border-top: 1px solid var(--line); padding-top: 12px; }
+      .repeat p { margin: 0 0 7px; color: var(--ink-2); font-size: 9px; }
+      .repeat-form { display: none; grid-template-columns: 1fr auto; gap: 6px; }
+      .repeat-form.visible { display: grid; }
+      .repeat-form input { min-width: 0; border: 1px solid var(--line); border-radius: 5px; padding: 6px; color: var(--ink); background: var(--surface); font-family: var(--mono); font-size: 8px; }
+
+      @media (max-width: 520px) {
+        .page { width: min(100% - 22px, 720px); padding-top: 22px; }
+        .page-header { display: block; }
+        .page-header p { margin-top: 5px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header"><h1>Cori Launcher — v3 journey</h1><p>Agent → source → safe run → return</p></header>
+
+      <section class="screens" aria-label="Cori Launcher v3 screen templates">
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">00</span><h2>Agent handoff</h2></div>
+            <p>The agent ends by giving the user one clear handoff action—open the workflow in Cori—not a path, command, or unreviewed run.</p>
+          </header>
+          <div class="harness" aria-label="Agent harness handoff template">
+            <header class="harness-bar"><span class="harness-dot"></span> Codex · workflow design complete</header>
+            <div class="harness-content">
+              <p class="agent-message">I saved your runnable workflow. It is a folder with a manifest and TypeScript steps; you can inspect it in your repo, then review the first run in Cori.</p>
+              <section class="handoff-card"><h3>Translate product catalog</h3><p>Reads a supplier sheet, produces French copy, and publishes the catalog.</p><code class="handoff-source">~/projects/catalog-workflows/translate_product_catalog</code><div class="handoff-actions"><button data-open-cori class="primary" type="button">Open in Cori →</button><button class="secondary" type="button">Open folder</button></div><div data-handoff-status class="handoff-status">✓ Cori received this workflow for review.</div></section>
+            </div>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">01</span><h2>Handoff received</h2></div>
+            <p>Cori opens directly on the workflow the agent created, preserving context and making review the next action instead of asking the user to find the folder again.</p>
+          </header>
+          <div class="app" aria-label="Cori handoff received template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Workflow handoff</span><button class="app-button" type="button">Activity</button></header>
+            <div class="app-content">
+              <div class="origin"><span class="origin-mark">C</span><span>Opened from your Codex workflow handoff</span></div>
+              <div class="title-row"><div><h3>Your workflow is ready to review.</h3><p>Nothing has run yet.</p></div><span class="pill neutral">Draft run</span></div>
+              <section class="workflow-card"><span class="pill source">Local folder</span><h4>Translate product catalog</h4><p>Turn the newest supplier spreadsheet into French product copy, then publish the result to the catalog.</p><div class="source-line"><code>~/projects/catalog-workflows/translate_product_catalog</code></div><button class="primary" type="button">Review first run →</button><button class="link" type="button" style="margin-left:8px">Show in Finder</button></section>
+              <p class="handoff-note"><strong>Why review first?</strong> The agent created the workflow, but Cori still checks the source, needed tools, and the effect this run will have before it starts.</p>
+            </div>
+            <footer class="app-footer"><span class="dot"></span> This Mac is ready <span>Handoff does not bypass checks</span></footer>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">02</span><h2>GitHub intake <span style="color:var(--muted);font-size:10px;font-weight:600">(remote source only)</span></h2></div>
+            <p>When the handoff is a GitHub workflow, Cori resolves the human-friendly ref to an exact version and asks for trust before the shared path continues.</p>
+          </header>
+          <div class="app" aria-label="GitHub workflow intake template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Review remote source</span><button class="app-button" type="button">×</button></header>
+            <div class="app-content">
+              <div class="title-row"><div><h3>Review GitHub workflow</h3><p>This branch is only shown for remote workflow sources.</p></div><button class="back" type="button">← Handoff</button></div>
+              <div class="remote-address">github.com/acme/catalog-workflows/translate_product_catalog@v1</div>
+              <section class="resolved"><span class="resolved-icon">✓</span><span><strong>Version resolved</strong><p><code>v1.4.2 · 5c2ae79e</code><br />This exact source will be used for the run.</p></span></section>
+              <section class="trust-callout"><strong>First time running this source</strong><p>Cori will fetch this exact version into its local cache. Trusting it allows review and execution; it does not grant access to other repositories.</p></section>
+              <div class="trust-actions"><button class="secondary" type="button">Inspect source</button><button data-trust-source class="primary" type="button">Trust &amp; review →</button></div>
+              <div data-trusted-state class="trusted-state">✓ Source trusted. Continuing to the same review flow.</div>
+            </div>
+            <footer class="app-footer"><span class="dot"></span> This Mac is ready <span>Exact version, not a moving branch</span></footer>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">03</span><h2>One blocker, one action <span style="color:var(--muted);font-size:10px;font-weight:600">(only when needed)</span></h2></div>
+            <p>Capability setup appears only if it blocks this workflow, with a specific reason and a single action that returns the user to the same run.</p>
+          </header>
+          <div class="app" aria-label="Capability setup template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Get ready</span><button class="app-button" type="button">×</button></header>
+            <div class="app-content">
+              <div class="title-row"><div><h3>One thing to finish first.</h3><p>Then this run can continue exactly where it is.</p></div><span class="pill warn">Action needed</span></div>
+              <section class="gate"><span class="pill warn">Google Sheets</span><h4>Connect Google to read your supplier sheet.</h4><p>The workflow reads the selected sheet before it can validate or publish anything. No catalog changes have been made.</p><div class="gate-row"><button class="link" type="button">Use another source</button><button data-connect-google class="primary" type="button">Connect Google →</button></div></section>
+              <details class="why"><summary>Why does Cori need this?</summary><p>This workflow declares Google Sheets as a required capability. Your sign-in stays associated with your local Cori identity, not with the workflow folder or agent.</p></details>
+              <div data-connected class="connected">✓ Google connected. Resume your review →</div>
+            </div>
+            <footer class="app-footer"><span class="dot"></span> This Mac is ready <span>Only requested for this workflow</span></footer>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">04</span><h2>Confirm the outcome</h2></div>
+            <p>The final checkpoint describes what changes in the user’s world, with parameters and readiness visible but no queue, activity-kind, or execution jargon.</p>
+          </header>
+          <div class="app" aria-label="Confirm run template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Review first run</span><button class="app-button" type="button">×</button></header>
+            <div class="app-content">
+              <div class="title-row"><button class="back" type="button">← Handoff</button><span class="pill ok">Ready</span></div>
+              <section class="workflow-heading"><span class="pill source">Local folder</span><h4>Translate product catalog</h4><code>~/projects/catalog-workflows/translate_product_catalog</code></section>
+              <section class="impact"><strong>This run will update your product catalog.</strong><p>It reads the supplier spreadsheet, translates product copy into French, and publishes the translated values.</p></section>
+              <div class="input-row"><span><strong>Source spreadsheet</strong><span>Input for this run</span></span><code>supplier-catalog.xlsx</code></div>
+              <div class="input-row"><span><strong>Target language</strong><span>Default workflow value</span></span><code>French (fr)</code></div>
+              <div class="ready-check">Cori checked the workflow, your tools, and this Mac.</div>
+              <div class="confirm"><p>Once started, Cori saves a trace and gives you a clear result—even if the app is closed.</p><button data-launch-run class="primary" type="button">Start run →</button></div>
+              <div data-launch-note class="launch-note">✓ Run started. Showing progress.</div>
+            </div>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">05</span><h2>Progress without noise</h2></div>
+            <p>While work is running, Cori communicates the active task and safe background execution; technical trace data remains available only when someone needs to investigate.</p>
+          </header>
+          <div class="app" aria-label="Run progress template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Run progress</span><button class="app-button" type="button">Activity</button></header>
+            <div class="app-content">
+              <div class="title-row"><div><h3>Translate product catalog</h3><p data-run-subtitle>Waiting to start on this Mac.</p></div><span data-run-status class="pill neutral">Not started</span></div>
+              <div class="run-summary"><span data-run-summary><strong>4 steps</strong> · local workflow</span><span data-run-time>—</span></div>
+              <ol class="steps"><li class="step" data-step><span class="step-mark">1</span><span><strong>Read supplier catalog</strong><p>Load the selected worksheet</p></span><time>—</time></li><li class="step" data-step><span class="step-mark">2</span><span><strong>Validate product rows</strong><p>Check the required fields</p></span><time>—</time></li><li class="step" data-step><span class="step-mark">3</span><span><strong>Translate product copy</strong><p>Create French descriptions</p></span><time>—</time></li><li class="step" data-step><span class="step-mark">4</span><span><strong>Publish the catalog</strong><p>Write translated values</p></span><time>—</time></li></ol>
+              <div data-run-message class="run-message"><strong>Before it starts:</strong> Cori will surface a single action if it needs a sign-in or worker.</div>
+              <div class="run-actions"><button data-start-run class="primary" type="button">Simulate progress</button></div>
+            </div>
+            <footer class="app-footer"><span class="dot"></span> Cori can keep running in the tray <span>Trace saved automatically</span></footer>
+          </div>
+        </article>
+
+        <article>
+          <header class="screen-header">
+            <div class="screen-title"><span class="screen-number">06</span><h2>Result, repeat, return</h2></div>
+            <p>Success ends the launch journey with the real-world result, a lightweight way to repeat it, and a path back to the agent that initiated the work.</p>
+          </header>
+          <div class="app" aria-label="Result and return template">
+            <header class="app-bar"><div class="brand"><span class="mark">⌁</span> Cori</div><span class="app-name">Run result</span><button class="app-button" type="button">Activity</button></header>
+            <div class="app-content">
+              <div class="title-row"><button class="back" type="button">← Home</button><span class="pill ok">Succeeded</span></div>
+              <section class="success"><span class="pill ok">Completed in 2m 14s</span><h4>Your catalog is updated.</h4><p>French product copy was published successfully.</p></section>
+              <div class="result-row"><span>Products updated</span><strong>143</strong></div><div class="result-row"><span>Source</span><strong>supplier-catalog.xlsx</strong></div><div class="result-row"><span>Ran on</span><strong>This Mac</strong></div>
+              <div class="result-actions"><button class="primary" type="button">Open catalog →</button><button class="secondary" type="button">Run again</button></div>
+              <section class="return"><h5>Continue with your agent</h5><p>Return to the originating harness when it supports handoff, or copy a concise result that can be pasted into any agent chat.</p><div class="return-actions"><button class="primary" type="button">Return to Codex →</button><button data-copy-result class="secondary" type="button">Copy summary</button></div><div data-copy-state class="copy-state">✓ Summary copied: 143 catalog products translated and published.</div></section>
+              <section class="repeat"><p><strong>Make this repeat?</strong> Offer a schedule only after a successful, known-good run.</p><button data-repeat-toggle class="link" type="button">Set a schedule</button><div data-repeat-form class="repeat-form"><input aria-label="Schedule" value="Every Monday · 09:00 · Europe/Paris" /><button class="primary" type="button">Save</button></div></section>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      document.querySelector('[data-open-cori]').addEventListener('click', () => {
+        document.querySelector('[data-handoff-status]').classList.add('visible');
+      });
+
+      document.querySelector('[data-trust-source]').addEventListener('click', (event) => {
+        event.currentTarget.disabled = true;
+        event.currentTarget.textContent = 'Trusting…';
+        document.querySelector('[data-trusted-state]').classList.add('visible');
+      });
+
+      document.querySelector('[data-connect-google]').addEventListener('click', (event) => {
+        event.currentTarget.disabled = true;
+        event.currentTarget.textContent = 'Connecting…';
+        document.querySelector('[data-connected]').classList.add('visible');
+      });
+
+      document.querySelector('[data-launch-run]').addEventListener('click', (event) => {
+        event.currentTarget.disabled = true;
+        event.currentTarget.textContent = 'Starting…';
+        document.querySelector('[data-launch-note]').classList.add('visible');
+      });
+
+      document.querySelector('[data-start-run]').addEventListener('click', (event) => {
+        const button = event.currentTarget;
+        const steps = [...document.querySelectorAll('[data-step]')];
+        const status = document.querySelector('[data-run-status]');
+        const subtitle = document.querySelector('[data-run-subtitle]');
+        const summary = document.querySelector('[data-run-summary]');
+        const time = document.querySelector('[data-run-time]');
+        const message = document.querySelector('[data-run-message]');
+        button.disabled = true;
+        button.textContent = 'Running…';
+        status.className = 'pill warn';
+        status.textContent = 'Running';
+        subtitle.textContent = 'Cori is working through the planned steps.';
+        steps.forEach((step, index) => {
+          window.setTimeout(() => {
+            step.dataset.state = 'running';
+            summary.innerHTML = `<strong>Step ${index + 1} of 4</strong> · ${step.querySelector('strong').textContent}`;
+            message.innerHTML = `<strong>In progress:</strong> ${step.querySelector('p').textContent}`;
+          }, index * 700);
+          window.setTimeout(() => {
+            step.dataset.state = 'done';
+            step.querySelector('time').textContent = index === 2 ? '1m 11s' : '0.4s';
+            if (index === steps.length - 1) {
+              status.className = 'pill ok';
+              status.textContent = 'Succeeded';
+              subtitle.textContent = 'Finished successfully on this Mac.';
+              summary.innerHTML = '<strong>4 steps complete</strong> · result saved';
+              message.innerHTML = '<strong>Done:</strong> translated product copy was published successfully.';
+              time.textContent = '2m 14s';
+              button.disabled = false;
+              button.textContent = 'View result →';
+            }
+          }, index * 700 + 500);
+        });
+      });
+
+      document.querySelector('[data-copy-result]').addEventListener('click', (event) => {
+        event.currentTarget.textContent = 'Copied';
+        document.querySelector('[data-copy-state]').classList.add('visible');
+      });
+
+      document.querySelector('[data-repeat-toggle]').addEventListener('click', () => {
+        document.querySelector('[data-repeat-form]').classList.toggle('visible');
+      });
+    </script>
+  </body>
+</html>

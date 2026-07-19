@@ -14,6 +14,8 @@
 //   mcp_args     — call stepDef.args(input); return { server, tool, args }.
 //   llm_prompt   — call stepDef.prompt(input); return
 //                  { model, prompt, batch, outputSchema, hasOutputSchema }.
+//   validate_output — parse payload.output through the declared output schema.
+//   llm_stub     — return a cardinality-correct dry-run output.
 //
 // Protocol (every mode):
 //   stdin  : JSON object — `{ "input": <value>, ... mode-specific extras }`.
@@ -24,6 +26,13 @@
 //
 // Envelope shape (success):  { "ok": true, "output": <value> }
 // Envelope shape (failure):  { "ok": false, "error": { "message", "stack"? } }
+
+import {
+  isSchemaValidationError,
+  jsonSchemaFromZod,
+  parseWithSchema,
+  stubFromZod,
+} from "./schema.ts";
 
 const ENVELOPE_PREFIX = "\u001ECORI_RUNNER\u001E";
 
@@ -37,7 +46,14 @@ function emit(envelope: unknown): void {
 
 function fail(message: string, err?: unknown): never {
   const stack = err instanceof Error ? err.stack : undefined;
-  emit({ ok: false, error: { message, stack } });
+  if (isSchemaValidationError(err)) {
+    emit({
+      ok: false,
+      error: { code: "schema_validation", message: err.message, stack },
+    });
+  } else {
+    emit({ ok: false, error: { message, stack } });
+  }
   Deno.exit(1);
 }
 
@@ -106,8 +122,14 @@ try {
       if (typeof stepDef.run !== "function") {
         fail("code step is missing a `run` function");
       }
-      const out = await stepDef.run(payload.input);
-      emit({ ok: true, output: out ?? null });
+      const input = await parseWithSchema(
+        stepDef.input,
+        payload.input,
+        "input",
+      );
+      const out = await stepDef.run(input);
+      const output = await parseWithSchema(stepDef.output, out, "output");
+      emit({ ok: true, output: output ?? null });
       break;
     }
 
@@ -116,7 +138,12 @@ try {
       if (typeof stepDef.command !== "function") {
         fail("cli step is missing a `command` function");
       }
-      const argv = await stepDef.command(payload.input);
+      const input = await parseWithSchema(
+        stepDef.input,
+        payload.input,
+        "input",
+      );
+      const argv = await stepDef.command(input);
       if (!Array.isArray(argv) || argv.some((x) => typeof x !== "string")) {
         fail(
           "cli step `command` must return an array of strings (no single string, no nested arrays)",
@@ -149,7 +176,8 @@ try {
         const trimmed = stdout.trim();
         parsed = trimmed.length ? JSON.parse(trimmed) : null;
       }
-      emit({ ok: true, output: parsed ?? null });
+      const output = await parseWithSchema(stepDef.output, parsed, "output");
+      emit({ ok: true, output: output ?? null });
       break;
     }
 
@@ -158,7 +186,12 @@ try {
       if (typeof stepDef.args !== "function") {
         fail("mcp_tool step is missing an `args` function");
       }
-      const args = await stepDef.args(payload.input);
+      const input = await parseWithSchema(
+        stepDef.input,
+        payload.input,
+        "input",
+      );
+      const args = await stepDef.args(input);
       emit({
         ok: true,
         output: {
@@ -175,15 +208,25 @@ try {
       if (typeof stepDef.prompt !== "function") {
         fail("llm step is missing a `prompt` function");
       }
-      const prompt = await stepDef.prompt(payload.input);
+      const input = await parseWithSchema(
+        stepDef.input,
+        payload.input,
+        "input",
+      );
+      const prompt = await stepDef.prompt(input);
       const schema = stepDef.output;
-      const hasSchema = !!(schema && typeof schema === "object" && schema._def);
+      const hasSchema = !!(
+        schema && typeof schema === "object" &&
+        (typeof schema.safeParseAsync === "function" ||
+          typeof schema.safeParse === "function")
+      );
       emit({
         ok: true,
         output: {
           model: stepDef.model,
           prompt: String(prompt ?? ""),
           batch: stepDef.batch ?? null,
+          parsedInput: input,
           outputSchema: hasSchema ? jsonSchemaFromZod(schema) : null,
           hasOutputSchema: hasSchema,
         },
@@ -191,15 +234,24 @@ try {
       break;
     }
 
+    case "validate_output": {
+      const output = await parseWithSchema(
+        stepDef.output,
+        payload.output,
+        "output",
+      );
+      emit({ ok: true, output: output ?? null });
+      break;
+    }
+
     case "llm_stub": {
       expectKind("llm");
       // Retained for backward compatibility; the live provider path uses
       // `llm_prompt`, but the stub is still useful for `--dry-run`.
-      const schema = stepDef.output;
-      const stub = schema && typeof schema === "object" && schema._def
-        ? defaultFromZod(schema)
-        : { mocked: true };
-      emit({ ok: true, output: stub });
+      await parseWithSchema(stepDef.input, payload.input, "input");
+      const stub = stubFromZod(stepDef.output);
+      const output = await parseWithSchema(stepDef.output, stub, "output");
+      emit({ ok: true, output: output ?? null });
       break;
     }
 
@@ -213,410 +265,4 @@ try {
     }`,
     e,
   );
-}
-
-// ---------------------------------------------------------------------------
-// zod default helper
-// ---------------------------------------------------------------------------
-//
-// We do not import zod here (the runner runs against whatever zod the
-// step file pulls in). We introspect `_def.typeName`, which is stable
-// across zod 3.x. Returns a minimal value: empty arrays/strings/objects,
-// `null` for nullable/unknown, the declared `.default()` if present.
-
-// deno-lint-ignore no-explicit-any
-function defaultFromZod(schema: any): unknown {
-  if (!schema || typeof schema !== "object") {
-    return null;
-  }
-  // Zod 4 reorganised internals: `_def.typeName` is gone, replaced by
-  // `_zod.def.type`. Dispatch to the v4 walker when those internals exist.
-  if (schema._zod?.def) {
-    return defaultFromZodV4(schema);
-  }
-  if (!schema._def) {
-    return null;
-  }
-  const def = schema._def;
-  if (def.typeName === "ZodDefault") {
-    try {
-      return def.defaultValue();
-    } catch {
-      return defaultFromZod(def.innerType);
-    }
-  }
-  switch (def.typeName) {
-    case "ZodString":
-      return "";
-    case "ZodNumber":
-    case "ZodBigInt":
-      return 0;
-    case "ZodBoolean":
-      return false;
-    case "ZodDate":
-      return new Date(0).toISOString();
-    case "ZodNull":
-    case "ZodNullable":
-      return null;
-    case "ZodUndefined":
-    case "ZodVoid":
-    case "ZodAny":
-    case "ZodUnknown":
-      return null;
-    case "ZodOptional":
-      return defaultFromZod(def.innerType);
-    case "ZodArray":
-      return [];
-    case "ZodTuple":
-      return (def.items ?? []).map((s: unknown) => defaultFromZod(s));
-    case "ZodEnum":
-      return def.values?.[0] ?? null;
-    case "ZodNativeEnum": {
-      const v = def.values && Object.values(def.values)[0];
-      return v ?? null;
-    }
-    case "ZodLiteral":
-      return def.value ?? null;
-    case "ZodUnion":
-    case "ZodDiscriminatedUnion": {
-      const opts = def.options ?? [];
-      return opts.length ? defaultFromZod(opts[0]) : null;
-    }
-    case "ZodIntersection":
-      return {
-        ...((defaultFromZod(def.left) as object) ?? {}),
-        ...((defaultFromZod(def.right) as object) ?? {}),
-      };
-    case "ZodRecord":
-    case "ZodMap":
-      return {};
-    case "ZodObject": {
-      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(shape ?? {})) {
-        out[k] = defaultFromZod(shape[k]);
-      }
-      return out;
-    }
-    case "ZodEffects":
-    case "ZodBranded":
-    case "ZodCatch":
-    case "ZodPipeline":
-    case "ZodLazy":
-      return defaultFromZod(def.schema ?? def.innerType ?? def.in);
-    default:
-      return null;
-  }
-}
-
-// Zod 4 variant of `defaultFromZod`. Walks `_zod.def`, whose `type` field
-// replaces v3's `_def.typeName`.
-// deno-lint-ignore no-explicit-any
-function defaultFromZodV4(schema: any): unknown {
-  const def = schema._zod?.def;
-  if (!def) return null;
-  switch (def.type) {
-    case "string":
-      return "";
-    case "number":
-    case "int":
-    case "bigint":
-      return 0;
-    case "boolean":
-      return false;
-    case "date":
-      return new Date(0).toISOString();
-    case "null":
-    case "nullable":
-      return null;
-    case "undefined":
-    case "void":
-    case "any":
-    case "unknown":
-    case "never":
-    case "nan":
-      return null;
-    case "default":
-    case "prefault":
-      try {
-        return typeof def.defaultValue === "function"
-          ? def.defaultValue()
-          : def.defaultValue;
-      } catch {
-        return defaultFromZodV4(def.innerType);
-      }
-    case "optional":
-    case "nonoptional":
-    case "readonly":
-    case "catch":
-      return defaultFromZodV4(def.innerType);
-    case "array":
-      return [];
-    case "tuple":
-      return (def.items ?? []).map((s: unknown) => defaultFromZodV4(s));
-    case "enum": {
-      const vals = Object.values(def.entries ?? {});
-      return vals.length ? vals[0] : null;
-    }
-    case "literal":
-      return (def.values ?? [])[0] ?? null;
-    case "union": {
-      const opts = def.options ?? [];
-      return opts.length ? defaultFromZodV4(opts[0]) : null;
-    }
-    case "intersection":
-      return {
-        ...((defaultFromZodV4(def.left) as object) ?? {}),
-        ...((defaultFromZodV4(def.right) as object) ?? {}),
-      };
-    case "record":
-    case "map":
-    case "set":
-      return def.type === "set" ? [] : {};
-    case "pipe":
-      return defaultFromZodV4(def.out ?? def.in);
-    case "lazy":
-      try {
-        return defaultFromZodV4(def.getter ? def.getter() : null);
-      } catch {
-        return null;
-      }
-    case "object": {
-      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(shape ?? {})) {
-        out[k] = defaultFromZodV4(shape[k]);
-      }
-      return out;
-    }
-    default:
-      return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// zod -> JSON Schema converter (minimal)
-// ---------------------------------------------------------------------------
-//
-// Used by `llm_prompt` mode to materialise a JSON Schema describing the
-// step's `output` zod schema, which LLM providers can enforce via
-// structured-output / response_format APIs. Mirrors `defaultFromZod`'s
-// strategy: introspect `_def.typeName`, walk the tree, emit Draft-07-
-// compatible JSON Schema with `additionalProperties: false` everywhere
-// (which is what OpenAI's structured outputs require).
-
-// deno-lint-ignore no-explicit-any
-function jsonSchemaFromZod(schema: any): Record<string, unknown> {
-  if (!schema || typeof schema !== "object") {
-    return {};
-  }
-  // Zod 4 internals live under `_zod.def` (with `_def.typeName` removed).
-  if (schema._zod?.def) {
-    return jsonSchemaFromZodV4(schema);
-  }
-  if (!schema._def) {
-    return {};
-  }
-  const def = schema._def;
-  switch (def.typeName) {
-    case "ZodString":
-      return { type: "string" };
-    case "ZodNumber":
-      return { type: "number" };
-    case "ZodBigInt":
-      return { type: "integer" };
-    case "ZodBoolean":
-      return { type: "boolean" };
-    case "ZodDate":
-      return { type: "string", format: "date-time" };
-    case "ZodNull":
-      return { type: "null" };
-    case "ZodAny":
-    case "ZodUnknown":
-      return {};
-    case "ZodUndefined":
-    case "ZodVoid":
-      return { type: "null" };
-    case "ZodLiteral":
-      return { const: def.value };
-    case "ZodEnum":
-      return { type: "string", enum: def.values ?? [] };
-    case "ZodNativeEnum":
-      return { enum: Object.values(def.values ?? {}) };
-    case "ZodOptional":
-    case "ZodNullable":
-    case "ZodDefault":
-    case "ZodCatch":
-    case "ZodBranded":
-    case "ZodReadonly":
-      return jsonSchemaFromZod(def.innerType);
-    case "ZodEffects":
-      return jsonSchemaFromZod(def.schema);
-    case "ZodPipeline":
-      return jsonSchemaFromZod(def.out ?? def.in);
-    case "ZodLazy":
-      try {
-        return jsonSchemaFromZod(def.getter ? def.getter() : null);
-      } catch {
-        return {};
-      }
-    case "ZodArray":
-      return { type: "array", items: jsonSchemaFromZod(def.type) };
-    case "ZodTuple":
-      return {
-        type: "array",
-        items: (def.items ?? []).map((s: unknown) => jsonSchemaFromZod(s)),
-        minItems: (def.items ?? []).length,
-        maxItems: (def.items ?? []).length,
-      };
-    case "ZodUnion":
-    case "ZodDiscriminatedUnion":
-      return {
-        anyOf: (def.options ?? []).map((s: unknown) => jsonSchemaFromZod(s)),
-      };
-    case "ZodIntersection":
-      return {
-        allOf: [
-          jsonSchemaFromZod(def.left),
-          jsonSchemaFromZod(def.right),
-        ],
-      };
-    case "ZodRecord":
-      return {
-        type: "object",
-        additionalProperties: jsonSchemaFromZod(def.valueType),
-      };
-    case "ZodMap":
-      return { type: "object" };
-    case "ZodObject": {
-      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
-      const properties: Record<string, unknown> = {};
-      const required: string[] = [];
-      for (const k of Object.keys(shape ?? {})) {
-        const child = shape[k];
-        properties[k] = jsonSchemaFromZod(child);
-        // A field is optional only if its outermost wrapper is
-        // ZodOptional / ZodDefault.
-        const inner = child?._def?.typeName;
-        if (inner !== "ZodOptional" && inner !== "ZodDefault") {
-          required.push(k);
-        }
-      }
-      const out: Record<string, unknown> = {
-        type: "object",
-        properties,
-        additionalProperties: false,
-      };
-      if (required.length) out.required = required;
-      return out;
-    }
-    default:
-      return {};
-  }
-}
-
-// Zod 4 variant of `jsonSchemaFromZod`. Walks `_zod.def` and emits the same
-// Draft-07-compatible shape (objects carry `additionalProperties: false`).
-// deno-lint-ignore no-explicit-any
-function jsonSchemaFromZodV4(schema: any): Record<string, unknown> {
-  const def = schema._zod?.def;
-  if (!def) return {};
-  switch (def.type) {
-    case "string":
-      return { type: "string" };
-    case "number":
-      return { type: "number" };
-    case "int":
-    case "bigint":
-      return { type: "integer" };
-    case "boolean":
-      return { type: "boolean" };
-    case "date":
-      return { type: "string", format: "date-time" };
-    case "null":
-      return { type: "null" };
-    case "any":
-    case "unknown":
-      return {};
-    case "undefined":
-    case "void":
-      return { type: "null" };
-    case "literal": {
-      const vals = def.values ?? [];
-      return vals.length === 1 ? { const: vals[0] } : { enum: vals };
-    }
-    case "enum":
-      return { type: "string", enum: Object.values(def.entries ?? {}) };
-    case "optional":
-    case "nullable":
-    case "default":
-    case "prefault":
-    case "catch":
-    case "nonoptional":
-    case "readonly":
-      return jsonSchemaFromZodV4(def.innerType);
-    case "pipe":
-      return jsonSchemaFromZodV4(def.out ?? def.in);
-    case "lazy":
-      try {
-        return jsonSchemaFromZodV4(def.getter ? def.getter() : null);
-      } catch {
-        return {};
-      }
-    case "array":
-      return { type: "array", items: jsonSchemaFromZodV4(def.element) };
-    case "tuple": {
-      const items = (def.items ?? []).map((s: unknown) =>
-        jsonSchemaFromZodV4(s)
-      );
-      const out: Record<string, unknown> = {
-        type: "array",
-        items,
-        minItems: items.length,
-      };
-      if (!def.rest) out.maxItems = items.length;
-      return out;
-    }
-    case "union":
-      return {
-        anyOf: (def.options ?? []).map((s: unknown) => jsonSchemaFromZodV4(s)),
-      };
-    case "intersection":
-      return {
-        allOf: [
-          jsonSchemaFromZodV4(def.left),
-          jsonSchemaFromZodV4(def.right),
-        ],
-      };
-    case "record":
-    case "map":
-      return {
-        type: "object",
-        additionalProperties: def.valueType
-          ? jsonSchemaFromZodV4(def.valueType)
-          : true,
-      };
-    case "object": {
-      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
-      const properties: Record<string, unknown> = {};
-      const required: string[] = [];
-      for (const k of Object.keys(shape ?? {})) {
-        const child = shape[k];
-        properties[k] = jsonSchemaFromZodV4(child);
-        const inner = child?._zod?.def?.type;
-        if (inner !== "optional" && inner !== "default") {
-          required.push(k);
-        }
-      }
-      const out: Record<string, unknown> = {
-        type: "object",
-        properties,
-        additionalProperties: false,
-      };
-      if (required.length) out.required = required;
-      return out;
-    }
-    default:
-      return {};
-  }
 }

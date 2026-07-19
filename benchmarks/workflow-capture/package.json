@@ -1,0 +1,21 @@
+{
+  "name": "@cori-do/workflow-capture-benchmark",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "External-state benchmark for capturing Google Workspace tasks as Cori workflows.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm run build && node --test dist/test/benchmark.test.js",
+    "benchmark": "pnpm run build && node dist/src/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

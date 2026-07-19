@@ -313,6 +313,9 @@ fn classify(err: &BrokerError) -> Category {
         LlmSchemaMismatch { .. } => Category::NonRetryable {
             type_name: "SchemaValidationError",
         },
+        SchemaValidation { .. } => Category::NonRetryable {
+            type_name: "SchemaValidationError",
+        },
         BadEnvelope { .. } => Category::NonRetryable {
             type_name: "SchemaValidationError",
         },
@@ -345,5 +348,24 @@ fn classify(err: &BrokerError) -> Category {
         LlmProviderError { .. } => Category::Retryable {
             type_name: "LlmProviderError",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_schema_validation_is_non_retryable() {
+        let error = BrokerError::SchemaValidation {
+            message: "input.messages[0].id is required".to_string(),
+            stack: None,
+        };
+        assert!(matches!(
+            classify(&error),
+            Category::NonRetryable {
+                type_name: "SchemaValidationError"
+            }
+        ));
     }
 }

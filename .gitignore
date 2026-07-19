@@ -2,6 +2,7 @@
 target/
 dist/
 node_modules/
+.pnpm-store/
 *.tsbuildinfo
 
 # Editor / OS
@@ -16,3 +17,6 @@ pnpm-debug.log*
 
 # Runtime
 .cori/
+
+# Benchmark
+benchmarks/workflow-capture/artifacts

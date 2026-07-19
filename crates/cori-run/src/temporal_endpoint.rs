@@ -12,7 +12,7 @@
 //!    `source = AutoSpawnedDev`.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -125,7 +125,8 @@ fn spawn_dev_temporal() -> Result<()> {
 
     let state = paths::state_dir()?;
     std::fs::create_dir_all(&state).with_context(|| format!("creating `{}`", state.display()))?;
-    let db = paths::home()?.join("temporal-dev.db");
+    let version = temporal_version().context("reading the Temporal server version")?;
+    let db = versioned_db_path(paths::home()?, server_version(&version.stdout));
 
     let mut cmd = Command::new("temporal");
     cmd.args([
@@ -186,6 +187,39 @@ fn spawn_dev_temporal() -> Result<()> {
     Ok(())
 }
 
+fn temporal_version() -> Result<Output> {
+    let output = Command::new("temporal")
+        .arg("--version")
+        .output()
+        .context("running `temporal --version`")?;
+    if !output.status.success() {
+        bail!(
+            "`temporal --version` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output)
+}
+
+fn server_version(output: &[u8]) -> Option<&str> {
+    let output = std::str::from_utf8(output).ok()?;
+    let version = output
+        .split("Server ")
+        .nth(1)?
+        .split([',', ')', ' '])
+        .next()?;
+    (!version.is_empty()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
+    .then_some(version)
+}
+
+fn versioned_db_path(home: PathBuf, version: Option<&str>) -> PathBuf {
+    let suffix = version.unwrap_or("current");
+    home.join(format!("temporal-dev-server-{suffix}.db"))
+}
+
 #[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "setsid"]
@@ -208,4 +242,28 @@ fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{server_version, versioned_db_path};
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_server_version_from_temporal_cli_output() {
+        assert_eq!(
+            server_version(b"temporal version 1.7.2 (Server 1.31.1, UI 2.49.1)\n"),
+            Some("1.31.1")
+        );
+        assert_eq!(server_version(b"temporal version unknown\n"), None);
+    }
+
+    #[test]
+    fn isolates_dev_databases_by_server_schema_version() {
+        let home = PathBuf::from("/tmp/cori-home");
+        assert_eq!(
+            versioned_db_path(home, Some("1.31.1")),
+            PathBuf::from("/tmp/cori-home/temporal-dev-server-1.31.1.db")
+        );
+    }
 }

@@ -24,10 +24,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::{LlmCredentials, LlmOptions};
-use cori_broker::{TriggerContext, runtime as broker_runtime};
 use cori_protocol::{
     ActivityTrace, CostSummary, RunTrace, StepKind, TokenUsage, WorkerIdentity,
     identity_from_queue, task_queue_for,
@@ -152,6 +152,14 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
         }
     }
 
+    // Do not resolve imports from an untrusted remote workflow before the
+    // consent gate. Local and already-trusted workflows must be executable
+    // TypeScript before preflight can report them as ready.
+    if consent_required.is_none() {
+        let runtime = runtime::resolve()?;
+        runtime::validate_workflow_sources(&runtime, &loaded.absolute_path, &loaded.compiled)?;
+    }
+
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
     let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
@@ -253,15 +261,10 @@ pub async fn run_workflow(
         }
     }
 
-    // 3. Install Deno runtime
-    runtime::ensure_installed()?;
-    let runtime_root = paths::runtime_dir()?;
-    let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
-        anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
-             export CORI_DENO=$(which deno)"
-        )
-    })?;
+    // 3. Resolve Deno and validate every module before any activity can make
+    // an external side effect. The check does not evaluate module code.
+    let runtime = runtime::resolve()?;
+    runtime::validate_workflow_sources(&runtime, &loaded.absolute_path, &loaded.compiled)?;
 
     // 4. Capabilities
     let credentials = resolve_llm_credentials();

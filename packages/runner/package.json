@@ -6,6 +6,7 @@
   "private": true,
   "files": [
     "runner.ts",
+    "schema.ts",
     "deno.json",
     "README.md"
   ],
@@ -13,6 +14,6 @@
     "build": "echo \"no build step — runner.ts ships as source\"",
     "lint": "echo \"no lint — Deno typechecks at run time\"",
     "typecheck": "echo \"no typecheck — Deno typechecks at run time\"",
-    "test": "echo \"no tests yet\""
+    "test": "deno test --config deno.json schema.test.ts"
   }
 }

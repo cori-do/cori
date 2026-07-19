@@ -130,11 +130,42 @@ Rules that matter:
 - **Never put external I/O in a `code` activity.** If it needs a network, filesystem, or DB call, it's a `cli` or `mcp_tool`. Wrap the call in the right kind and keep the pure transform separate.
 - **Prefer `cli` and `mcp_tool` over `code` when you can.** They reuse tools the user already has installed and authenticated.
 - **A `cli` command's first argv element must be the real, statically named executable.** It is the capability Cori discovers, validates, and spawns. Do not use generic dispatchers such as `env`, `sh`, `bash`, or `xargs` to launch a dynamic executable path. If a prior step creates a runtime-specific interpreter or executable, keep a stable declared tool as argv[0] and use a small argument-safe wrapper; see `references/activity_kinds.md`.
+- **A `cli` `parse` callback never receives workflow state.** Its signature is
+  `parse(stdout, { stderr, exitCode })`. Derive output only from CLI stdout or
+  return a fixed acknowledgement. If later steps need a value already present
+  in the command input, keep using its existing flat-state key; do not try to
+  re-emit it from `parse`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
+
+#### Execution dataflow contract
+
+Cori passes one flat state object through the numbered steps. Design every
+schema and output around these exact rules:
+
+- State begins with the manifest parameters as top-level keys.
+- After a successful step, an object output is shallow-merged into that same
+  flat object. Outputs are not nested under the step name.
+- A duplicate top-level output key overwrites the value produced earlier.
+- Every required key in a step's `input` schema must exactly match a manifest
+  parameter or a top-level key produced by an earlier step.
+- Preserve multiple records and side-effect IDs in arrays or under unique
+  wrapper keys. Never emit repeated generic keys such as `message`, `id`, or
+  `label_id` when later steps need more than one of those values.
+
+Runtime Zod parsing is the enforcement boundary: declared input schemas parse
+before a callback or external side effect, and declared output schemas parse
+before a successful result returns. Object parsing applies Zod's unknown-key
+policy, defaults, and transforms. Schemas remain optional only for compatibility
+with older workflows; every newly captured step should declare both.
+
+For support-inbox workflows, fetched messages and created label IDs must remain
+uniquely addressable from later steps. Use a `messages` array, a
+`label_ids_by_message` array/map, or explicit unique wrapper keys; do not let
+successive fetch/create steps overwrite a shared `message` or `label_id` key.
 
 ### Step 5: Write the files
 
@@ -201,7 +232,7 @@ If they say edit, ask what to change, re-show, re-ask. If they say yes, write th
 cori check <chosen_path>
 ```
 
-`cori check` parses the manifest, statically analyses every step file, validates that declared `tools_required` / `mcp_servers` match actual usage, and runs preflight. It does **not** execute. Surface any errors back to the user in plain language — don't just dump raw `cori` output. If validation fails, offer to fix.
+`cori check` validates the manifest and static capability declarations, statically parses and type-checks every workflow module with Deno, then runs capability/preflight checks. It does **not** execute step callbacks, execute Zod schemas against runtime values, or perform cross-step dataflow analysis. Runtime schema enforcement fails safely at the first consuming activity. Surface any check errors back to the user in plain language — don't just dump raw `cori` output. If validation fails, offer to fix.
 
 ### Step 8: Confirm and suggest next action
 
@@ -211,7 +242,7 @@ After `cori check` is green:
 
 Don't auto-run. Saving and running are separate decisions.
 
-Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` validates the workflow shape but does not execute or parse embedded programs.
+Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` parses the TypeScript module but cannot parse a Python or shell program stored inside a string.
 
 ---
 

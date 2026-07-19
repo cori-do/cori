@@ -68,6 +68,12 @@ Key fields:
 - **`command`** is a function from input → string array. Cori passes it to the OS as argv — no shell, no injection. Always return an array, never a single string.
 - **argv[0] is the capability boundary.** It must be a string literal naming the actual executable Cori should discover and spawn, and that exact name must be in `tools_required`. Do not put generic dispatchers such as `env`, `sh`, `bash`, or `xargs` first merely to launch a dynamic executable path.
 - **`parse`** is required for non-trivial output. If the CLI returns plain text and the step's `Output` is `{ stdout: string }`, you can omit `parse` and Cori uses the raw stdout.
+- **`parse` receives only CLI results, never workflow input.** Its full signature
+  is `parse(stdout, { stderr, exitCode })`. The second argument is metadata, so
+  never read parameter or earlier-output keys from it. Derive the declared
+  output from stdout or return a fixed acknowledgement. Values used to build
+  the command already remain in flat workflow state for later steps and do not
+  need to be re-emitted by `parse`.
 - **`env`** (optional) lets you inject env vars without leaking them into logs.
 - **`timeout_ms`** (optional) default 60_000.
 
@@ -98,7 +104,7 @@ For longer inline Python programs, build the `-c` argument with newline joins:
 ].join("\n")
 ```
 
-Do not use `.join("; ")` when the program contains compound statements such as `if`, `for`, `try`, or `def`; Python rejects those after a semicolon. Syntax-check the final assembled snippet separately, because `cori check` validates the CLI step and capability declaration but does not parse embedded interpreter code.
+Do not use `.join("; ")` when the program contains compound statements such as `if`, `for`, `try`, or `def`; Python rejects those after a semicolon. Syntax-check the final assembled snippet separately, because `cori check` parses the TypeScript module but cannot parse Python code stored inside a string.
 
 When the CLI doesn't exist on the worker, Cori fails the activity with a clear "binary not found" error before scheduling. Workflow registration also fails early if `tools_required` lists a binary the worker doesn't have — surface this with the suggestion `cori workers status`.
 

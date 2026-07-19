@@ -48,6 +48,8 @@ pub struct LlmOptions {
 struct PromptSpec {
     model: String,
     prompt: String,
+    #[serde(rename = "parsedInput")]
+    parsed_input: JsonValue,
     #[serde(default)]
     batch: Option<BatchSpec>,
     #[serde(default, rename = "outputSchema")]
@@ -87,7 +89,7 @@ pub fn run(
     let output_schema = spec.output_schema.as_ref();
 
     // Decide whether to batch.
-    let chunks = decide_chunks(input, spec.batch.as_ref());
+    let chunks = decide_chunks(&spec.parsed_input, spec.batch.as_ref());
     let mut combined_stderr = initial.stderr;
 
     let (text_responses, total_usage) = if chunks.is_empty() {
@@ -107,7 +109,11 @@ pub fn run(
         let by = spec.batch.as_ref().unwrap().by.clone();
         let mut chunk_inputs: Vec<JsonValue> = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            chunk_inputs.push(substitute_field(input, &by, JsonValue::Array(chunk)));
+            chunk_inputs.push(substitute_field(
+                &spec.parsed_input,
+                &by,
+                JsonValue::Array(chunk),
+            ));
         }
 
         // Render prompts for each chunk via the runner.
@@ -147,6 +153,13 @@ pub fn run(
     } else {
         merge_batched_outputs(outputs, &spec.batch.as_ref().unwrap().by)
     };
+    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &final_output)?;
+    if !validated.stderr.trim().is_empty() {
+        if !combined_stderr.is_empty() && !combined_stderr.ends_with('\n') {
+            combined_stderr.push('\n');
+        }
+        combined_stderr.push_str(&validated.stderr);
+    }
 
     let cost = pricing::cost_eur(
         &spec.model,
@@ -156,7 +169,7 @@ pub fn run(
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
-        output: final_output,
+        output: validated.output,
         duration: started.elapsed(),
         stderr: combined_stderr,
         cost_eur: cost,
