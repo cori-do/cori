@@ -1,7 +1,7 @@
 {
   "name": "cori",
   "description": "Turn agent conversations into deterministic, re-runnable workflows. Bundles the cori-save-workflow skill, the cori MCP server (check/run/show/runs/status with human-in-the-loop consent), /save_workflow and /cori-run commands, and a once-per-session save-offer hook.",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "author": { "name": "Cori", "email": "support@cori.do", "url": "https://cori.do" },
   "homepage": "https://docs.cori.do/guides/claude-plugin",
   "repository": "https://github.com/cori-do/cori",
