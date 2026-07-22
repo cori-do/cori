@@ -250,6 +250,10 @@ pub fn run_managed_login(
         }
     };
 
+    // The login attempt (whatever its outcome) invalidates any cached
+    // probe so callers see fresh state immediately.
+    invalidate_check(adapter.binary());
+
     if detail.is_empty() && matches!(adapter.check(), AuthState::Ok) {
         Ok(ManagedLoginOutcome::SignedIn)
     } else if detail.is_empty() {
@@ -315,12 +319,43 @@ pub fn for_binary(name: &str) -> Option<&'static dyn CliAuthAdapter> {
         .map(|a| a.as_ref())
 }
 
+/// TTL for [`check_known`]'s probe cache. Auth state moves slowly;
+/// probes spawn a vendor process whose credential access can trigger an
+/// OS keychain prompt (macOS ACLs re-ask per process for ad-hoc-signed
+/// binaries) — so UI polling must not multiply spawns.
+const CHECK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+type CheckCache = std::collections::HashMap<String, (std::time::Instant, AuthState)>;
+static CHECK_CACHE: OnceLock<std::sync::Mutex<CheckCache>> = OnceLock::new();
+
 /// Convenience: probe a binary; returns `AuthState::Ok` when no
 /// adapter is registered for that name (unknown CLI is best-effort).
+/// Results are cached for [`CHECK_CACHE_TTL`]; sign-in flows call
+/// [`invalidate_check`] so the UI flips immediately after a login.
 pub fn check_known(name: &str) -> AuthState {
-    match for_binary(name) {
-        Some(a) => a.check(),
-        None => AuthState::Ok,
+    let Some(adapter) = for_binary(name) else {
+        return AuthState::Ok;
+    };
+    let cache = CHECK_CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock()
+        && let Some((at, state)) = guard.get(name)
+        && at.elapsed() < CHECK_CACHE_TTL
+    {
+        return state.clone();
+    }
+    let state = adapter.check();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(name.to_string(), (std::time::Instant::now(), state.clone()));
+    }
+    state
+}
+
+/// Drop the cached probe result for one binary (after a login attempt).
+pub fn invalidate_check(name: &str) {
+    if let Some(cache) = CHECK_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        guard.remove(name);
     }
 }
 

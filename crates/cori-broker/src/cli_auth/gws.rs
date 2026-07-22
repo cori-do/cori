@@ -99,17 +99,13 @@ impl CliAuthAdapter for GwsAdapter {
         }
     }
 
-    /// File-based credential encryption key instead of the OS keychain.
-    ///
-    /// The release binary is ad-hoc signed, so macOS keychain ACLs
-    /// re-prompt on every process (and "Always allow" breaks on each
-    /// gws update) — a prompt storm for Console probes and workflow
-    /// steps. `file` is gws's supported headless mode: the AES key
-    /// lives in `~/.config/gws/.encryption_key` (same trust boundary as
-    /// `client_secret.json` next to it). A user-set value always wins.
-    fn spawn_env(&self) -> &'static [(&'static str, &'static str)] {
-        &[("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")]
-    }
+    // Credential storage stays on gws's default: encryption key in the
+    // OS keychain. The ad-hoc-signed release binary makes macOS prompt
+    // per process until the user clicks "Always allow" (re-asked after
+    // each gws update — durable fix is upstream Developer ID signing).
+    // Cori keeps prompt volume down via the TTL cache in
+    // [`super::check_known`]. Users who want the headless file backend
+    // can set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file themselves.
 
     fn managed_login(&self, client: &OAuthClient, services: &[String]) -> Option<ManagedLogin> {
         let path = gws_config_dir()?.join("client_secret.json");
