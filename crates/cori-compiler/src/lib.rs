@@ -435,7 +435,12 @@ fn enumerate_step_files(steps_dir: &Path) -> Result<Vec<StepFile>, Vec<CompileEr
             if cur.number == prev.number {
                 errors.push(CompileError::new(
                     format!("steps/{}", cur.filename),
-                    format!("duplicate step number {:02}", cur.number),
+                    format!(
+                        "duplicate step number {:02}: `steps/{}` and `steps/{}` — if you \
+                         renamed a step, the older file is probably orphaned; remove the \
+                         stale one",
+                        cur.number, prev.filename, cur.filename
+                    ),
                 ));
             } else if cur.number != prev.number + 1 {
                 errors.push(CompileError::new(

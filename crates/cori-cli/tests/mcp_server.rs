@@ -277,6 +277,7 @@ fn runs_list_and_show_read_persisted_traces() {
 
     // Persist one fixture trace the way run_workflow does.
     let now = chrono::Utc::now();
+    let big_output = json!({ "rows": vec!["x".repeat(64); 200] });
     let trace = cori_protocol::RunTrace {
         run_id: "run-test-0001".into(),
         workflow_id: "fixture_wf".into(),
@@ -290,7 +291,26 @@ fn runs_list_and_show_read_persisted_traces() {
         duration_ms: 42,
         source: None,
         params: json!({}),
-        activities: vec![],
+        activities: vec![cori_protocol::ActivityTrace {
+            activity_id: "01_bulk".into(),
+            step_name: "bulk".into(),
+            kind: cori_protocol::StepKind::Code,
+            status: "ok".into(),
+            started_at: now,
+            ended_at: now,
+            duration_ms: 1,
+            attempts: 1,
+            route: None,
+            task_queue: None,
+            worker_identity: None,
+            input_summary: json!(null),
+            output_summary: json!({ "rows": 200 }),
+            output: big_output,
+            cost_eur: None,
+            tokens: None,
+            error: None,
+            notes: None,
+        }],
         cost: cori_protocol::CostSummary::default(),
         error: None,
     };
@@ -314,14 +334,53 @@ fn runs_list_and_show_read_persisted_traces() {
     assert_eq!(rows[0]["run_id"], "run-test-0001");
     assert_eq!(rows[0]["workflow_id"], "fixture_wf");
 
+    // Default: bulky output elided, summary intact, fetch hint present.
     let shown = c.call_tool(3, "runs_show", json!({ "run_id": "run-test-0001" }));
     assert_eq!(shown.pointer("/result/isError").unwrap(), false);
     assert_eq!(
         shown.pointer("/result/structuredContent/status").unwrap(),
         "succeeded"
     );
+    assert_eq!(
+        shown
+            .pointer("/result/structuredContent/activities/0/output/_elided")
+            .unwrap(),
+        true,
+        "large outputs must be elided by default"
+    );
+    assert_eq!(
+        shown
+            .pointer("/result/structuredContent/activities/0/output_summary/rows")
+            .unwrap(),
+        200,
+        "summaries survive the trim"
+    );
 
-    let missing = c.call_tool(4, "runs_show", json!({ "run_id": "nope" }));
+    // Per-activity fetch returns the full output.
+    let one = c.call_tool(
+        4,
+        "runs_show",
+        json!({ "run_id": "run-test-0001", "activity": "bulk" }),
+    );
+    assert!(
+        one.pointer("/result/structuredContent/output/rows/0")
+            .is_some(),
+        "activity fetch returns full output"
+    );
+
+    // full: true returns everything inline.
+    let full = c.call_tool(
+        5,
+        "runs_show",
+        json!({ "run_id": "run-test-0001", "full": true }),
+    );
+    assert!(
+        full.pointer("/result/structuredContent/activities/0/output/rows/0")
+            .is_some(),
+        "full:true bypasses the trim"
+    );
+
+    let missing = c.call_tool(6, "runs_show", json!({ "run_id": "nope" }));
     assert_eq!(missing.pointer("/result/isError").unwrap(), true);
 }
 

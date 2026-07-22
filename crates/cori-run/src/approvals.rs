@@ -267,14 +267,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// One test fn so the `CORI_HOME` env mutation can't race a parallel
-    /// test in this crate.
     #[test]
     fn submit_list_decide_wait_and_expiry() {
-        let home = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded at this point in the test binary.
-        unsafe { std::env::set_var("CORI_HOME", home.path()) };
+        crate::test_env::with_temp_home(subtests);
+    }
 
+    fn subtests() {
         // Submit → list.
         let req = submit(
             ApprovalKind::RunConfirm,

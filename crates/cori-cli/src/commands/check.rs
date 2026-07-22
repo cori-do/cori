@@ -36,7 +36,14 @@ pub struct CapabilityReadiness {
     pub kind: CapabilityKind,
     pub authed: bool,
     pub detail: Option<String>,
-    pub login_command: Option<String>,
+    /// The action that actually unblocks this capability. Three states,
+    /// aligned with what `cori run` would say (a `check` that suggests
+    /// `cori login X` for a server that isn't even declared sends the
+    /// user down a dead end):
+    /// - not declared/installed → declare it (`mcp-servers.json`) or install it
+    /// - declared but not authed → `cori login X`
+    /// - ready → `None`
+    pub remedy: Option<String>,
 }
 
 pub fn check(path: String, update: bool, assume_yes: bool) -> Result<()> {
@@ -205,34 +212,50 @@ fn build_capability_readiness(
         let present = caps.has_cli(cli);
         let entry = lookup(cli);
         let authed = present && entry.map(|c| c.authed).unwrap_or(true);
+        let remedy = if !present {
+            Some(format!(
+                "`{cli}` is not installed on this machine — install it and re-check"
+            ))
+        } else if !authed {
+            Some(format!("cori login {cli}"))
+        } else {
+            None
+        };
         out.push(CapabilityReadiness {
             id: cli.clone(),
             kind: CapabilityKind::Cli,
             authed,
             detail: entry.and_then(|c| c.detail.clone()),
-            login_command: if !authed {
-                Some(format!("cori login {cli}"))
-            } else {
-                None
-            },
+            remedy,
         });
     }
     for mcp in &compiled.required_mcp_servers {
+        // Three distinct states — `run` distinguishes them, so `check`
+        // must too, or it green-lights (or mis-remedies) a workflow that
+        // will fail for a knowable reason.
+        let declared = caps.has_mcp(mcp);
         let entry = lookup(mcp);
         let (kind, authed) = match entry {
-            Some(c) => (c.kind, c.authed),
-            None => (CapabilityKind::McpStatic, caps.has_mcp(mcp)),
+            Some(c) => (c.kind, declared && c.authed),
+            None => (CapabilityKind::McpStatic, declared),
+        };
+        let remedy = if !declared {
+            Some(format!(
+                "MCP server `{mcp}` is not declared on this machine — add it to \
+                 `~/.cori/mcp-servers.json` with a `command` to launch it \
+                 (`cori login {mcp}` will not help until then)"
+            ))
+        } else if !authed {
+            Some(format!("cori login {mcp}"))
+        } else {
+            None
         };
         out.push(CapabilityReadiness {
             id: mcp.clone(),
             kind,
             authed,
             detail: entry.and_then(|c| c.detail.clone()),
-            login_command: if !authed {
-                Some(format!("cori login {mcp}"))
-            } else {
-                None
-            },
+            remedy,
         });
     }
     for llm in &compiled.required_llm_providers {
@@ -242,7 +265,7 @@ fn build_capability_readiness(
             kind: CapabilityKind::Llm,
             authed,
             detail: None,
-            login_command: if !authed {
+            remedy: if !authed {
                 Some(format!("cori login {llm}"))
             } else {
                 None
@@ -303,8 +326,8 @@ fn print_report(report: &PreflightReport) {
                 id = c.id,
                 kind = cap_kind_label(c.kind),
             );
-            if let Some(cmd) = &c.login_command {
-                println!("      needs sign-in — run: {cmd}");
+            if let Some(remedy) = &c.remedy {
+                println!("      {remedy}");
             }
         }
     }

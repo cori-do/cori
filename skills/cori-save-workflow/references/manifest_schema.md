@@ -51,6 +51,26 @@ parameters:
 | `enum` | One of a closed set. **Always provide `values`.** Prefer enum over string when the set is known — gives the user a picker at trigger time. |
 | `path` | File or directory path. Validated at trigger time when possible. |
 
+There is **no list/array parameter type in v1.** The sanctioned idiom for
+multi-value inputs (tab names, recipients, environments) is a
+comma-separated `string`, split defensively inside the step:
+
+```yaml
+- name: tabs
+  type: string
+  default: "agent,cori"
+  description: Comma-separated list of tab names to read
+```
+
+```ts
+const tabs = input.tabs.split(",").map((t) => t.trim()).filter(Boolean);
+```
+
+Always use that exact split-trim-filter snippet (whitespace and trailing
+commas are user input, not errors), say "comma-separated" in the
+parameter's `description`, and don't use the idiom for values that can
+themselves contain commas — model those differently.
+
 ### Conventions
 
 - One parameter per concept. If you find yourself adding `start_date` and `end_date_optional`, you have two parameters, not one weird one.

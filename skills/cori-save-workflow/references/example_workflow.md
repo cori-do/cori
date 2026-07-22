@@ -315,10 +315,29 @@ export default step.cli({
 });
 ```
 
+## `tests/assert.ts`
+
+Self-contained assertions — no network required to run the tests
+(`jsr.io` is blocked in many authoring sandboxes; `jsr:@std/assert` is an
+optional upgrade when it's reachable, never a prerequisite):
+
+```ts
+export function assertEquals(actual: unknown, expected: unknown, msg?: string) {
+  const a = JSON.stringify(actual), e = JSON.stringify(expected);
+  if (a !== e) throw new Error(msg ?? `assertEquals failed:\n  actual:   ${a}\n  expected: ${e}`);
+}
+export function assertMatch(actual: string, re: RegExp, msg?: string) {
+  if (!re.test(actual)) throw new Error(msg ?? `assertMatch failed: ${re} !~ ${actual}`);
+}
+export function assert(cond: unknown, msg = "assertion failed") {
+  if (!cond) throw new Error(msg);
+}
+```
+
 ## `tests/03_check_gpsr.test.ts`
 
 ```ts
-import { assertEquals, assertMatch } from "jsr:@std/assert";
+import { assertEquals, assertMatch } from "./assert.ts";
 import checkGpsr from "../steps/03_check_gpsr.ts";
 import translatedRows from "./fixtures/translated_rows.json" with { type: "json" };
 
@@ -341,7 +360,7 @@ Deno.test("check_gpsr: NOK when safety_info_fr is missing", async () => {
 });
 ```
 
-Note the Deno idioms: explicit `.ts` extension on the step import, `with { type: "json" }` on the fixture import, and `jsr:@std/assert` for assertions. `tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run `deno task test` from inside the workflow directory; the `deno.json` import map is what makes the `@cori-do/sdk` import resolve — the same resolution the runtime uses, so a green test means the step's imports will load under `cori run` too.
+Note the Deno idioms: explicit `.ts` extension on the step import, `with { type: "json" }` on the fixture import, and the local `./assert.ts` helper for assertions (dependency-free, so `deno task test` starts even where `jsr.io` is unreachable). `tests/fixtures/translated_rows.json` holds the actual data shapes captured from the conversation — the same data the agent used to verify the workflow worked during authoring. Run `deno task test` from inside the workflow directory; the `deno.json` import map is what makes the `@cori-do/sdk` import resolve — the same resolution the runtime uses, so a green test means the step's imports will load under `cori run` too.
 
 ## What this example demonstrates
 

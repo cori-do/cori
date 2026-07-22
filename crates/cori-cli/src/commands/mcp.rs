@@ -381,13 +381,16 @@ fn tool_definitions() -> JsonValue {
         {
             "name": "runs_show",
             "title": "Show one run's trace",
-            "description": "Full persisted trace of one run (per-step status, attempts, \
-                duration, cost). Mirrors `cori runs show`.",
+            "description": "Persisted trace of one run (per-step status, attempts, \
+                duration, cost). Bulky per-activity outputs are elided by default \
+                (summaries stay) — fetch one step's full output with `activity`, or \
+                everything with `full`. Mirrors `cori runs show`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "run_id": { "type": "string" },
-                    "activity": { "type": "string", "description": "Return only this activity (step name or activity id)" }
+                    "activity": { "type": "string", "description": "Return only this activity, with its full output (step name or activity id)" },
+                    "full": { "type": "boolean", "description": "Include every activity's full output inline", "default": false }
                 },
                 "required": ["run_id"]
             }
@@ -470,7 +473,7 @@ fn tool_check(args: &JsonValue) -> Result<JsonValue> {
             "kind": format!("{:?}", c.kind),
             "authed": c.authed,
             "detail": c.detail,
-            "login_command": c.login_command,
+            "remedy": c.remedy,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -529,6 +532,7 @@ fn tool_runs_list(args: &JsonValue) -> Result<JsonValue> {
 fn tool_runs_show(args: &JsonValue) -> Result<JsonValue> {
     let run_id = arg_str(args, "run_id")?;
     let activity = args.get("activity").and_then(|v| v.as_str());
+    let full = arg_bool(args, "full");
     let entries = super::runs::collect_runs(None)?;
     let entry = entries
         .into_iter()
@@ -544,7 +548,49 @@ fn tool_runs_show(args: &JsonValue) -> Result<JsonValue> {
                 .ok_or_else(|| anyhow!("no activity matching `{name}` in run `{run_id}`"))?;
             Ok(serde_json::to_value(act)?)
         }
-        None => Ok(serde_json::to_value(&entry.trace)?),
+        None => {
+            let mut trace = serde_json::to_value(&entry.trace)?;
+            if !full {
+                trim_trace_outputs(&mut trace);
+            }
+            Ok(trace)
+        }
+    }
+}
+
+/// Max bytes of a single activity's `output` inlined into an MCP tool
+/// result. Real workflows shuttle whole row sets between steps; a
+/// two-step sheet workflow already produced a ~195 KB trace in the
+/// field, blowing tool-result limits. The `*_summary` fields carry the
+/// signal; bulk output stays on disk and is fetchable per activity.
+const MAX_INLINE_OUTPUT: usize = 2048;
+
+fn trim_trace_outputs(trace: &mut JsonValue) {
+    let run_id = trace
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let Some(acts) = trace.get_mut("activities").and_then(|a| a.as_array_mut()) else {
+        return;
+    };
+    for a in acts {
+        let bytes = a.get("output").map(|o| o.to_string().len()).unwrap_or(0);
+        if bytes > MAX_INLINE_OUTPUT {
+            let name = a
+                .get("step_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            a["output"] = json!({
+                "_elided": true,
+                "bytes": bytes,
+                "note": format!(
+                    "full output elided from the MCP response (output_summary is intact); \
+                     fetch it with runs_show {{\"run_id\": \"{run_id}\", \"activity\": \"{name}\"}}"
+                ),
+            });
+        }
     }
 }
 
@@ -733,7 +779,9 @@ fn tool_run(
     ))?;
 
     let failed = trace.status == "failed";
-    Ok((serde_json::to_value(&trace)?, failed))
+    let mut trace_json = serde_json::to_value(&trace)?;
+    trim_trace_outputs(&mut trace_json);
+    Ok((trace_json, failed))
 }
 
 // ---------------------------------------------------------------------------

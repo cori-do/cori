@@ -138,7 +138,7 @@ Rules that matter:
 
 - **Never put external I/O in a `code` activity.** If it needs a network, filesystem, or DB call, it's a `cli` or `mcp_tool`. Wrap the call in the right kind and keep the pure transform separate.
 - **Prefer `cli` and `mcp_tool` over `code` when you can.** They reuse tools the user already has installed and authenticated.
-- **Google Workspace goes through the `gws` CLI.** If the user is willing to interact with Google Workspace services (Drive, Gmail, Calendar, Sheets, Docs), the recommended approach is a `cli` step invoking `gws` — prefer it over MCP Google tools or hand-rolled API calls, even if the original conversation used those. Its subcommands mirror the Google APIs (e.g. `gws sheets spreadsheets values get …`), so translating an API call from the conversation is mechanical. Declare `tools_required: [gws]` as usual; see `references/example_workflow.md` for real `gws` steps.
+- **Google Workspace goes through the `gws` CLI — enforce this as a pre-write lint, not a preference.** Before writing any step file, scan your draft decomposition: **if a step calls an MCP tool against a Google Drive / Gmail / Sheets / Calendar / Docs server, rewrite it as a `gws` `cli` step first.** The pull of the source conversation is strong (it probably used the MCP tool) and `cori check` will happily pass the MCP version — which then fails at run time on the worker unless that server is declared in `~/.cori/mcp-servers.json`. The `gws` path avoids that whole class of failure, and it's usually *simpler*: the Sheets API returns value arrays directly, which in a real field session deleted an entire download-and-parse step. Subcommands mirror the Google APIs (e.g. `gws sheets spreadsheets values get …`), so translating is mechanical. Declare `tools_required: [gws]` as usual; see `references/example_workflow.md` for real `gws` steps.
 - **A `cli` command's first argv element must be the real, statically named executable.** It is the capability Cori discovers, validates, and spawns. Do not use generic dispatchers such as `env`, `sh`, `bash`, or `xargs` to launch a dynamic executable path. If a prior step creates a runtime-specific interpreter or executable, keep a stable declared tool as argv[0] and use a small argument-safe wrapper; see `references/activity_kinds.md`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.
@@ -146,6 +146,8 @@ Rules that matter:
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
+
+**When you rename or re-decompose a step during iteration, delete the old numbered file — superseding is not enough.** Two files sharing a number fail `cori check` with `duplicate step number NN`. In write-only environments (some sandboxed sessions can write and overwrite but not delete), you cannot remove the orphan yourself: tell the user explicitly which stale file to delete before re-checking, as a required manual step.
 
 ### Step 5: Write the files
 
@@ -177,7 +179,20 @@ Notes:
 - **Mirror the runtime's resolution.** The runner runs `code` steps with an import map of exactly `@cori-do/sdk` + `zod` and network limited to `registry.npmjs.org,esm.sh,jsr.io`. The `test` task uses the same allow-net allowlist, so a `code` step that legitimately imports an `npm:`/`jsr:`/`esm.sh` package (see `references/activity_kinds.md`) resolves in tests just as it will at runtime — and a *bad* bare import fails the test with the same error the runtime would raise. That parity is the whole point of testing with Deno.
 - **`--no-check`** skips type-checking at test time (the SDK types `run`'s return loosely, so a strict check trips on `result.foo`). The test still executes the real `run` logic. This matches how a JS test runner behaves.
 - **Pin versions to current.** Check with `npm view @cori-do/sdk version`. `zod` must satisfy the SDK's peer range (`^4.x` at time of writing); a mismatched major (e.g. `zod@3`) is a silent break.
-- **Test files** import the step with an explicit `.ts` extension (`import step from "../steps/03_x.ts"`), assert with `jsr:@std/assert`, and import fixtures with `import data from "./fixtures/x.json" with { type: "json" }`. See `references/example_workflow.md` for a full test.
+- **Test files** import the step with an explicit `.ts` extension (`import step from "../steps/03_x.ts"`) and import fixtures with `import data from "./fixtures/x.json" with { type: "json" }`. **Assert with a zero-dependency helper you emit at `tests/assert.ts`** — not `jsr:@std/assert` by default: `jsr.io` is blocked in many authoring sandboxes (`403 host_not_allowed`), and a test that dies on an *import* proves nothing about the step. Template:
+
+  ```ts
+  // tests/assert.ts — self-contained; no network needed to run tests.
+  export function assertEquals(actual: unknown, expected: unknown, msg?: string) {
+    const a = JSON.stringify(actual), e = JSON.stringify(expected);
+    if (a !== e) throw new Error(msg ?? `assertEquals failed:\n  actual:   ${a}\n  expected: ${e}`);
+  }
+  export function assert(cond: unknown, msg = "assertion failed") {
+    if (!cond) throw new Error(msg);
+  }
+  ```
+
+  `jsr:@std/assert` remains a fine *upgrade* when the environment can reach `jsr.io` — treat it as optional, never as the thing `deno task test` depends on to even start. See `references/example_workflow.md` for a full test.
 - **Deno is assumed present** (Cori can't run without it). If `deno --version` fails, surface `curl -fsSL https://deno.land/install.sh | sh` — but if Cori is installed at all, Deno already is.
 
 ### Step 6: Write the manifest

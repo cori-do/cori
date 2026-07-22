@@ -744,6 +744,35 @@ fn kind_label(kind: StepKind) -> &'static str {
     }
 }
 
+/// Test-only: serialises every test that mutates the process-wide
+/// `CORI_HOME`. All env-touching tests in this crate MUST go through
+/// [`test_env::with_temp_home`] — a module-local lock only protects
+/// against itself, not against the other modules' tests (found as a
+/// flaky failure in the full-workspace run, 2026-07-22).
+#[cfg(test)]
+pub(crate) mod test_env {
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn with_temp_home<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("CORI_HOME").ok();
+        // SAFETY: ENV_LOCK serialises access, and every CORI_HOME-reading
+        // test routes through this helper.
+        unsafe { std::env::set_var("CORI_HOME", tmp.path()) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CORI_HOME", v),
+                None => std::env::remove_var("CORI_HOME"),
+            }
+        }
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+    }
+}
+
 #[cfg(test)]
 mod reauth_tests {
     use super::{auth_error_signature, step_capability};

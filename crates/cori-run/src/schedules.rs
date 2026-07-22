@@ -209,27 +209,10 @@ pub fn record_fire(id: &str, status: &str, error: Option<&str>, at: DateTime<Utc
 mod tests {
     use super::*;
 
-    // Tests touch the process-wide `CORI_HOME` env var, so they must
-    // not run in parallel with each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("CORI_HOME").ok();
-        // SAFETY: ENV_LOCK serialises access across these tests, and
-        // no other thread reads CORI_HOME for the duration of `f`.
-        unsafe {
-            std::env::set_var("CORI_HOME", tmp.path());
-        }
-        f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CORI_HOME", v),
-                None => std::env::remove_var("CORI_HOME"),
-            }
-        }
-    }
+    // Tests touch the process-wide `CORI_HOME` env var — serialised
+    // crate-wide via the shared helper (a module-local lock would still
+    // race the other modules' env-touching tests).
+    use crate::test_env::with_temp_home;
 
     #[test]
     fn id_is_stable_per_source_and_schedule() {
