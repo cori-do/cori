@@ -223,14 +223,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &show,
-            &sep_top,
-            &approvals,
-            &history,
-            &schedules,
-            &workers,
-            &sep_bot,
-            &quit,
+            &show, &sep_top, &approvals, &history, &schedules, &workers, &sep_bot, &quit,
         ],
     )?;
 

@@ -48,9 +48,8 @@ pub async fn connect_capability(id: String) -> IpcResult<CapabilityInfo> {
 fn connect_blocking(id: &str) -> IpcResult<CapabilityInfo> {
     let spec = install::spec_for(id)
         .ok_or_else(|| IpcError::BadRequest(format!("unknown capability `{id}`")))?;
-    let adapter = cli_auth::for_binary(id).ok_or_else(|| {
-        IpcError::BadRequest(format!("capability `{id}` has no managed sign-in"))
-    })?;
+    let adapter = cli_auth::for_binary(id)
+        .ok_or_else(|| IpcError::BadRequest(format!("capability `{id}` has no managed sign-in")))?;
 
     // Already signed in? Refresh state and return.
     if matches!(adapter.check(), AuthState::Ok) {

@@ -364,11 +364,15 @@ fn run_confirm_routes_through_console_approval_inbox() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let req: JsonValue =
-        serde_json::from_slice(&std::fs::read(&pending_file).unwrap()).unwrap();
+    let req: JsonValue = serde_json::from_slice(&std::fs::read(&pending_file).unwrap()).unwrap();
     assert_eq!(req["kind"], "run_confirm");
     assert_eq!(req["requested_by"], "mcp");
-    assert!(req["message"].as_str().unwrap().contains("Run Cori workflow"));
+    assert!(
+        req["message"]
+            .as_str()
+            .unwrap()
+            .contains("Run Cori workflow")
+    );
     assert_eq!(req["payload"]["dry_run"], false);
 
     let nonce = req["nonce"].as_str().unwrap();

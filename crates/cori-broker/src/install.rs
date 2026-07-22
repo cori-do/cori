@@ -51,9 +51,13 @@ pub fn spec_for(id: &str) -> Option<&'static InstallSpec> {
 
 #[derive(Debug, Error)]
 pub enum InstallError {
-    #[error("no install recipe for capability `{0}` — install it manually and ensure it is on PATH")]
+    #[error(
+        "no install recipe for capability `{0}` — install it manually and ensure it is on PATH"
+    )]
     UnknownCapability(String),
-    #[error("unsupported platform {os}/{arch} — download {id} manually from https://github.com/{repo}/releases")]
+    #[error(
+        "unsupported platform {os}/{arch} — download {id} manually from https://github.com/{repo}/releases"
+    )]
     UnsupportedPlatform {
         id: String,
         repo: String,
@@ -70,7 +74,9 @@ pub enum InstallError {
     },
     #[error("downloading {url}: HTTP {status}")]
     DownloadStatus { url: String, status: u16 },
-    #[error("checksum mismatch for {asset}: expected {expected}, got {actual} — refusing to install")]
+    #[error(
+        "checksum mismatch for {asset}: expected {expected}, got {actual} — refusing to install"
+    )]
     ChecksumMismatch {
         asset: String,
         expected: String,
@@ -218,10 +224,7 @@ pub fn install(id: &str) -> Result<PathBuf> {
         return Ok(target);
     }
 
-    Err(InstallError::BinaryNotInArchive {
-        asset,
-        bin: wanted,
-    })
+    Err(InstallError::BinaryNotInArchive { asset, bin: wanted })
 }
 
 fn fetch(url: &str) -> Result<Vec<u8>> {

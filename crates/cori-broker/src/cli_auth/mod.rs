@@ -176,8 +176,8 @@ pub fn run_managed_login(
         .first()
         .map(String::as_str)
         .unwrap_or_else(|| adapter.binary());
-    let resolved = crate::install::resolve_binary(binary)
-        .unwrap_or_else(|| std::path::PathBuf::from(binary));
+    let resolved =
+        crate::install::resolve_binary(binary).unwrap_or_else(|| std::path::PathBuf::from(binary));
 
     let mut cmd = Command::new(resolved);
     cmd.args(&plan.login_argv[1..]);
@@ -220,8 +220,12 @@ pub fn run_managed_login(
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         };
-        let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-        let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+        let stdout = stdout_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
 
         match status {
             None => format!(
@@ -339,7 +343,10 @@ mod tests {
     #[test]
     fn extract_https_url_ignores_prose_and_http() {
         assert_eq!(extract_https_url("Open this URL in your browser:"), None);
-        assert_eq!(extract_https_url("listening on http://localhost:8080"), None);
+        assert_eq!(
+            extract_https_url("listening on http://localhost:8080"),
+            None
+        );
         assert_eq!(extract_https_url(""), None);
     }
 }

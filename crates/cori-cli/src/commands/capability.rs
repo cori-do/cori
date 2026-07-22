@@ -101,7 +101,9 @@ fn row_for(spec: &install::InstallSpec) -> CapabilityRow {
         None
     };
     let managed_login = cli_auth::for_binary(spec.id)
-        .and_then(|a| cli_auth::resolve_client(spec.id, None).and_then(|c| a.managed_login(&c, &[])))
+        .and_then(|a| {
+            cli_auth::resolve_client(spec.id, None).and_then(|c| a.managed_login(&c, &[]))
+        })
         .is_some();
     CapabilityRow {
         id: spec.id.to_string(),

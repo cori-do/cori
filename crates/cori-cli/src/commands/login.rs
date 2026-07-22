@@ -89,7 +89,11 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
     // Binary missing? Install from the built-in registry.
     if install::resolve_binary(adapter.binary()).is_none() {
         if let Some(spec) = install::spec_for(capability) {
-            println!("`{}` is not installed — installing {}…", adapter.binary(), spec.display_name);
+            println!(
+                "`{}` is not installed — installing {}…",
+                adapter.binary(),
+                spec.display_name
+            );
             let path = install::install(capability)
                 .with_context(|| format!("installing `{capability}`"))?;
             println!("✓ Installed {} to {}", spec.display_name, path.display());
@@ -105,7 +109,10 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
     let cfg = Config::load()?;
     let from_config = match (
         config_string(&cfg, &format!("capability.{capability}.oauth_client_id")),
-        config_string(&cfg, &format!("capability.{capability}.oauth_client_secret")),
+        config_string(
+            &cfg,
+            &format!("capability.{capability}.oauth_client_secret"),
+        ),
     ) {
         (Some(client_id), Some(client_secret)) => Some(cli_auth::OAuthClient {
             client_id,
@@ -124,9 +131,7 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
         // No Cori-owned client available (dev build, unconfigured) or
         // the adapter has no managed flow — fall back to the manual
         // path with an honest explanation.
-        println!(
-            "No Cori-provisioned OAuth client is available for `{capability}` in this build."
-        );
+        println!("No Cori-provisioned OAuth client is available for `{capability}` in this build.");
         println!(
             "Either set one (`cori config set capability.{capability}.oauth_client_id …` and \
              `…oauth_client_secret …`, then re-run `cori login {capability}`), or follow the \
@@ -148,7 +153,10 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
             plan.client_config_path.display()
         );
     }
-    println!("Opening your browser to sign in to {}…", adapter.display_name());
+    println!(
+        "Opening your browser to sign in to {}…",
+        adapter.display_name()
+    );
 
     match cli_auth::run_managed_login(adapter, &plan, true)? {
         cli_auth::ManagedLoginOutcome::SignedIn => {
@@ -157,7 +165,10 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
             Ok(())
         }
         cli_auth::ManagedLoginOutcome::LoginFailed { detail } => {
-            bail!("{} sign-in did not complete: {detail}", adapter.display_name());
+            bail!(
+                "{} sign-in did not complete: {detail}",
+                adapter.display_name()
+            );
         }
     }
 }

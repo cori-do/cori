@@ -74,8 +74,7 @@ impl CliAuthAdapter for GwsAdapter {
         // a different keyring backend or on another machine).
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
             let signed_out = v.get("auth_method").and_then(|m| m.as_str()) == Some("none");
-            let unreadable =
-                v.get("encryption_valid").and_then(|b| b.as_bool()) == Some(false);
+            let unreadable = v.get("encryption_valid").and_then(|b| b.as_bool()) == Some(false);
             if signed_out || unreadable {
                 return AuthState::NeedsReauth {
                     hint: self.login_hint(),
@@ -126,11 +125,7 @@ impl CliAuthAdapter for GwsAdapter {
         }))
         .ok()?;
 
-        let mut argv = vec![
-            "gws".to_string(),
-            "auth".to_string(),
-            "login".to_string(),
-        ];
+        let mut argv = vec!["gws".to_string(), "auth".to_string(), "login".to_string()];
         let services: Vec<&str> = if services.is_empty() {
             DEFAULT_SERVICES.to_vec()
         } else {

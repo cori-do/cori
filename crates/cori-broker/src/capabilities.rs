@@ -165,7 +165,9 @@ pub fn validate(
     for c in required_clis {
         if !capabilities.has_cli(c) {
             let hint = if crate::install::spec_for(c).is_some() {
-                format!("run `cori login {c}` (installs and signs in) or `cori capability install {c}`")
+                format!(
+                    "run `cori login {c}` (installs and signs in) or `cori capability install {c}`"
+                )
             } else {
                 format!("install `{c}` and ensure it is on PATH")
             };

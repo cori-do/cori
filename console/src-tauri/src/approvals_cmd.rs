@@ -83,8 +83,10 @@ pub fn spawn_watcher(app: AppHandle) {
             if nonces != known {
                 let has_new = nonces.difference(&known).next().is_some();
                 known = nonces;
-                if let Err(e) = app.emit("approvals:changed", serde_json::json!({ "pending": pending }))
-                {
+                if let Err(e) = app.emit(
+                    "approvals:changed",
+                    serde_json::json!({ "pending": pending }),
+                ) {
                     warn!(error = %e, "could not emit approvals:changed");
                 }
                 // Don't steal focus for items that predate this launch.

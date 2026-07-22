@@ -789,9 +789,13 @@ mod reauth_tests {
             "error[auth]: Access denied. No credentials provided. Run 'gws auth login'"
         ));
         assert!(auth_error_signature("HTTP 401 Unauthorized"));
-        assert!(auth_error_signature("oauth token expired; refresh failed (invalid_grant)"));
+        assert!(auth_error_signature(
+            "oauth token expired; refresh failed (invalid_grant)"
+        ));
         // Non-auth failures must not produce a reauth item.
-        assert!(!auth_error_signature("model `gpt-4o-mini-2024` not found (404)"));
+        assert!(!auth_error_signature(
+            "model `gpt-4o-mini-2024` not found (404)"
+        ));
         assert!(!auth_error_signature("connection refused"));
         assert!(!auth_error_signature("permission denied: /etc/hosts"));
     }

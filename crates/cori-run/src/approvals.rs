@@ -333,7 +333,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(list_pending().unwrap().is_empty(), "timed-out item cancelled");
+        assert!(
+            list_pending().unwrap().is_empty(),
+            "timed-out item cancelled"
+        );
 
         // Heartbeat: absent → dead; beaten → alive.
         assert!(!console_alive());
