@@ -18,12 +18,12 @@ use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use cori_protocol::RunTrace;
 use cori_run::paths;
 
-struct RunEntry {
-    trace: RunTrace,
-    path: PathBuf,
+pub(crate) struct RunEntry {
+    pub(crate) trace: RunTrace,
+    pub(crate) path: PathBuf,
 }
 
-fn collect_runs(workflow_filter: Option<&str>) -> Result<Vec<RunEntry>> {
+pub(crate) fn collect_runs(workflow_filter: Option<&str>) -> Result<Vec<RunEntry>> {
     let root = paths::runs_dir()?;
     let mut out: Vec<RunEntry> = Vec::new();
     if !root.exists() {

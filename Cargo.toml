@@ -67,6 +67,9 @@ futures = "0.3"
 
 # Phase 5: credentials + OAuth.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+# Capability binary installs (`cori capability install`).
+flate2 = "1"
+tar = "0.4"
 base64 = "0.22"
 url = "2"
 webbrowser = "1"

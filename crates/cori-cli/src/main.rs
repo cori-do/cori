@@ -67,12 +67,22 @@ enum Command {
     },
     /// Sign in to a capability (MCP server, CLI, LLM provider).
     ///
+    /// For Cori-blessed CLIs (e.g. `gws`) this is the whole onboarding:
+    /// the binary is installed if missing and a Cori-provisioned OAuth
+    /// client is used, so no vendor console setup is needed — the
+    /// browser consent screen is the only step.
+    ///
     /// Idempotent and refresh-aware: rerunning with a still-valid
     /// token is a no-op. Tokens are stored in the OS keychain (with an
     /// encrypted-file fallback) and scoped to the current OS user.
     Login {
         /// Capability id — e.g. `notion`, `gws`, `openai`.
         capability: String,
+    },
+    /// Manage Cori-blessed capability binaries (`gws`, …).
+    Capability {
+        #[command(subcommand)]
+        command: CapabilityCommand,
     },
     /// Preflight a workflow folder — print per-step readiness and
     /// capability auth status without starting the run. Exit code
@@ -87,6 +97,14 @@ enum Command {
         #[arg(long = "yes", short = 'y')]
         assume_yes: bool,
     },
+    /// Serve Cori over the Model Context Protocol (stdio).
+    ///
+    /// Exposes `check`, `run`, `show`, `runs list/show`, and `status` as
+    /// MCP tools for agent clients (Claude Desktop, Claude Code, …), and
+    /// serves the `cori-save-workflow` skill as MCP prompts/resources.
+    /// Every `run` requires a per-run human confirmation via MCP
+    /// elicitation; `CORI_ASSUME_YES` is deliberately ignored here.
+    Mcp,
     /// Print machine-scoped overview: endpoint, identity, capabilities,
     /// and workers currently visible on the cluster.
     Status,
@@ -122,6 +140,21 @@ enum RunsCommand {
         /// Include full activity output (default summarises).
         #[arg(long)]
         full: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CapabilityCommand {
+    /// Download, verify (SHA-256), and install a capability binary
+    /// into `~/.cori/bin`. No sudo, no PATH edits.
+    Install {
+        /// Capability id — e.g. `gws`.
+        id: String,
+    },
+    /// List known capability binaries with install and sign-in state.
+    List {
         #[arg(long)]
         json: bool,
     },
@@ -181,11 +214,16 @@ fn main() -> anyhow::Result<()> {
         },
         Some(Command::Work { shared }) => commands::work::work(commands::work::WorkOpts { shared }),
         Some(Command::Login { capability }) => commands::login::login(&capability),
+        Some(Command::Capability { command }) => match command {
+            CapabilityCommand::Install { id } => commands::capability::install_capability(&id),
+            CapabilityCommand::List { json } => commands::capability::list(json),
+        },
         Some(Command::Check {
             path,
             update,
             assume_yes,
         }) => commands::check::check(path, update, assume_yes),
+        Some(Command::Mcp) => commands::mcp::mcp(),
         Some(Command::Status) => commands::status::status(),
         Some(Command::Show { path }) => commands::show::show(path),
     }

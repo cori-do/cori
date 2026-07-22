@@ -9,6 +9,7 @@
 //! both → `cori-protocol`. `cori-run` depends on `cori-broker`,
 //! `cori-compiler`, `cori-manifest`, `cori-worker`, `cori-protocol`.
 
+pub mod approvals;
 pub mod config;
 pub mod cron_driver;
 pub mod paths;
@@ -48,6 +49,8 @@ pub enum Trigger {
     Cli,
     Console,
     Schedule,
+    /// A run requested by an agent through `cori mcp`.
+    Mcp,
 }
 
 impl Trigger {
@@ -56,6 +59,7 @@ impl Trigger {
             Trigger::Cli => "cli",
             Trigger::Console => "console",
             Trigger::Schedule => "schedule",
+            Trigger::Mcp => "mcp",
         }
     }
 }
@@ -269,7 +273,7 @@ pub async fn run_workflow(
         credentials: credentials.clone(),
         trigger: Some(match trigger {
             Trigger::Cli => TriggerContext::Cli,
-            Trigger::Console | Trigger::Schedule => TriggerContext::Cli,
+            Trigger::Console | Trigger::Schedule | Trigger::Mcp => TriggerContext::Cli,
         }),
     };
 
@@ -515,7 +519,118 @@ pub async fn run_workflow(
     };
 
     persist_trace(&loaded, started_at, &trace)?;
+    maybe_flag_reauth(&trace, &loaded.compiled);
     Ok(trace)
+}
+
+/// When a run fails on a step that requires a named capability and the
+/// error looks like an authentication failure, drop a `reauth_required`
+/// item into the approval inbox (`~/.cori/approvals/`) so the desktop
+/// app can tell the human what to do — a `check` can report a capability
+/// `authed: true` (credentials present) and the run can still fail
+/// minutes later on an expired session. Best-effort and deduped per
+/// capability: never affects the run outcome.
+fn maybe_flag_reauth(trace: &RunTrace, compiled: &cori_protocol::CompiledWorkflow) {
+    if trace.status != "failed" {
+        return;
+    }
+    let Some((cap, activity)) = trace.activities.iter().find_map(|a| {
+        let err = a.error.as_deref()?;
+        if !auth_error_signature(err) {
+            return None;
+        }
+        let step = compiled
+            .steps
+            .iter()
+            .find(|s| s.activity_id == a.activity_id)?;
+        Some((step_capability(step)?, a))
+    }) else {
+        return;
+    };
+
+    // One open item per capability is enough.
+    let already = approvals::list_pending()
+        .map(|items| {
+            items.iter().any(|i| {
+                i.kind == approvals::ApprovalKind::ReauthRequired
+                    && i.payload.get("capability").and_then(|c| c.as_str()) == Some(cap.as_str())
+            })
+        })
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+
+    let message = format!(
+        "Capability `{cap}` failed authentication during run `{run_id}` of \
+         \"{wf}\" — sign in again with `cori login {cap}`, then re-run.",
+        run_id = trace.run_id,
+        wf = trace.workflow_id,
+    );
+    let payload = serde_json::json!({
+        "capability": cap,
+        "login_command": format!("cori login {cap}"),
+        "run_id": trace.run_id,
+        "workflow_id": trace.workflow_id,
+        "step": activity.step_name,
+        "error": activity.error,
+    });
+    if let Err(e) = approvals::submit(
+        approvals::ApprovalKind::ReauthRequired,
+        "run",
+        &message,
+        payload,
+        std::time::Duration::from_secs(4 * 3600),
+    ) {
+        tracing::warn!(error = %format!("{e:#}"), "could not record reauth item");
+    }
+}
+
+/// The capability id behind a step, for `cori login <id>` purposes.
+/// `cli` steps carry their binary in compiler metadata (placement is
+/// `RequiresLocalFs`, not `RequiresCapability`, for them); `mcp_tool`
+/// steps carry the server in their placement (metadata as fallback).
+/// `code`/`llm`/`builtin` have no login-able capability id — `llm`
+/// providers are deliberately skipped until per-step provider mapping
+/// exists (see approvals-design.md).
+fn step_capability(step: &cori_protocol::CompiledStep) -> Option<String> {
+    match step.kind {
+        StepKind::Cli => step
+            .metadata
+            .get("binary")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        StepKind::McpTool => match &step.placement {
+            cori_protocol::Placement::RequiresCapability { id } => Some(id.clone()),
+            _ => step
+                .metadata
+                .get("server")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        },
+        _ => None,
+    }
+}
+
+/// Auth-failure signatures seen from capability CLIs and providers.
+/// Deliberately narrow — a false "sign in again" item is worse than a
+/// missed one (`gws` emits `error[auth]: Access denied. No credentials
+/// provided. Run 'gws auth login'`).
+fn auth_error_signature(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "error[auth]",
+        "no credentials",
+        "unauthorized",
+        "invalid_grant",
+        "token expired",
+        "expired token",
+        "authentication failed",
+        "not authenticated",
+        "401",
+    ]
+    .iter()
+    .any(|sig| e.contains(sig))
 }
 
 // ---------------------------------------------------------------------------
@@ -626,5 +741,58 @@ fn kind_label(kind: StepKind) -> &'static str {
         StepKind::Code => "code",
         StepKind::Llm => "llm",
         StepKind::Builtin => "builtin",
+    }
+}
+
+#[cfg(test)]
+mod reauth_tests {
+    use super::{auth_error_signature, step_capability};
+
+    #[test]
+    fn cli_step_capability_comes_from_compiler_metadata() {
+        // Regression: cli steps have Placement::RequiresLocalFs (never
+        // RequiresCapability) — the login-able capability is the binary
+        // recorded in compiler metadata. Matching on placement alone
+        // silently missed every cli auth failure (found live, 2026-07-22).
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("binary".into(), serde_json::json!("gws"));
+        let step = cori_protocol::CompiledStep {
+            activity_id: "01_read_sheet_values".into(),
+            index: 0,
+            source_path: "steps/01_read_sheet_values.ts".into(),
+            kind: StepKind::Cli,
+            name: "read_sheet_values".into(),
+            description: String::new(),
+            route: None,
+            depends_on: vec![],
+            metadata,
+            placement: cori_protocol::Placement::RequiresLocalFs,
+            task_queue: None,
+        };
+        assert_eq!(step_capability(&step).as_deref(), Some("gws"));
+
+        let code_step = cori_protocol::CompiledStep {
+            kind: StepKind::Code,
+            metadata: serde_json::Map::new(),
+            placement: cori_protocol::Placement::Anywhere,
+            ..step
+        };
+        assert_eq!(step_capability(&code_step), None);
+    }
+
+    use super::StepKind;
+
+    #[test]
+    fn auth_signatures_match_real_provider_errors() {
+        // The gws error observed in the field (2026-07-22).
+        assert!(auth_error_signature(
+            "error[auth]: Access denied. No credentials provided. Run 'gws auth login'"
+        ));
+        assert!(auth_error_signature("HTTP 401 Unauthorized"));
+        assert!(auth_error_signature("oauth token expired; refresh failed (invalid_grant)"));
+        // Non-auth failures must not produce a reauth item.
+        assert!(!auth_error_signature("model `gpt-4o-mini-2024` not found (404)"));
+        assert!(!auth_error_signature("connection refused"));
+        assert!(!auth_error_signature("permission denied: /etc/hosts"));
     }
 }

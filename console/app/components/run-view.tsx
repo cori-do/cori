@@ -9,10 +9,14 @@
 //   • Historical → `initialTrace` is provided; state is seeded once
 //                  and no subscription happens. Otherwise identical.
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import {
+  connectCapability,
+  isIpcError,
+  listCapabilities,
   subscribeRun,
+  type CapabilityInfo,
   type PlanStep,
   type RunEvent,
   type RunTrace,
@@ -264,6 +268,7 @@ function TraceBody({ trace }: { trace: RunTrace }) {
             </>
           )}
         </dl>
+        {trace.error && <ConnectOffer error={trace.error} />}
       </div>
 
       <h2>Steps</h2>
@@ -340,6 +345,7 @@ function LiveBody({ runId, plan, steps, error }: LiveBodyProps) {
         <div className="card error">
           <strong>Run failed</strong>
           <pre style={{ whiteSpace: "pre-wrap" }}>{error}</pre>
+          <ConnectOffer error={error} />
         </div>
       )}
 
@@ -385,6 +391,103 @@ function LiveStepRow({ idx, step }: { idx: number; step: LiveStep | undefined })
         </div>
         {step.duration_ms != null && <div>{formatDuration(step.duration_ms)}</div>}
       </div>
+    </div>
+  );
+}
+
+// ── Reconnect offer (sign-in failures) ────────────────────────────────
+//
+// Both failure shapes name the capability:
+//   preflight — "capabilities need sign-in — run `cori login <id>` and
+//               try again: gws, notion"
+//   mid-run   — "gws needs sign-in for user `jean` — run: cori login gws"
+// Extract the ids, keep only those the Console can actually connect
+// (Cori-provisioned OAuth client available), and offer the same
+// one-click Connect as the Capabilities tab.
+
+function extractCapabilityIds(error: string): string[] {
+  const ids = new Set<string>();
+  for (const m of error.matchAll(/cori login ([a-z0-9_-]+)/g)) {
+    ids.add(m[1]);
+  }
+  const tail = error.match(/need sign-in[^:]*try again: (.+)$/m);
+  if (tail) {
+    for (const part of tail[1].split(",")) {
+      const id = part.trim();
+      if (/^[a-z0-9_-]+$/.test(id)) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function ConnectOffer({ error }: { error: string }) {
+  const ids = useMemo(() => extractCapabilityIds(error), [error]);
+  const [caps, setCaps] = useState<CapabilityInfo[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [connected, setConnected] = useState<Record<string, boolean>>({});
+  const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (ids.length === 0) return;
+    listCapabilities()
+      .then((all) =>
+        setCaps(all.filter((c) => ids.includes(c.id) && c.connectable)),
+      )
+      .catch(() => {});
+  }, [ids]);
+
+  if (caps.length === 0) return null;
+
+  const connect = async (id: string) => {
+    setBusy(id);
+    setFailure(null);
+    try {
+      const updated = await connectCapability({ id });
+      setConnected((d) => ({ ...d, [id]: updated.authed === true }));
+    } catch (e) {
+      setFailure(isIpcError(e) ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const allConnected = caps.every((c) => connected[c.id]);
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      {caps.map((c) =>
+        connected[c.id] ? (
+          <span key={c.id} className="pill ok" style={{ marginRight: 8 }}>
+            {c.display_name} connected
+          </span>
+        ) : (
+          <button
+            key={c.id}
+            type="button"
+            className="btn primary"
+            style={{ marginRight: 8 }}
+            disabled={busy !== null}
+            onClick={() => void connect(c.id)}
+          >
+            {busy === c.id ? "Connecting…" : `Connect ${c.display_name}`}
+          </button>
+        ),
+      )}
+      {busy && (
+        <p className="hint" style={{ marginBottom: 0 }}>
+          Waiting for the browser sign-in to finish…
+        </p>
+      )}
+      {allConnected && (
+        <p className="hint" style={{ marginBottom: 0 }}>
+          Signed in. Launch the workflow again to retry.
+        </p>
+      )}
+      {failure && (
+        <p className="hint" style={{ marginBottom: 0, color: "var(--red)" }}>
+          {failure}
+        </p>
+      )}
     </div>
   );
 }

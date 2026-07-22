@@ -316,6 +316,26 @@ export const listRecentWorkflows = () =>
 
 export const getStackStatus = () => call<StackStatus>("get_stack_status");
 
+// ---------- Capabilities (Connect buttons) ------------------------------
+
+export interface CapabilityInfo {
+  id: string;
+  display_name: string;
+  installed: boolean;
+  path?: string;
+  /** undefined == probe could not run (not installed / no adapter). */
+  authed?: boolean;
+  /** Connect can run end-to-end from the Console. */
+  connectable: boolean;
+}
+
+export const listCapabilities = () =>
+  call<CapabilityInfo[]>("list_capabilities");
+
+/** Long-running: resolves when the user finishes the browser consent. */
+export const connectCapability = (args: { id: string }) =>
+  call<CapabilityInfo>("connect_capability", args);
+
 export const resolveWorkflow = (args: { source: string; update?: boolean }) =>
   call<WorkflowPreflight>("resolve_workflow", args);
 
@@ -451,6 +471,53 @@ export const getCliInstallStatus = () =>
   call<CliInstallStatus>("cli_install_status");
 
 export const installCli = () => call<InstallCliResult>("install_cli");
+
+// ---------- Approvals (local human-in-the-loop inbox) ------------------
+// The Rust core watches ~/.cori/approvals/pending and emits
+// `approvals:changed`; deciding writes the decision file and retires the
+// pending item. The Console is the only writer of decisions.
+
+export type ApprovalKind =
+  | "run_confirm"
+  | "trust_consent"
+  | "schedule_reconsent"
+  | "step_gate"
+  | "reauth_required";
+
+export interface ApprovalRequest {
+  nonce: string;
+  kind: ApprovalKind;
+  created_at: string;
+  expires_at: string;
+  requested_by: string;
+  message: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ApprovalDecisionEntry {
+  nonce: string;
+  decision: "approved" | "declined";
+  decided_at: string;
+  via: string;
+}
+
+export const listApprovals = (): Promise<ApprovalRequest[]> =>
+  call<ApprovalRequest[]>("list_approvals");
+
+export const listDecidedApprovals = (): Promise<ApprovalDecisionEntry[]> =>
+  call<ApprovalDecisionEntry[]>("list_decided_approvals");
+
+export const decideApproval = (
+  nonce: string,
+  approved: boolean,
+): Promise<void> => call<void>("decide_approval", { nonce, approved });
+
+export const onApprovalsChanged = (
+  cb: (pending: ApprovalRequest[]) => void,
+): Promise<UnlistenFn> =>
+  listen<{ pending: ApprovalRequest[] }>("approvals:changed", (ev) =>
+    cb(ev.payload.pending),
+  );
 
 // ---------- Global event subscriptions ---------------------------------
 

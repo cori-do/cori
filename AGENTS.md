@@ -32,7 +32,7 @@ Do not re-litigate these without explicit human approval.
 
 ## CLI surface (the complete set)
 
-Eight verbs. Three take a workflow path *or* remote git ref; the rest are machine-scoped.
+Nine verbs. Three take a workflow path *or* remote git ref; the rest are machine-scoped.
 
 ```
 cori run <path-or-ref> [--json] [--dry-run] [--update] [--yes] [<param>=<value>...]
@@ -43,13 +43,21 @@ cori work [--shared <name>]                                # put this machine in
 cori login <capability>                                    # OAuth/CLI sign-in
 cori status                                                # machine: endpoint + identity + caps + workers + pinned remotes
 cori config get|set                                        # ~/.cori/config.toml access
+cori mcp                                                   # serve check/run/show/runs/status as MCP tools (stdio)
 ```
+
+`cori mcp` exposes a strict subset of the verbs as MCP tools for agent clients —
+never `login`, `work`, or `config` (machine-trust operations stay human-initiated;
+credentials never transit an MCP client), and never a `save_workflow` tool. Every
+MCP `run` requires a per-run human confirmation — MCP elicitation when the client
+declares it, else a native OS dialog on the host, else refusal — and the server
+deliberately ignores `CORI_ASSUME_YES`. See `docs` repo `reference/mcp.mdx`.
 
 The Cori agent skill is installed via `npx skills add cori-do/cori` (not a `cori` subcommand).
 
-Remote refs follow `go mod`-style syntax: `host/owner/repo[/subpath][@<ref>]`. Refless picks the highest `vX.Y.Z` tag; `@v1` / `@v1.2` pick the highest matching prefix; exact tags and 7+ hex shas are immutable. SSH form `git@host:repo[@ref]` is supported. `--update` re-resolves mutable refs; `--yes` (or `CORI_ASSUME_YES=1`) skips the first-run consent prompt. See [remote-workflows.md](remote-workflows.md) for the full design.
+Remote refs follow `go mod`-style syntax: `host/owner/repo[/subpath][@<ref>]`. Refless picks the highest `vX.Y.Z` tag; `@v1` / `@v1.2` pick the highest matching prefix; exact tags and 7+ hex shas are immutable. SSH form `git@host:repo[@ref]` is supported. `--update` re-resolves mutable refs; `--yes` (or `CORI_ASSUME_YES=1`) skips the first-run consent prompt. The implementation lives in [crates/cori-run/src/remote/](crates/cori-run/src/remote/mod.rs); the public reference is the sibling docs repo's `reference/remote-refs.mdx` (docs.cori.do → Reference → Remote refs).
 
-No `init`, `start`, `register`, `workflows`, `save`, `ls`, `rm`, `serve`, `workers`, `demo`. These were deleted in Phase 1 of the redesign; do not reintroduce.
+No `init`, `start`, `register`, `workflows`, `save`, `ls`, `rm`, `serve`, `workers`, `demo`. These were deleted in Phase 1 of the redesign; do not reintroduce. (`mcp` is not a resurrection of `serve`: it is a stdio protocol server for agent clients, not an HTTP daemon — the Wave 2 sign-off amended the verb count to nine.)
 
 ---
 
@@ -77,8 +85,16 @@ console/                               Cori Console — Tauri v2 desktop app (la
                    in-process worker, IPC commands)
   app/             React Router v7 SPA (`ssr: false`) served by the Tauri webview
 skills/            Cori agent skills (authored via `npx skills add cori-do/cori`)
+.claude-plugin/    Claude plugin + marketplace manifests. The PLUGIN ROOT IS THIS
+commands/          REPO ROOT — plugins discover skills in `skills/`, so the plugin
+hooks/             wraps the canonical skill with zero duplication. `commands/` =
+.mcp.json          slash commands, `hooks/` = the once-per-session save-offer Stop
+                   hook, `.mcp.json` = the `cori mcp` server declaration (also read
+                   by Claude Code when developing in this repo — harmless dogfood)
 examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
 scripts/install.sh
+docs/              internal working notes (spike results, design notes). NOT the public docs —
+                   those live in the sibling workspace repo `docs/` and mirror code, never lead it
 ```
 
 The remote-ref pipeline lives in [crates/cori-run/src/remote/](crates/cori-run/src/remote/mod.rs): `refspec` (parsing + semver), `git` (system `git` subprocess wrappers), `pins` (`pins.json`), `trust` (`trust.json` + consent prompt).

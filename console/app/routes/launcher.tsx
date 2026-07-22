@@ -6,18 +6,22 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { MiddleTruncate } from "../components/middle-truncate";
 import { ThemeIconButton } from "../components/theme-icon-button";
 import {
+  decideApproval,
   getCliInstallStatus,
   getLastLocalDir,
   getStackStatus,
   getStatus,
   installCli,
   isIpcError,
+  listApprovals,
   listDir,
   listRecentWorkflows,
   listRemoteWorkflows,
+  onApprovalsChanged,
   onStackStatus,
   peekSource,
   sourceToCli,
+  type ApprovalRequest,
   type DirEntry,
   type DirListing,
   type PeekResult,
@@ -105,6 +109,28 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       .then((s) => !cancelled && setStack(s))
       .catch(() => {});
     onStackStatus((s) => !cancelled && setStack(s))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Approval inbox: snapshot + live subscription. Items are human
+  // gates (MCP run confirms, trust consent) — surfaced above the
+  // search bar until decided.
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    listApprovals()
+      .then((a) => !cancelled && setApprovals(a))
+      .catch(() => {});
+    onApprovalsChanged((pending) => !cancelled && setApprovals(pending))
       .then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;
@@ -500,6 +526,8 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         <ThemeIconButton />
       </header>
 
+      {approvals.length > 0 && <ApprovalsPanel approvals={approvals} />}
+
       <SearchBar
         value={input}
         onChange={setInput}
@@ -559,6 +587,139 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       </footer>
     </div>
   );
+}
+
+// ─── Approvals panel ─────────────────────────────────────────────────────
+
+/**
+ * Compact attention banner for pending human gates. The launcher is an
+ * interrupter, not a reading surface: it shows what's being asked and
+ * the primary action; the readable detail (per-param table, history)
+ * lives in the manage window's Inbox tab.
+ */
+function ApprovalsPanel({ approvals }: { approvals: ApprovalRequest[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const decide = (nonce: string, approved: boolean) => {
+    setBusy(nonce);
+    decideApproval(nonce, approved)
+      // The watcher's `approvals:changed` removes the row; on error just
+      // release the buttons (the item may have expired meanwhile).
+      .catch(() => {})
+      .finally(() => setBusy((b) => (b === nonce ? null : b)));
+  };
+  return (
+    <div className="approvals" role="region" aria-label="Pending approvals">
+      <div className="approvals-header">
+        <span>
+          {approvals.length} approval{approvals.length > 1 ? "s" : ""} waiting
+        </span>
+        <button
+          type="button"
+          className="approvals-open-inbox"
+          onClick={() => void openManage("approvals")}
+        >
+          Open inbox →
+        </button>
+      </div>
+      {approvals.map((a) => {
+        const isAction = a.kind === "reauth_required";
+        return (
+          <div key={a.nonce} className="approval-row">
+            <div className="approval-body">
+              <div className="approval-head">
+                <span className={`pill ${approvalPill(a.kind)}`}>
+                  {approvalKindLabel(a.kind)}
+                </span>
+                <span className="approval-from">via {a.requested_by}</span>
+              </div>
+              <div className="approval-summary">{approvalSummary(a)}</div>
+            </div>
+            <div className="approval-actions">
+              {isAction ? (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy === a.nonce}
+                  onClick={() => decide(a.nonce, false)}
+                >
+                  Dismiss
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="btn approval-approve"
+                    disabled={busy === a.nonce}
+                    onClick={() => decide(a.nonce, true)}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy === a.nonce}
+                    onClick={() => decide(a.nonce, false)}
+                  >
+                    Decline
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * One readable line per item — structured facts over requester prose.
+ * The full message + per-param table are one click away in the Inbox.
+ */
+function approvalSummary(a: ApprovalRequest): string {
+  const p = a.payload;
+  const name =
+    (typeof p.workflow_name === "string" && p.workflow_name) ||
+    (typeof p.workflow_id === "string" && p.workflow_id) ||
+    (typeof p.remote_ref === "string" && p.remote_ref) ||
+    "";
+  switch (a.kind) {
+    case "run_confirm": {
+      const nParams =
+        p.params && typeof p.params === "object"
+          ? Object.keys(p.params as object).length
+          : 0;
+      const dry = p.dry_run === true ? " · dry run" : "";
+      return `Run "${name}" — ${String(p.steps ?? "?")} steps, ${nParams} param${nParams === 1 ? "" : "s"}${dry}`;
+    }
+    case "trust_consent":
+      return `Trust ${name} @ ${typeof p.sha === "string" ? p.sha.slice(0, 8) : "?"} (first run)`;
+    case "schedule_reconsent":
+      return `Schedule for "${name}" paused — workflow changed upstream`;
+    case "step_gate":
+      return `"${name}" is waiting on step approval`;
+    case "reauth_required":
+      return `${String(p.capability ?? "a capability")} needs sign-in — ${String(p.login_command ?? "")}`;
+  }
+}
+
+function approvalKindLabel(kind: ApprovalRequest["kind"]): string {
+  switch (kind) {
+    case "run_confirm":
+      return "run request";
+    case "trust_consent":
+      return "trust request";
+    case "schedule_reconsent":
+      return "schedule changed";
+    case "step_gate":
+      return "step approval";
+    case "reauth_required":
+      return "sign-in needed";
+  }
+}
+
+function approvalPill(kind: ApprovalRequest["kind"]): string {
+  return kind === "trust_consent" ? "bad" : "warn";
 }
 
 function placeholderFor(ctx: LauncherContext): string {

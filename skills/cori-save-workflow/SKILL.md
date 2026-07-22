@@ -1,6 +1,6 @@
 ---
 name: cori-save-workflow
-description: Capture work done in this conversation as a reusable, executable Cori workflow. Use whenever the user asks to "save this as a Cori workflow", "turn this into a runbook", "make this re-runnable", or any equivalent phrasing. Be proactive — when the user has just finished a multi-step task that they're plausibly going to do again (data pipeline, deployment, report generation, ticket triage, content processing, file conversion, API workflow), offer to save it as a Cori workflow at the end. The skill writes a workflow directory with TypeScript step files and shells out to the `cori` CLI to validate it.
+description: Capture work done in this conversation as a reusable, executable Cori workflow. Use whenever the user asks to "save this as a Cori workflow", "turn this into a runbook", "make this re-runnable", or any equivalent phrasing. Be proactive — when the user has just finished a multi-step task that they're plausibly going to do again (data pipeline, deployment, report generation, ticket triage, content processing, file conversion, API workflow), offer to save it as a Cori workflow at the end. The skill writes a workflow directory with TypeScript step files and validates it via the `cori` CLI — or via Cori's MCP tools (`cori__check` / `cori__run` under any client prefix) when no CLI is available, e.g. in cloud sandboxes.
 ---
 
 # Cori
@@ -15,7 +15,7 @@ The skill has one job: distill the current conversation into a Cori workflow dir
 
 ## The Cori CLI in one screen
 
-Eight verbs. Three take a workflow path *or* remote git ref (`host/owner/repo[/subpath][@ref]`); the rest are machine-scoped.
+Nine verbs. Three take a workflow path *or* remote git ref (`host/owner/repo[/subpath][@ref]`); the rest are machine-scoped.
 
 ```
 cori run   <path-or-ref> [--json] [--dry-run] [--update] [--yes] [<param>=<value>...]
@@ -27,6 +27,7 @@ cori work  [--shared <pool>]                     # stay online as a worker
 cori login <capability>                          # OAuth/CLI sign-in
 cori status                                      # endpoint, identity, workers, caps
 cori config get|set                              # ~/.cori/config.toml access
+cori mcp                                         # serve check/run/show/runs/status as MCP tools
 ```
 
 (The Cori agent skill itself is installed via `npx skills add cori-do/cori`.)
@@ -39,7 +40,10 @@ Key behaviours to remember:
 - Workflows are folders, not ids — there is no `cori workflows list`, `register`, `init`, or `save`. Everything is path-based.
 - Every run writes a JSON trace to `~/.cori/runs/<key>/<utc>.json`. The key is `<folder>-<8hex(absolute_path)>` for local workflows, or `<repo-leaf>-<8hex(host/repo//subpath)>` for remote.
 
-If `cori --version` fails, surface the install path: `curl -fsSL https://cli.cori.do/install.sh | bash`. Don't try to proceed without the binary.
+**If `cori --version` fails, check for Cori MCP tools before giving up.** Cori may be reachable even where the CLI isn't: `cori mcp` on the user's machine exposes `check` / `run` / `show` / `runs_list` / `runs_show` / `status` as MCP tools (possibly namespaced by your client, e.g. `cori__check` or `mcp__…__cori__check`). They take the same arguments and return the same data — use them as drop-in replacements for the CLI calls in this skill. Two rules when working through them:
+
+- The `source` path you pass must exist **on the machine where Cori runs** (the user's device), not in your sandbox. Write the workflow folder into a location the user owns and that machine can see, and pass *that* path.
+- If neither the CLI nor MCP tools exist, surface the install path: `curl -fsSL https://cli.cori.do/install.sh | bash`. But if that install fails with a 403 / blocked network (typical in cloud sandboxes — `cli.cori.do` is rarely allowlisted), **don't retry it**; say so honestly, author and review the workflow folder anyway, and hand validation off to the user's own machine (Cori desktop app or terminal). An unvalidated-but-reviewed folder is still a deliverable; a retry loop is not.
 
 ---
 
@@ -138,6 +142,7 @@ Rules that matter:
 - **A `cli` command's first argv element must be the real, statically named executable.** It is the capability Cori discovers, validates, and spawns. Do not use generic dispatchers such as `env`, `sh`, `bash`, or `xargs` to launch a dynamic executable path. If a prior step creates a runtime-specific interpreter or executable, keep a stable declared tool as argv[0] and use a small argument-safe wrapper; see `references/activity_kinds.md`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.
+- **Pick `llm` models from a provider the machine is actually signed into.** Before writing an `llm` step, run `cori status` (or the MCP `status` tool) and read the capabilities list: choose a model id from a family showing `authed: true`. Never default to a habitual model id — a step targeting an unauthenticated provider is the single most common reason `cori check` comes back not-ready, and swapping the `model` field yourself is a one-line fix, whereas asking the user to `cori login` a whole new provider is a much bigger ask. Record in `## Notes` which provider the step was validated against.
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
@@ -239,6 +244,8 @@ After `cori check` is green:
 
 Don't auto-run. Saving and running are separate decisions.
 
+**If the user does run it and it succeeds, close the loop in `## Notes`:** record the validation date, the model/provider that actually ran, and any dead ends hit on the way there (e.g. "first tried `gpt-4o-mini`; openai isn't authed on this machine — validated with anthropic instead"). A workflow whose Notes say when and with what it last worked is trustworthy to the next person — or the next agent session — that picks it up.
+
 Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` validates the workflow shape but does not execute or parse embedded programs.
 
 ---
@@ -251,11 +258,11 @@ When the user has just completed a non-trivial task that looks repeatable, offer
 - The user said something like "great, that worked", "perfect", "done"
 - The task touches a recurring concern: a recurring report, a data pipeline, an integration, a content processing flow, an onboarding/offboarding action
 
-Before offering, silently check `cori --version`.
+Before offering, silently check for Cori: `cori --version`, and if that fails, look for Cori MCP tools (`check`/`run`/`status` under a `cori` server, however your client namespaces them).
 
-- **If Cori is installed:** offer with one line:
+- **If Cori is reachable (CLI or MCP):** offer with one line:
   > "Want me to save this as a Cori workflow so you can re-run it?"
-- **If Cori is not installed:** offer with the install path:
+- **If Cori is not reachable at all:** offer with the install path:
   > "If you install Cori, you can save this as a reusable workflow: `curl -fsSL https://cli.cori.do/install.sh | bash`."
 
 Do not auto-install. Do not insist.
@@ -273,11 +280,18 @@ One offer per conversation, max. Don't nag.
 
 ## When things go wrong
 
-**`cori` not installed.** Install: `curl -fsSL https://cli.cori.do/install.sh | bash`. Don't proceed without it.
+**`cori` not installed.** First check for Cori MCP tools (see "The Cori CLI in one screen" — they replace every CLI call in this skill). Otherwise install: `curl -fsSL https://cli.cori.do/install.sh | bash`. If the install is network-blocked (sandbox), author + review the folder anyway and hand validation to the user's machine — never retry a blocked install in a loop.
 
 **`cori check` fails on a TS step file.** Read the error, locate the offending step, fix it (most often a type mismatch, missing `@cori-do/sdk` import, or wrong zod schema), re-run `cori check`.
 
 **`cori check` says a CLI binary is missing from `tools_required`.** The compiler enforces the declaration. Add the binary to the manifest's `tools_required` list and re-check.
+
+**`cori check` not ready, or an `llm` step fails at run time, on a provider/model problem.** Two failure modes look alike but need opposite fixes — the trace's `error` field distinguishes them (see `references/trace_interpretation.md`):
+
+- **Auth/permission error** → the provider capability isn't signed in on that machine. Prefer switching the step's `model` to a family that `cori status` shows as `authed: true`; only suggest `cori login <provider>` if no authed family can do the job.
+- **404 / "model not found"** → the provider is fine; the model id doesn't exist (plausible-looking ids, including dated snapshots, routinely don't). Pick a valid id from the *same* family. Do not respond to a 404 by switching providers or asking for a login.
+
+After the fix, loop: edit → re-check → (if running) re-run, until green.
 
 **`deno test` reports `Import "<pkg>" not a dependency and not in import map`.** A step or test imports a bare package name that isn't `@cori-do/sdk` or `zod`. This is the runtime telling you the step would *also* fail under `cori run` — Deno tests resolve exactly like the runtime. Fix the import: use `@cori-do/sdk`/`zod`, a no-import global, or (if a third-party library is genuinely needed) an explicit `npm:<pkg>@<ver>` / `jsr:` / `https://esm.sh/` specifier. Do not "fix" it by adding a `package.json` — that only hides the failure until runtime. If `@cori-do/sdk` itself isn't resolving, the workflow is missing its `deno.json` (Step 5) or has no network to `registry.npmjs.org`.
 
@@ -294,6 +308,7 @@ One offer per conversation, max. Don't nag.
 - [`references/activity_kinds.md`](references/activity_kinds.md) — full TypeScript templates for each activity kind. Read before writing your first step file in a session.
 - [`references/manifest_schema.md`](references/manifest_schema.md) — full YAML frontmatter spec, parameter types, validation rules. Read before writing your first manifest in a session.
 - [`references/example_workflow.md`](references/example_workflow.md) — a complete, realistic worked example (translate product sheets with a GPSR check). Read for a concrete model of what good output looks like.
+- [`references/trace_interpretation.md`](references/trace_interpretation.md) — how to read a persisted `RunTrace` (`~/.cori/runs/<key>/<utc>.json`): per-step status, attempts, duration, cost. Read when a run fails and you need to diagnose which step broke and why.
 
 ---
 

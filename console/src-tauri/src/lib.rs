@@ -5,7 +5,9 @@
 //! sidecar supervisor + in-process worker + cron driver, and wires
 //! the tray "Quit" handler to drain them in order.
 
+mod approvals_cmd;
 mod browse;
+mod capability_cmd;
 mod cli_install;
 mod commands;
 mod error;
@@ -141,6 +143,10 @@ pub fn run() {
             // Tray icon.
             build_tray(app.handle())?;
 
+            // Heartbeat + approval-inbox watcher — the Console is the
+            // rich human-decision surface for ~/.cori/approvals/.
+            approvals_cmd::spawn_watcher(app.handle().clone());
+
             // Spawn the Temporal sidecar supervisor.
             let sidecar_stop = supervisor::spawn(app.handle().clone());
             if let Some(state) = app.try_state::<AppState>() {
@@ -182,6 +188,8 @@ pub fn run() {
             commands::get_stack_status,
             cli_install::cli_install_status,
             cli_install::install_cli,
+            capability_cmd::list_capabilities,
+            capability_cmd::connect_capability,
             browse::peek_source,
             browse::list_dir,
             browse::get_last_local_dir,
@@ -190,6 +198,9 @@ pub fn run() {
             trigger::start_run,
             trigger::subscribe_run,
             trigger::record_trust,
+            approvals_cmd::list_approvals,
+            approvals_cmd::list_decided_approvals,
+            approvals_cmd::decide_approval,
             workers_schedules::list_workers,
             workers_schedules::list_schedules,
             workers_schedules::enable_schedule,
@@ -202,6 +213,7 @@ pub fn run() {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Open launcher", true, None::<&str>)?;
+    let approvals = MenuItem::with_id(app, "open_approvals", "Approvals…", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "open_history", "History…", true, None::<&str>)?;
     let schedules = MenuItem::with_id(app, "open_schedules", "Schedules…", true, None::<&str>)?;
     let workers = MenuItem::with_id(app, "open_workers", "Workers…", true, None::<&str>)?;
@@ -211,7 +223,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &show, &sep_top, &history, &schedules, &workers, &sep_bot, &quit,
+            &show,
+            &sep_top,
+            &approvals,
+            &history,
+            &schedules,
+            &workers,
+            &sep_bot,
+            &quit,
         ],
     )?;
 
@@ -225,6 +244,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id().as_ref() {
             "show" => focus_or_show_launcher(app),
+            "open_approvals" => emit_open_manage(app, "approvals"),
             "open_history" => emit_open_manage(app, "runs"),
             "open_schedules" => emit_open_manage(app, "schedules"),
             "open_workers" => emit_open_manage(app, "workers"),
@@ -286,6 +306,10 @@ fn initiate_quit(app: &AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         info!("quit requested — draining background tasks");
+
+        // Requesters should fall back to their next confirmation channel
+        // right away, not wait out the heartbeat staleness window.
+        approvals_cmd::clear_heartbeat();
 
         let (cron_tx, worker_tx, sidecar_tx, queue) = {
             let Some(state) = app_handle.try_state::<AppState>() else {

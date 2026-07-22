@@ -4,10 +4,13 @@
 //! Dispatch logic (in order):
 //!
 //! 1. If `<capability>` matches a known [`cori_broker::cli_auth`]
-//!    adapter (currently: `gws`), print the adapter's `login_hint`.
-//!    Per the redesign, Cori does not impersonate the CLI's own
-//!    `<cli> auth login` flow — the user runs it directly. The hint
-//!    tells them how.
+//!    adapter (currently: `gws`), run the **managed login**: install
+//!    the binary if missing (built-in [`cori_broker::install`]
+//!    registry), provision the Cori-owned OAuth client into the
+//!    vendor's config if the adapter supports it, then delegate to the
+//!    vendor's own `<cli> auth login` (which opens the browser and owns
+//!    token refresh). Without a provisioned client we fall back to
+//!    printing the manual hint — Cori never fakes the vendor's flow.
 //! 2. If `<capability>` is an LLM provider (`openai`, `anthropic`,
 //!    `gemini`), prompt for an API key and store it in
 //!    `~/.cori/config.toml` (env vars still take precedence at run
@@ -29,41 +32,20 @@ use anyhow::{Context, Result, bail};
 use cori_broker::capabilities::discover_mcp_for_login;
 use cori_broker::cli_auth;
 use cori_broker::identity::{IdentitySource, OsUser};
+use cori_broker::install;
 use cori_broker::llm::LlmCredentials;
 use cori_broker::oauth::{self, McpOAuthConfig, Owner, TokenKey, default_store, pkce};
 use cori_protocol::WorkerIdentity;
 
+use cori_run::config::Config;
 use cori_run::paths;
 
 const PKCE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn login(capability: &str) -> Result<()> {
-    // 1. Known-CLI adapter? Print the suggested re-auth command.
+    // 1. Known-CLI adapter? Run the managed login flow.
     if let Some(adapter) = cli_auth::for_binary(capability) {
-        println!(
-            "`{}` carries its own login state. {}",
-            adapter.binary(),
-            adapter.login_hint()
-        );
-        match adapter.check() {
-            cli_auth::AuthState::Ok => {
-                println!("✓ {} is currently signed in.", adapter.display_name());
-                notify_open_workflows(capability);
-                return Ok(());
-            }
-            cli_auth::AuthState::NeedsReauth { hint } => {
-                println!("✗ {} is not signed in — {hint}", adapter.display_name());
-                bail!("CLI auth required");
-            }
-            cli_auth::AuthState::Unknown => {
-                println!(
-                    "(could not probe {} — running `{} --version` to confirm it's installed may help)",
-                    adapter.display_name(),
-                    adapter.binary()
-                );
-                return Ok(());
-            }
-        }
+        return login_managed_cli(capability, adapter);
     }
 
     // 2. LLM provider? Prompt for an API key and write config.
@@ -92,6 +74,99 @@ pub fn login(capability: &str) -> Result<()> {
     })?;
 
     login_mcp_oauth(capability, oauth_cfg)
+}
+
+/// Managed CLI login: install if missing → provision the Cori-owned
+/// OAuth client → delegate to the vendor's own sign-in → re-probe.
+fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -> Result<()> {
+    // Already signed in? Done.
+    if matches!(adapter.check(), cli_auth::AuthState::Ok) {
+        println!("✓ {} is already signed in.", adapter.display_name());
+        notify_open_workflows(capability);
+        return Ok(());
+    }
+
+    // Binary missing? Install from the built-in registry.
+    if install::resolve_binary(adapter.binary()).is_none() {
+        if let Some(spec) = install::spec_for(capability) {
+            println!("`{}` is not installed — installing {}…", adapter.binary(), spec.display_name);
+            let path = install::install(capability)
+                .with_context(|| format!("installing `{capability}`"))?;
+            println!("✓ Installed {} to {}", spec.display_name, path.display());
+        } else {
+            bail!(
+                "`{}` is not installed and Cori has no install recipe for it — install it manually, then re-run `cori login {capability}`",
+                adapter.binary()
+            );
+        }
+    }
+
+    // Managed provisioning: resolve the OAuth client Cori owns.
+    let cfg = Config::load()?;
+    let from_config = match (
+        config_string(&cfg, &format!("capability.{capability}.oauth_client_id")),
+        config_string(&cfg, &format!("capability.{capability}.oauth_client_secret")),
+    ) {
+        (Some(client_id), Some(client_secret)) => Some(cli_auth::OAuthClient {
+            client_id,
+            client_secret,
+        }),
+        _ => None,
+    };
+    let services: Vec<String> = config_string(&cfg, &format!("capability.{capability}.services"))
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let plan = cli_auth::resolve_client(capability, from_config)
+        .and_then(|client| adapter.managed_login(&client, &services));
+
+    let Some(plan) = plan else {
+        // No Cori-owned client available (dev build, unconfigured) or
+        // the adapter has no managed flow — fall back to the manual
+        // path with an honest explanation.
+        println!(
+            "No Cori-provisioned OAuth client is available for `{capability}` in this build."
+        );
+        println!(
+            "Either set one (`cori config set capability.{capability}.oauth_client_id …` and \
+             `…oauth_client_secret …`, then re-run `cori login {capability}`), or follow the \
+             vendor's own setup: `{} auth setup` then `{} auth login`.",
+            adapter.binary(),
+            adapter.binary()
+        );
+        bail!("CLI auth required");
+    };
+
+    if plan.client_config_path.exists() {
+        println!(
+            "Using the existing OAuth client config at {} (Cori never overwrites it).",
+            plan.client_config_path.display()
+        );
+    } else {
+        println!(
+            "Provisioning the Cori OAuth client to {} — no GCP project needed.",
+            plan.client_config_path.display()
+        );
+    }
+    println!("Opening your browser to sign in to {}…", adapter.display_name());
+
+    match cli_auth::run_managed_login(adapter, &plan, true)? {
+        cli_auth::ManagedLoginOutcome::SignedIn => {
+            println!("✓ Signed in to {}.", adapter.display_name());
+            notify_open_workflows(capability);
+            Ok(())
+        }
+        cli_auth::ManagedLoginOutcome::LoginFailed { detail } => {
+            bail!("{} sign-in did not complete: {detail}", adapter.display_name());
+        }
+    }
+}
+
+fn config_string(cfg: &Config, key: &str) -> Option<String> {
+    cfg.get(key).and_then(|v| match v {
+        toml::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    })
 }
 
 fn login_mcp_oauth(server_id: &str, oauth_cfg: &McpOAuthConfig) -> Result<()> {

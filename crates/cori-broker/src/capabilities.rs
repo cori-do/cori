@@ -66,7 +66,8 @@ pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials)
 fn discover_clis(wanted: &[String]) -> BTreeMap<String, PathBuf> {
     let mut out = BTreeMap::new();
     for name in wanted {
-        if let Some(p) = which_on_path(name) {
+        // PATH first, then Cori-managed installs in `~/.cori/bin`.
+        if let Some(p) = crate::install::resolve_binary(name) {
             out.insert(name.clone(), p);
         }
     }
@@ -163,10 +164,15 @@ pub fn validate(
     let mut out = Vec::new();
     for c in required_clis {
         if !capabilities.has_cli(c) {
+            let hint = if crate::install::spec_for(c).is_some() {
+                format!("run `cori login {c}` (installs and signs in) or `cori capability install {c}`")
+            } else {
+                format!("install `{c}` and ensure it is on PATH")
+            };
             out.push(MissingCapability {
                 kind: "CLI",
                 name: c.clone(),
-                hint: format!("install `{c}` and ensure it is on PATH"),
+                hint,
             });
         }
     }
