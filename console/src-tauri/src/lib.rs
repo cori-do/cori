@@ -7,7 +7,6 @@
 
 mod approvals_cmd;
 mod browse;
-mod updater;
 mod capability_cmd;
 mod cli_install;
 mod commands;
@@ -20,6 +19,7 @@ mod state;
 mod supervisor;
 mod temporal;
 mod trigger;
+mod updater;
 mod worker;
 mod workers_schedules;
 
