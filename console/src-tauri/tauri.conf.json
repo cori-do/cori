@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/temporal", "binaries/deno", "binaries/cori-cli"],
     "macOS": {
       "hardenedRuntime": true,
@@ -41,5 +42,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDODRDOTI1NDYwMERBMEIKUldRTDJnQkdKY21FUElkZUhybXVyT0RiM3lEZFZ6ZldsL0RtK1FWOHEvK25uSFZTL0xzdDhURlAK",
+      "endpoints": ["https://cori.do/updates/latest.json"]
+    }
   }
 }

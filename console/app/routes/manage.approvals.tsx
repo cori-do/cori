@@ -182,6 +182,12 @@ function FactsTable({ payload }: { payload: Record<string, unknown> }) {
   };
   push("source", payload.source ?? payload.remote_ref);
   if (typeof payload.sha === "string") push("commit", payload.sha.slice(0, 12));
+  if (typeof payload.pinned_sha === "string")
+    push("consented", payload.pinned_sha.slice(0, 12));
+  if (typeof payload.new_sha === "string")
+    push("upstream now", payload.new_sha.slice(0, 12));
+  push("cron", payload.schedule);
+  push("timezone", payload.schedule_tz);
   push("workflow", payload.workflow_name ?? payload.workflow_id);
   push("steps", payload.steps);
   if (payload.dry_run === true) push("mode", "dry run");

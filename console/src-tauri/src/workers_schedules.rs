@@ -87,21 +87,37 @@ pub async fn enable_schedule(
     schedule: Option<String>,
     schedule_tz: Option<String>,
 ) -> IpcResult<Value> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let me = OsUser.resolve()?;
+    tokio::task::spawn_blocking(move || -> Result<Value, IpcError> {
+        let me = OsUser.resolve().map_err(|e| IpcError::Internal(e.into()))?;
         let identity_queue = task_queue_for(&me);
 
-        let pre = preflight(&source, false, false)?;
+        let pre =
+            preflight(&source, false, false).map_err(|e| IpcError::BadRequest(format!("{e:#}")))?;
+
+        // Q5: consent-at-create is mandatory. An untrusted remote ref
+        // surfaces the trust dialog instead of silently becoming an
+        // unattended schedule.
+        if let Some(consent) = pre.consent_required {
+            return Err(IpcError::ConsentRequired(consent.into()));
+        }
+
+        // The pin: the exact version the human is consenting to run
+        // unattended. The driver fires this sha and pauses on drift.
+        let resolved_sha = match &pre.loaded.source {
+            cori_protocol::trace::WorkflowSource::Remote { sha, .. } => Some(sha.clone()),
+            _ => None,
+        };
+
         let manifest_cron = pre.loaded.compiled.manifest.schedule.clone();
         let manifest_tz = pre.loaded.compiled.manifest.schedule_tz.clone();
 
-        let cron = schedule
-            .or(manifest_cron)
-            .ok_or_else(|| anyhow::anyhow!("no `schedule` field in manifest and none provided"))?;
+        let cron = schedule.or(manifest_cron).ok_or_else(|| {
+            IpcError::BadRequest("no `schedule` field in manifest and none provided".into())
+        })?;
         let tz = schedule_tz.or(manifest_tz);
-        let resolved_sha = None;
-        let entry = schedules::new_entry(source, cron, tz, identity_queue, resolved_sha)?;
-        schedules::save(&entry)?;
+        let entry = schedules::new_entry(source, cron, tz, identity_queue, resolved_sha)
+            .map_err(|e| IpcError::BadRequest(format!("{e:#}")))?;
+        schedules::save(&entry).map_err(IpcError::Internal)?;
         Ok(json!({
             "id": entry.id,
             "entry": entry,
@@ -110,7 +126,6 @@ pub async fn enable_schedule(
     })
     .await
     .map_err(|e| IpcError::Internal(anyhow::anyhow!("create schedule task join: {e}")))?
-    .map_err(|e| IpcError::BadRequest(format!("{e:#}")))
 }
 
 // ---------- set_schedule_enabled ----------
@@ -140,6 +155,40 @@ pub async fn set_schedule_enabled(id: String, enabled: bool) -> IpcResult<Value>
     })
     .await
     .map_err(|e| IpcError::Internal(anyhow::anyhow!("patch schedule task join: {e}")))?
+    .map_err(|e| IpcError::BadRequest(format!("{e:#}")))
+}
+
+// ---------- update_schedule (edit timing in place) ----------
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn update_schedule(
+    id: String,
+    schedule: String,
+    schedule_tz: Option<String>,
+) -> IpcResult<Value> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let me = OsUser.resolve()?;
+        let my_queue = task_queue_for(&me);
+
+        let entry = schedules::load(&id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
+        if entry.identity != my_queue {
+            anyhow::bail!(
+                "schedule `{}` is owned by `{}`; this app runs as `{}`.",
+                id,
+                entry.identity,
+                my_queue
+            );
+        }
+        let tz = schedule_tz.filter(|t| !t.trim().is_empty());
+        let updated = schedules::update_timing(&id, schedule, tz)?;
+        Ok(json!({
+            "id": updated.id,
+            "entry": updated,
+            "next_fire_at": schedules::next_fire(&updated),
+        }))
+    })
+    .await
+    .map_err(|e| IpcError::Internal(anyhow::anyhow!("update schedule task join: {e}")))?
     .map_err(|e| IpcError::BadRequest(format!("{e:#}")))
 }
 
