@@ -99,6 +99,37 @@ function expectKind(want: string): void {
   }
 }
 
+/**
+ * Enforce the step's declared zod `output` schema at runtime. "Typed
+ * workflows" must be true when it matters — a step whose output drifts
+ * from its declared shape should fail HERE with a nameable reason, not
+ * poison the next step with malformed input. (LLM steps already get
+ * this via provider-side schema enforcement; this closes the gap for
+ * `code` and `cli` outputs.) Best-effort on the schema side: if the
+ * declared output isn't a zod schema with safeParse, pass through.
+ */
+// deno-lint-ignore no-explicit-any
+function validateOutput(value: unknown): unknown {
+  const schema: any = stepDef.output;
+  if (!schema || typeof schema.safeParse !== "function") {
+    return value;
+  }
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    const issues = (result.error?.issues ?? [])
+      .slice(0, 5)
+      // deno-lint-ignore no-explicit-any
+      .map((i: any) => `${(i.path ?? []).join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    fail(
+      `step output does not match its declared output schema — ${issues}. ` +
+        `The upstream data shape probably drifted; fix the step (or the schema) ` +
+        `so the contract stays true.`,
+    );
+  }
+  return result.data;
+}
+
 try {
   switch (mode) {
     case "code": {
@@ -107,7 +138,7 @@ try {
         fail("code step is missing a `run` function");
       }
       const out = await stepDef.run(payload.input);
-      emit({ ok: true, output: out ?? null });
+      emit({ ok: true, output: validateOutput(out ?? null) });
       break;
     }
 
@@ -149,7 +180,7 @@ try {
         const trimmed = stdout.trim();
         parsed = trimmed.length ? JSON.parse(trimmed) : null;
       }
-      emit({ ok: true, output: parsed ?? null });
+      emit({ ok: true, output: validateOutput(parsed ?? null) });
       break;
     }
 

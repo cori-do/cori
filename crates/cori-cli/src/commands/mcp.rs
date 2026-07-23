@@ -475,6 +475,7 @@ fn tool_check(args: &JsonValue) -> Result<JsonValue> {
             "detail": c.detail,
             "remedy": c.remedy,
         })).collect::<Vec<_>>(),
+        "warnings": report.warnings,
     }))
 }
 

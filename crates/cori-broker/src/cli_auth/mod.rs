@@ -39,6 +39,10 @@ pub enum AuthState {
 pub struct OAuthClient {
     pub client_id: String,
     pub client_secret: String,
+    /// GCP project id owning the client. Some vendor CLIs (gws) refuse
+    /// a client config without it. Optional: adapters derive a
+    /// fallback (e.g. the project number embedded in the client id).
+    pub project_id: Option<String>,
 }
 
 /// A fully-materialised managed-login plan for one CLI: where to write
@@ -51,6 +55,11 @@ pub struct ManagedLogin {
     pub client_config_path: PathBuf,
     /// Rendered contents for that file.
     pub client_config: String,
+    /// Overwrite an existing client config. Default policy is
+    /// hands-off (a user-managed file always wins); adapters set this
+    /// only when the existing file is identifiably a broken previous
+    /// Cori provisioning that the vendor CLI rejects.
+    pub overwrite_existing: bool,
     /// argv (binary first) that runs the vendor's own browser sign-in.
     pub login_argv: Vec<String>,
 }
@@ -115,6 +124,9 @@ pub fn resolve_client(capability: &str, from_config: Option<OAuthClient>) -> Opt
         return Some(OAuthClient {
             client_id: id,
             client_secret: secret,
+            project_id: std::env::var(format!("{prefix}_PROJECT_ID"))
+                .ok()
+                .filter(|p| !p.is_empty()),
         });
     }
     if from_config.is_some() {
@@ -156,7 +168,7 @@ pub fn run_managed_login(
 ) -> std::io::Result<ManagedLoginOutcome> {
     use std::process::{Command, Stdio};
 
-    if !plan.client_config_path.exists() {
+    if !plan.client_config_path.exists() || plan.overwrite_existing {
         if let Some(parent) = plan.client_config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

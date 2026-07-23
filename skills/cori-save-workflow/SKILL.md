@@ -44,6 +44,7 @@ Key behaviours to remember:
 
 - The `source` path you pass must exist **on the machine where Cori runs** (the user's device), not in your sandbox. Write the workflow folder into a location the user owns and that machine can see, and pass *that* path.
 - If neither the CLI nor MCP tools exist, surface the install path: `curl -fsSL https://cli.cori.do/install.sh | bash`. But if that install fails with a 403 / blocked network (typical in cloud sandboxes — `cli.cori.do` is rarely allowlisted), **don't retry it**; say so honestly, author and review the workflow folder anyway, and hand validation off to the user's own machine (Cori desktop app or terminal). An unvalidated-but-reviewed folder is still a deliverable; a retry loop is not.
+- **Never simulate validation.** If `cori check` / `cori run` could not actually execute, say exactly that — do not reason about what they "would" report, and never present an expected result as an observed one. A field session that simulated instead of running shipped subtly wrong conclusions; "I could not validate this here" is the honest, useful output.
 
 ---
 
@@ -146,6 +147,29 @@ Rules that matter:
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
+
+**Pre-write lint — run this checklist on every step of your draft decomposition, before Step 5. Answer each item explicitly; do not skip it because the decomposition "looks done":**
+
+- [ ] **Google Workspace via MCP?** If the step calls an MCP tool against a Google Drive / Gmail / Sheets / Calendar / Docs server → rewrite it as a `gws` `cli` step now, using the template below. (`cori check` will warn on this too, but fix it before writing.)
+- [ ] **Any other `mcp_tool` step?** It will only run on workers where that server is declared in `~/.cori/mcp-servers.json`. Confirm that's true, or say so at the review gate.
+- [ ] **I/O hiding in a `code` step?** Network/filesystem/DB access belongs in a `cli` or `mcp_tool` step; `code` stays pure.
+- [ ] **`cli` steps use the static template.** `command` is a function returning an **argv array** with a literal binary name first, plus `parse`. If you wrote `Deno.run`, `exec`, or any subprocess call inside a step body, the step is wrong — re-read `references/activity_kinds.md` and use the template. (A real field session produced exactly that bug.)
+
+The minimal correct `gws` shape, for reference at the moment you need it:
+
+```ts
+export default step.cli({
+  description: "Read source rows from Google Sheets",
+  input: Input,
+  output: Output,
+  command: ({ spreadsheet_id, range }) => [
+    "gws", "sheets", "spreadsheets", "values", "get",
+    "--params", JSON.stringify({ spreadsheetId: spreadsheet_id, range }),
+    "--format", "json",
+  ],
+  parse: (stdout) => ({ values: JSON.parse(stdout).values ?? [] }),
+});
+```
 
 **When you rename or re-decompose a step during iteration, delete the old numbered file — superseding is not enough.** Two files sharing a number fail `cori check` with `duplicate step number NN`. In write-only environments (some sandboxed sessions can write and overwrite but not delete), you cannot remove the orphan yourself: tell the user explicitly which stale file to delete before re-checking, as a required manual step.
 
@@ -261,7 +285,7 @@ Don't auto-run. Saving and running are separate decisions.
 
 **If the user does run it and it succeeds, close the loop in `## Notes`:** record the validation date, the model/provider that actually ran, and any dead ends hit on the way there (e.g. "first tried `gpt-4o-mini`; openai isn't authed on this machine — validated with anthropic instead"). A workflow whose Notes say when and with what it last worked is trustworthy to the next person — or the next agent session — that picks it up.
 
-Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` validates the workflow shape but does not execute or parse embedded programs.
+Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` validates the workflow shape but does not execute or parse embedded programs. Also re-scan for `mcp_tool` steps targeting Google Workspace servers — if `cori check` printed a warning about one, treat it as a review-gate item, not as noise: propose the `gws` rewrite to the user before shipping.
 
 ---
 
@@ -315,6 +339,32 @@ After the fix, loop: edit → re-check → (if running) re-run, until green.
 **No `node_modules`, no `package.json`, nothing to gitignore.** Deno caches `npm:`/`jsr:` modules in its own global cache, not in the workflow folder. The folder stays clean — just `deno.json` plus the workflow files. `cori run` ignores the workflow's `deno.json` anyway (it uses the runtime's own import map); that file exists only for local `deno test` and editor IntelliSense.
 
 **A step kind looks wrong on review.** Better to re-decompose than to ship a workflow with an `llm` step that should have been `code` (or vice versa). Fix at Step 7 (review) before disk write.
+
+**The two Google Workspace shapes, side by side** (this specific mistake has now been made by more than one agent in the field — the wrong shape compiles and passes `check` on the authoring machine, then fails on any worker without the MCP server declared):
+
+```ts
+// ❌ ANTI-PATTERN — fails at run time unless every worker declares the
+// server in ~/.cori/mcp-servers.json:
+export default step.mcp_tool({
+  server: "Google_Drive",
+  tool: "read_file_content",
+  /* … */
+});
+
+// ✅ PATTERN — runs anywhere `gws` is installed and signed in:
+export default step.cli({
+  command: ({ spreadsheet_id, range }) => [
+    "gws", "sheets", "spreadsheets", "values", "get",
+    "--params", JSON.stringify({ spreadsheetId: spreadsheet_id, range }),
+    "--format", "json",
+  ],
+  parse: (stdout) => ({ values: JSON.parse(stdout).values ?? [] }),
+  /* … */
+});
+// (Note `command` returns a static argv array — never spawn subprocesses
+// inside a step body with Deno.run/exec; that's a different, equally
+// real anti-pattern.)
+```
 
 ---
 

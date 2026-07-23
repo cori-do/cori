@@ -97,6 +97,7 @@ fn resolve_plan(
         (Some(client_id), Some(client_secret)) => Some(OAuthClient {
             client_id,
             client_secret,
+            project_id: get(format!("capability.{id}.oauth_project_id")),
         }),
         _ => None,
     };

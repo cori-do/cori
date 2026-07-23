@@ -94,6 +94,9 @@ impl CliAuthAdapter for GwsAdapter {
             (Some(id), Some(secret)) if !id.is_empty() => Some(OAuthClient {
                 client_id: id.to_string(),
                 client_secret: secret.to_string(),
+                project_id: option_env!("CORI_GWS_OAUTH_PROJECT_ID")
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
             }),
             _ => None,
         }
@@ -109,10 +112,20 @@ impl CliAuthAdapter for GwsAdapter {
 
     fn managed_login(&self, client: &OAuthClient, services: &[String]) -> Option<ManagedLogin> {
         let path = gws_config_dir()?.join("client_secret.json");
+        // gws's parser REQUIRES `installed.project_id` (a file without
+        // it is treated as "No OAuth client configured"). When the
+        // resolved client doesn't carry one, fall back to the project
+        // number embedded in the client id
+        // (`<number>-<hash>.apps.googleusercontent.com`).
+        let project_id = client
+            .project_id
+            .clone()
+            .or_else(|| project_number_from_client_id(&client.client_id))?;
         let config = serde_json::to_string_pretty(&json!({
             "installed": {
                 "client_id": client.client_id,
                 "client_secret": client.client_secret,
+                "project_id": project_id,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
@@ -131,11 +144,43 @@ impl CliAuthAdapter for GwsAdapter {
         argv.push(services.join(","));
 
         Some(ManagedLogin {
+            overwrite_existing: needs_repair(&path),
             client_config_path: path,
             client_config: config,
             login_argv: argv,
         })
     }
+}
+
+/// An existing `client_secret.json` that parses but lacks
+/// `installed.project_id` is a broken earlier Cori provisioning (gws
+/// rejects it as "No OAuth client configured"; a file downloaded from
+/// the Google console always carries the field) — safe to rewrite.
+/// Anything else (absent, unreadable, unparseable, has the field) is
+/// left alone.
+fn needs_repair(path: &std::path::Path) -> bool {
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&src) else {
+        return false;
+    };
+    let installed = &v["installed"];
+    installed.is_object()
+        && installed
+            .get("project_id")
+            .and_then(|p| p.as_str())
+            .is_none_or(str::is_empty)
+}
+
+/// The numeric project-number prefix of a Google OAuth client id
+/// (`180163548780-abc….apps.googleusercontent.com` → `180163548780`).
+/// A valid stand-in for the project id in `client_secret.json` when
+/// the real one isn't configured.
+fn project_number_from_client_id(client_id: &str) -> Option<String> {
+    let prefix: &str = client_id.split('-').next()?;
+    (!prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
+        .then(|| prefix.to_string())
 }
 
 /// `gws` keeps its config in `$XDG_CONFIG_HOME/gws` (`~/.config/gws`)
@@ -163,15 +208,21 @@ mod tests {
     #[test]
     fn managed_login_provisions_installed_app_client() {
         let client = OAuthClient {
-            client_id: "id-123".into(),
+            client_id: "123456789-abc.apps.googleusercontent.com".into(),
             client_secret: "secret-456".into(),
+            project_id: Some("cori-prod".into()),
         };
         let plan = GwsAdapter
             .managed_login(&client, &[])
             .expect("plan on a machine with a home dir");
         assert!(plan.client_config_path.ends_with("gws/client_secret.json"));
         let v: serde_json::Value = serde_json::from_str(&plan.client_config).unwrap();
-        assert_eq!(v["installed"]["client_id"], "id-123");
+        assert_eq!(
+            v["installed"]["client_id"],
+            "123456789-abc.apps.googleusercontent.com"
+        );
+        // gws refuses a client_secret.json without project_id.
+        assert_eq!(v["installed"]["project_id"], "cori-prod");
         assert_eq!(
             v["installed"]["token_uri"],
             "https://oauth2.googleapis.com/token"
@@ -183,10 +234,58 @@ mod tests {
     }
 
     #[test]
+    fn project_id_falls_back_to_client_id_project_number() {
+        let client = OAuthClient {
+            client_id: "180163548780-xyz.apps.googleusercontent.com".into(),
+            client_secret: "s".into(),
+            project_id: None,
+        };
+        let plan = GwsAdapter.managed_login(&client, &[]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&plan.client_config).unwrap();
+        assert_eq!(v["installed"]["project_id"], "180163548780");
+    }
+
+    #[test]
+    fn no_project_id_derivable_means_no_plan() {
+        let client = OAuthClient {
+            client_id: "not-a-google-client-id".into(),
+            client_secret: "s".into(),
+            project_id: None,
+        };
+        assert!(GwsAdapter.managed_login(&client, &[]).is_none());
+    }
+
+    #[test]
+    fn needs_repair_only_for_parseable_file_missing_project_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+
+        // Absent → no repair.
+        assert!(!needs_repair(&path));
+
+        // Our old broken template (no project_id) → repair.
+        std::fs::write(&path, r#"{"installed":{"client_id":"x","client_secret":"y"}}"#).unwrap();
+        assert!(needs_repair(&path));
+
+        // Google-console-style file with project_id → hands off.
+        std::fs::write(
+            &path,
+            r#"{"installed":{"client_id":"x","client_secret":"y","project_id":"p"}}"#,
+        )
+        .unwrap();
+        assert!(!needs_repair(&path));
+
+        // Unparseable → hands off.
+        std::fs::write(&path, "not json").unwrap();
+        assert!(!needs_repair(&path));
+    }
+
+    #[test]
     fn custom_services_override_defaults() {
         let client = OAuthClient {
-            client_id: "x".into(),
+            client_id: "42-x.apps.googleusercontent.com".into(),
             client_secret: "y".into(),
+            project_id: None,
         };
         let plan = GwsAdapter
             .managed_login(&client, &["sheets".to_string()])

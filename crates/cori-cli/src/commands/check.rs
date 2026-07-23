@@ -18,6 +18,11 @@ pub struct PreflightReport {
     pub temporal_reachable: bool,
     pub endpoint: String,
     pub user_task_queue: String,
+    /// Non-fatal advisories. Deliberately deterministic: prose rules in
+    /// the authoring skill get skipped under conversation inertia and by
+    /// smaller models (observed twice in the field, 2026-07-22) — the
+    /// engine is the backstop that never forgets.
+    pub warnings: Vec<String>,
 }
 
 pub struct StepReadiness {
@@ -126,6 +131,8 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
         ready = false;
     }
 
+    let warnings = build_warnings(&loaded.compiled);
+
     Ok(PreflightReport {
         ready,
         steps,
@@ -133,7 +140,56 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
         temporal_reachable,
         endpoint: endpoint.target,
         user_task_queue,
+        warnings,
     })
+}
+
+/// Advisory lints on the compiled workflow shape.
+fn build_warnings(compiled: &CompiledWorkflow) -> Vec<String> {
+    let mut out = Vec::new();
+    for step in &compiled.steps {
+        if step.kind != StepKind::McpTool {
+            continue;
+        }
+        let server = match &step.placement {
+            Placement::RequiresCapability { id } => Some(id.as_str()),
+            _ => step.metadata.get("server").and_then(|v| v.as_str()),
+        };
+        if let Some(server) = server
+            && looks_like_google_workspace(server)
+        {
+            out.push(format!(
+                "step `{name}` calls MCP server `{server}`, which looks like Google \
+                 Workspace — the recommended path is a `gws` cli step (simpler, and it \
+                 avoids requiring `{server}` to be declared in ~/.cori/mcp-servers.json \
+                 on every worker). See the cori-save-workflow skill's Google Workspace \
+                 rule.",
+                name = step.name,
+            ));
+        }
+    }
+    out
+}
+
+/// Heuristic on the server name. Loose on purpose: this only feeds a
+/// warning, never an error, so a rare false positive costs one line of
+/// output while a false negative reproduces a known field failure.
+fn looks_like_google_workspace(server: &str) -> bool {
+    let s = server.to_ascii_lowercase();
+    let contains = [
+        "google",
+        "gdrive",
+        "gmail",
+        "gcal",
+        "gsheet",
+        "gdoc",
+        "workspace",
+    ];
+    if contains.iter().any(|n| s.contains(n)) {
+        return true;
+    }
+    let exact = ["drive", "sheets", "calendar", "docs"];
+    exact.iter().any(|n| s == *n)
 }
 
 fn build_step_readiness(
@@ -331,6 +387,13 @@ fn print_report(report: &PreflightReport) {
             }
         }
     }
+    if !report.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for w in &report.warnings {
+            println!("  ⚠ {w}");
+        }
+    }
     println!();
     if report.ready {
         println!("Result: ✓ ready");
@@ -362,5 +425,26 @@ fn cap_kind_label(kind: CapabilityKind) -> &'static str {
         CapabilityKind::McpStatic => "MCP",
         CapabilityKind::Llm => "LLM",
         CapabilityKind::LocalFs => "local_fs",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_google_workspace;
+
+    #[test]
+    fn gws_heuristic_matches_field_server_names() {
+        // Names seen in real sessions.
+        assert!(looks_like_google_workspace("Google_Drive"));
+        assert!(looks_like_google_workspace("google-sheets"));
+        assert!(looks_like_google_workspace("gdrive"));
+        assert!(looks_like_google_workspace("Gmail"));
+        assert!(looks_like_google_workspace("drive"));
+        assert!(looks_like_google_workspace("sheets"));
+        // Non-Google servers must not warn.
+        assert!(!looks_like_google_workspace("slack"));
+        assert!(!looks_like_google_workspace("notion"));
+        assert!(!looks_like_google_workspace("dropbox"));
+        assert!(!looks_like_google_workspace("sharepoint-docs-x"));
     }
 }

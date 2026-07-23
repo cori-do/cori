@@ -70,6 +70,8 @@ export interface CliStepDef extends StepDef<"cli"> {
   readonly command: (input: unknown) => readonly string[];
   readonly parse?: CliStepOpts<ZodTypeAny, ZodTypeAny>["parse"];
   readonly env?: Record<string, string>;
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,8 @@ export interface McpStepDef extends StepDef<"mcp_tool"> {
   readonly server: string;
   readonly tool: string;
   readonly args: (input: unknown) => Record<string, unknown>;
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +108,8 @@ export interface CodeStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 
 export interface CodeStepDef extends StepDef<"code"> {
   readonly run: (input: unknown) => unknown;
+  readonly input?: ZodTypeAny;
+  readonly output?: ZodTypeAny;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +200,11 @@ export const step = {
       command: opts.command as (input: unknown) => readonly string[],
       parse: opts.parse,
       env: opts.env,
+      // Keep the declared schemas on the runtime object — the runner
+      // enforces `output` after parse. Dropping them here made "typed
+      // workflows" a compile-time-only promise (field finding, 2026-07-22).
+      input: opts.input,
+      output: opts.output,
     };
   },
 
@@ -205,6 +216,8 @@ export const step = {
       server: opts.server,
       tool: opts.tool,
       args: opts.args as (input: unknown) => Record<string, unknown>,
+      input: opts.input,
+      output: opts.output,
     };
   },
 
@@ -214,6 +227,8 @@ export const step = {
     return {
       ...base("code", opts),
       run: opts.run as (input: unknown) => unknown,
+      input: opts.input,
+      output: opts.output,
     };
   },
 

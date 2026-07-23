@@ -117,6 +117,7 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
         (Some(client_id), Some(client_secret)) => Some(cli_auth::OAuthClient {
             client_id,
             client_secret,
+            project_id: config_string(&cfg, &format!("capability.{capability}.oauth_project_id")),
         }),
         _ => None,
     };
@@ -142,7 +143,12 @@ fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -
         bail!("CLI auth required");
     };
 
-    if plan.client_config_path.exists() {
+    if plan.client_config_path.exists() && plan.overwrite_existing {
+        println!(
+            "Repairing the provisioned OAuth client config at {} (previous version was missing fields the vendor requires).",
+            plan.client_config_path.display()
+        );
+    } else if plan.client_config_path.exists() {
         println!(
             "Using the existing OAuth client config at {} (Cori never overwrites it).",
             plan.client_config_path.display()
