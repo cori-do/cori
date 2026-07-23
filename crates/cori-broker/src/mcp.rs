@@ -37,6 +37,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::capabilities::Capabilities;
 use crate::dispatch::{self, RunnerMode};
 use crate::oauth::{self, McpOAuthConfig, Owner, TokenForError, TokenKey, default_store};
+use crate::process::hide_console_window;
 use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
 
@@ -178,6 +179,7 @@ fn call_tool(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    hide_console_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| BrokerError::McpSpawn {
         binary: bin.clone(),

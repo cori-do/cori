@@ -205,6 +205,7 @@ pub fn run_managed_login(
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::process::hide_console_window(&mut cmd);
         let mut child = cmd.spawn()?;
 
         // Watch BOTH streams for the authorization URL — gws prints it

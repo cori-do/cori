@@ -19,6 +19,7 @@ use serde_json::json;
 
 use super::{AuthState, CliAuthAdapter, ManagedLogin, OAuthClient};
 use crate::install::resolve_binary;
+use crate::process::hide_console_window;
 
 /// Default Workspace services requested at sign-in. Narrow on purpose:
 /// full-access Gmail/Drive scopes trigger Google's restricted-scope
@@ -52,6 +53,7 @@ impl CliAuthAdapter for GwsAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         super::apply_spawn_env(&mut cmd, self);
+        hide_console_window(&mut cmd);
         let out = match cmd.output() {
             Ok(o) => o,
             Err(_) => return AuthState::Unknown,

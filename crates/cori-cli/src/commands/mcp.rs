@@ -877,9 +877,10 @@ fn native_confirm_impl(message: &str) -> Result<ElicitOutcome> {
         "Add-Type -AssemblyName System.Windows.Forms; \
          [System.Windows.Forms.MessageBox]::Show('{escaped}', 'Cori', 'YesNo', 'Warning', 'Button2')"
     );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output();
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    cori_broker::process::hide_console_window(&mut cmd);
+    let out = cmd.output();
     Ok(match out {
         Ok(o) if o.status.success() => {
             if String::from_utf8_lossy(&o.stdout).trim().ends_with("Yes") {
