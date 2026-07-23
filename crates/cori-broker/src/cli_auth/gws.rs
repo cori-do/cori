@@ -179,8 +179,7 @@ fn needs_repair(path: &std::path::Path) -> bool {
 /// the real one isn't configured.
 fn project_number_from_client_id(client_id: &str) -> Option<String> {
     let prefix: &str = client_id.split('-').next()?;
-    (!prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
-        .then(|| prefix.to_string())
+    (!prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit())).then(|| prefix.to_string())
 }
 
 /// `gws` keeps its config in `$XDG_CONFIG_HOME/gws` (`~/.config/gws`)
@@ -264,7 +263,11 @@ mod tests {
         assert!(!needs_repair(&path));
 
         // Our old broken template (no project_id) → repair.
-        std::fs::write(&path, r#"{"installed":{"client_id":"x","client_secret":"y"}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"installed":{"client_id":"x","client_secret":"y"}}"#,
+        )
+        .unwrap();
         assert!(needs_repair(&path));
 
         // Google-console-style file with project_id → hands off.
