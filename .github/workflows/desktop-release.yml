@@ -47,7 +47,7 @@ jobs:
             temporal_sha: ce84637dbf794d71e0c530d1b250edfb7b692784213e234f7d50ea310491e01a
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify tag matches app version
         # Bundle filenames embed tauri.conf.json's `version`, and the
@@ -70,17 +70,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/setup-protoc
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.target }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -258,7 +256,7 @@ jobs:
       # SmartScreen warnings.
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cori-console-${{ matrix.target }}
           path: |
@@ -276,11 +274,11 @@ jobs:
       # artifact `Cori.app.tar.gz` — merged, one would clobber the
       # other. Per-target directories keep them apart; the manifest
       # step below renames on upload.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/**/*.dmg
