@@ -20,6 +20,7 @@ use serde_json::{Value as JsonValue, json};
 use tracing::debug;
 
 use crate::BrokerError;
+use crate::process::hide_console_window;
 use crate::runtime::Runtime;
 
 pub const ENVELOPE_PREFIX: &str = "\u{001E}CORI_RUNNER\u{001E}";
@@ -89,8 +90,8 @@ pub fn invoke(
         "spawning deno runner",
     );
 
-    let mut child = Command::new(&runtime.deno_bin)
-        .arg("run")
+    let mut cmd = Command::new(&runtime.deno_bin);
+    cmd.arg("run")
         .arg("--quiet")
         .arg("--no-prompt")
         .arg("--sloppy-imports")
@@ -104,9 +105,9 @@ pub fn invoke(
         .arg(mode.as_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(BrokerError::Spawn)?;
+        .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
+    let mut child = cmd.spawn().map_err(BrokerError::Spawn)?;
 
     {
         let mut stdin = child.stdin.take().expect("stdin was configured as piped");

@@ -143,6 +143,7 @@ fn spawn_dev_temporal() -> Result<()> {
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
+    cori_broker::process::hide_console_window(&mut cmd);
 
     #[cfg(unix)]
     {

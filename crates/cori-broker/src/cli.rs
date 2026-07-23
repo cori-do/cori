@@ -27,6 +27,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::capabilities::Capabilities;
 use crate::cli_auth::{self, AuthState};
 use crate::dispatch::{self, RunnerMode};
+use crate::process::hide_console_window;
 use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
 
@@ -113,6 +114,7 @@ pub fn run(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
 
     let proc_output = cmd.output().map_err(|e| BrokerError::CliSpawn {
         binary: binary.clone(),

@@ -291,8 +291,10 @@ fn add_to_user_path(dir: &Path) -> IpcResult<()> {
          }}",
         dir.display()
     );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    cori_broker::process::hide_console_window(&mut cmd);
+    let out = cmd
         .output()
         .map_err(|e| IpcError::Internal(anyhow::anyhow!("spawning powershell: {e}")))?;
     if !out.status.success() {
