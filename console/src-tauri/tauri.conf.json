@@ -44,6 +44,11 @@
     ]
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["cori"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDODRDOTI1NDYwMERBMEIKUldRTDJnQkdKY21FUElkZUhybXVyT0RiM3lEZFZ6ZldsL0RtK1FWOHEvK25uSFZTL0xzdDhURlAK",
       "endpoints": ["https://cori.do/updates/latest.json"]

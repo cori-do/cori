@@ -35,7 +35,7 @@ import {
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
 import { formatRelative } from "../lib/format";
-import { openLaunch, openManage } from "../lib/windows";
+import { openLaunch, openManage, openRun } from "../lib/windows";
 
 export function meta() {
   return [{ title: "Cori" }];
@@ -133,6 +133,27 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       .then((a) => !cancelled && setApprovals(a))
       .catch(() => {});
     onApprovalsChanged((pending) => !cancelled && setApprovals(pending))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Deep links (cori://…) land here after the Rust side surfaces the
+  // launcher: the link is a doorbell, the UI decides what to open.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    listen<{ kind: string; run_id?: string }>("deeplink:open", (e) => {
+      const p = e.payload;
+      if (p?.kind === "inbox") void openManage("approvals");
+      else if (p?.kind === "run" && p.run_id) void openRun(p.run_id);
+    })
       .then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;

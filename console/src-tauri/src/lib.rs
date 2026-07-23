@@ -104,12 +104,20 @@ pub fn run() {
     // tauri-plugin-single-instance MUST be the first plugin on Windows
     // for the focus-existing-window behaviour to fire on relaunch.
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             focus_or_show_launcher(app);
+            // On Windows/Linux a `cori://` link launches a second
+            // instance with the URL in argv — route it like on_open_url.
+            for arg in argv {
+                if arg.starts_with("cori://") {
+                    dispatch_deep_link(app, &arg);
+                }
+            }
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         // Window-state plugin persists size/position across restarts.
         // The launcher is the only window we explicitly want restored;
         // disposable kinds (launch-*, run-*, manage) get tracked but
@@ -151,6 +159,24 @@ pub fn run() {
 
             // Update checks (announce-only; install is human-initiated).
             updater::spawn_check(app.handle().clone());
+
+            // Deep links (macOS delivers them via this handler; the
+            // single-instance callback covers Windows/Linux argv).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        dispatch_deep_link(&handle, url.as_str());
+                    }
+                });
+                // Dev convenience: register the scheme for non-bundled
+                // builds so `cori://` links work under `cargo tauri dev`.
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    let _ = app.deep_link().register_all();
+                }
+            }
 
             // Spawn the Temporal sidecar supervisor.
             let sidecar_stop = supervisor::spawn(app.handle().clone());
@@ -279,6 +305,30 @@ fn toggle_launcher(app: &AppHandle) {
     } else {
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+/// Route a `cori://` link. The URL is a doorbell, never an authority:
+/// it only opens a UI on local state (see cori/docs/approvals-design.md).
+///
+///   cori://open/approval/<nonce>  → launcher + Inbox tab
+///   cori://open/inbox             → Inbox tab
+///   cori://open/run/<run_id>      → emit for the run view
+///   anything else                 → just surface the launcher
+fn dispatch_deep_link(app: &AppHandle, url: &str) {
+    info!(%url, "deep link received");
+    focus_or_show_launcher(app);
+    let path = url.trim_start_matches("cori://").trim_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let payload = match segments.as_slice() {
+        ["open", "approval", _] | ["open", "inbox"] => {
+            serde_json::json!({ "kind": "inbox" })
+        }
+        ["open", "run", run_id] => serde_json::json!({ "kind": "run", "run_id": run_id }),
+        _ => serde_json::json!({ "kind": "launcher" }),
+    };
+    if let Err(e) = app.emit("deeplink:open", payload) {
+        warn!(error = %e, "could not emit deeplink:open");
     }
 }
 
