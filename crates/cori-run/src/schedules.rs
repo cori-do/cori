@@ -26,9 +26,11 @@ pub struct ScheduleEntry {
     pub id: String,
     /// Workflow source — a local path or remote git ref.
     pub source: String,
-    /// SHA of a remote workflow at register time, if applicable.
-    /// Recorded for audit; does **not** pin the firing version
-    /// (re-resolved on each fire so the schedule tracks `@v1` etc.).
+    /// SHA of a remote workflow, consented at schedule-create. This is
+    /// the **pin the driver fires** (Q5 decision): the version the human
+    /// approved is the version that runs. When the upstream mutable ref
+    /// moves, the driver pauses the schedule and requests re-consent
+    /// through the approval inbox instead of silently running new code.
     #[serde(default)]
     pub resolved_sha: Option<String>,
     /// 5- or 6-field POSIX cron expression.
@@ -53,6 +55,11 @@ pub struct ScheduleEntry {
     /// Error from the most recent fire (run_workflow returned Err).
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Why the driver paused this schedule (e.g. upstream sha change
+    /// pending re-consent). `None` when `enabled == false` means the
+    /// user disabled it themselves.
+    #[serde(default)]
+    pub paused_reason: Option<String>,
 }
 
 /// Derive the stable id used for the on-disk filename.
@@ -145,11 +152,19 @@ pub fn validate_cron(expr: &str) -> Result<()> {
     Ok(())
 }
 
-/// Compute the next fire time for an entry in UTC. Returns `None`
-/// if the cron parses but has no upcoming fires, or if it doesn't parse.
+/// Compute the next fire time for an entry, honoring `schedule_tz`
+/// (the expression is evaluated on the wall clock of that zone).
+/// Returned in UTC. `None` if the cron doesn't parse or never fires.
 pub fn next_fire(entry: &ScheduleEntry) -> Option<DateTime<Utc>> {
     let schedule: cron::Schedule = entry.schedule.parse().ok()?;
-    schedule.upcoming(Utc).next()
+    match entry
+        .schedule_tz
+        .as_deref()
+        .and_then(|t| t.parse::<chrono_tz::Tz>().ok())
+    {
+        Some(tz) => schedule.upcoming(tz).next().map(|t| t.with_timezone(&Utc)),
+        None => schedule.upcoming(Utc).next(),
+    }
 }
 
 /// Construct a new entry with `id` derived from `source + schedule`.
@@ -182,7 +197,86 @@ pub fn new_entry(
         last_fire_at: None,
         last_status: None,
         last_error: None,
+        paused_reason: None,
     })
+}
+
+/// Pause a schedule with a reason (driver-initiated — e.g. upstream sha
+/// change awaiting re-consent). Distinct from the user's enable toggle.
+pub fn pause(id: &str, reason: &str) -> Result<ScheduleEntry> {
+    let mut entry = load(id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
+    entry.enabled = false;
+    entry.paused_reason = Some(reason.to_string());
+    save(&entry)?;
+    Ok(entry)
+}
+
+/// Edit a schedule's timing in place. The id stays stable — it is a
+/// content hash only at creation time; every later lookup goes by
+/// filename, so mutating `schedule`/`schedule_tz` under the same id is
+/// the "edit" the UI exposes (previously edit = delete + recreate,
+/// which silently dropped fire history and the consent pin).
+pub fn update_timing(
+    id: &str,
+    schedule: String,
+    schedule_tz: Option<String>,
+) -> Result<ScheduleEntry> {
+    validate_cron(&schedule)?;
+    if let Some(tz) = schedule_tz.as_deref()
+        && tz.parse::<chrono_tz::Tz>().is_err()
+    {
+        bail!("invalid IANA timezone `{tz}`");
+    }
+    let mut entry = load(id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
+    entry.schedule = schedule;
+    entry.schedule_tz = schedule_tz;
+    save(&entry)?;
+    Ok(entry)
+}
+
+/// Re-pin a schedule to a newly consented sha and resume it.
+pub fn repin(id: &str, sha: &str) -> Result<ScheduleEntry> {
+    let mut entry = load(id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
+    entry.resolved_sha = Some(sha.to_string());
+    entry.paused_reason = None;
+    entry.enabled = true;
+    save(&entry)?;
+    Ok(entry)
+}
+
+/// Claim one (schedule, fire-time) so concurrent drivers (`cori work`
+/// AND the desktop app both scan every 30s) can't double-fire a
+/// side-effectful workflow. First claimant wins via `create_new`;
+/// stale claims are pruned opportunistically.
+pub fn claim_fire(id: &str, fire_at: DateTime<Utc>) -> Result<bool> {
+    let dir = paths::schedules_dir()?.join(".fires");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating `{}`", dir.display()))?;
+
+    // Prune claims older than 48h so the directory stays tiny.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if let Ok(meta) = e.metadata()
+                && let Ok(modified) = meta.modified()
+                && modified
+                    .elapsed()
+                    .map(|a| a.as_secs() > 48 * 3600)
+                    .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
+    let claim = dir.join(format!("{id}-{}.claim", fire_at.timestamp()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&claim)
+    {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("creating claim `{}`", claim.display())),
+    }
 }
 
 /// Set the `enabled` flag on an existing entry and persist.

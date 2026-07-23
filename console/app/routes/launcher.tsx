@@ -12,8 +12,10 @@ import {
   getStackStatus,
   getStatus,
   installCli,
+  installUpdate,
   isIpcError,
   listApprovals,
+  onUpdaterAvailable,
   listDir,
   listRecentWorkflows,
   listRemoteWorkflows,
@@ -526,6 +528,10 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         <ThemeIconButton />
       </header>
 
+      <UpdateBanner />
+
+      <FirstRunCliPrompt />
+
       {approvals.length > 0 && <ApprovalsPanel approvals={approvals} />}
 
       <SearchBar
@@ -682,6 +688,7 @@ function approvalSummary(a: ApprovalRequest): string {
     (typeof p.workflow_name === "string" && p.workflow_name) ||
     (typeof p.workflow_id === "string" && p.workflow_id) ||
     (typeof p.remote_ref === "string" && p.remote_ref) ||
+    (typeof p.source === "string" && p.source) ||
     "";
   switch (a.kind) {
     case "run_confirm": {
@@ -1263,6 +1270,141 @@ function formatErr(e: unknown): string {
   if (isIpcError(e)) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+// ─── Self-update banner ──────────────────────────────────────────────────
+
+/**
+ * Shown when the updater announces a newer signed build. Install is
+ * human-initiated — clicking downloads, verifies, installs, restarts.
+ */
+function UpdateBanner() {
+  const [version, setVersion] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"idle" | "busy" | "error">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    onUpdaterAvailable((v) => !cancelled && setVersion(v))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  if (!version) return null;
+  return (
+    <div className="first-run-cli" role="region" aria-label="Update available">
+      <span className="first-run-cli-text">
+        Cori {version} is available.
+        {phase === "error" && (
+          <span style={{ color: "var(--red)" }}> Install failed — try again.</span>
+        )}
+      </span>
+      <button
+        type="button"
+        className="btn primary"
+        disabled={phase === "busy"}
+        onClick={() => {
+          setPhase("busy");
+          installUpdate().catch(() => setPhase("error"));
+        }}
+      >
+        {phase === "busy" ? "Installing…" : "Install & restart"}
+      </button>
+    </div>
+  );
+}
+
+// ─── First-run CLI install prompt ────────────────────────────────────────
+
+const CLI_PROMPT_DISMISSED_KEY = "cori.first-run-cli-prompt-dismissed";
+
+/**
+ * On first launch, offer to put `cori` on PATH — so plugin/agent users
+ * never have to find the footer button (or a terminal). Shows only when
+ * the bundle ships the CLI and it isn't installed yet; one dismissal is
+ * remembered forever. The footer's "Install CLI" button remains as the
+ * quiet, always-available path.
+ */
+function FirstRunCliPrompt() {
+  const [state, setState] = useState<
+    | { kind: "hidden" }
+    | { kind: "offer" }
+    | { kind: "busy" }
+    | { kind: "done"; path: string; onPath: boolean }
+    | { kind: "error"; message: string }
+  >({ kind: "hidden" });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (localStorage.getItem(CLI_PROMPT_DISMISSED_KEY)) return;
+    getCliInstallStatus()
+      .then((s) => {
+        if (!cancelled && s.bundled && !s.installed_path) {
+          setState({ kind: "offer" });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (state.kind === "hidden") return null;
+
+  const dismiss = () => {
+    localStorage.setItem(CLI_PROMPT_DISMISSED_KEY, "1");
+    setState({ kind: "hidden" });
+  };
+
+  return (
+    <div className="first-run-cli" role="region" aria-label="Install the cori command">
+      {state.kind === "done" ? (
+        <>
+          <span className="first-run-cli-text">
+            ✓ <code>cori</code> installed
+            {state.onPath ? "" : " (add its directory to your PATH to use it in terminals)"}
+            {" — agents and terminals can now use Cori."}
+          </span>
+          <button type="button" className="btn" onClick={dismiss}>
+            Done
+          </button>
+        </>
+      ) : (
+        <>
+          <span className="first-run-cli-text">
+            Put the <code>cori</code> command on your PATH? Agents (Claude, Cursor, …)
+            and terminals need it to check and run workflows.
+            {state.kind === "error" && (
+              <span style={{ color: "var(--red)" }}> Install failed: {state.message}</span>
+            )}
+          </span>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={state.kind === "busy"}
+            onClick={() => {
+              setState({ kind: "busy" });
+              installCli()
+                .then((r) => setState({ kind: "done", path: r.path, onPath: r.on_path }))
+                .catch((e) => setState({ kind: "error", message: formatErr(e) }));
+            }}
+          >
+            {state.kind === "busy" ? "Installing…" : "Install CLI"}
+          </button>
+          <button type="button" className="btn" disabled={state.kind === "busy"} onClick={dismiss}>
+            Not now
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 // ─── CLI install ──────────────────────────────────────────────────────────

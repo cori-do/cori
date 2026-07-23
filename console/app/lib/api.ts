@@ -280,6 +280,7 @@ export interface ScheduleEntry {
   last_fire_at?: string | null;
   last_status?: string | null;
   last_error?: string | null;
+  paused_reason?: string | null;
 }
 
 export interface ScheduleDto extends ScheduleEntry {
@@ -446,6 +447,12 @@ export const enableSchedule = (args: {
 export const setScheduleEnabled = (args: { id: string; enabled: boolean }) =>
   call<ScheduleResponse>("set_schedule_enabled", args);
 
+export const updateSchedule = (args: {
+  id: string;
+  schedule: string;
+  schedule_tz?: string;
+}) => call<ScheduleResponse>("update_schedule", args);
+
 export const deleteSchedule = (args: { id: string }) =>
   call<Record<string, never>>("delete_schedule", args);
 
@@ -518,6 +525,15 @@ export const onApprovalsChanged = (
   listen<{ pending: ApprovalRequest[] }>("approvals:changed", (ev) =>
     cb(ev.payload.pending),
   );
+
+// ---------- Self-update -------------------------------------------------
+
+export const installUpdate = (): Promise<void> => call<void>("install_update");
+
+export const onUpdaterAvailable = (
+  cb: (version: string) => void,
+): Promise<UnlistenFn> =>
+  listen<{ version: string }>("updater:available", (ev) => cb(ev.payload.version));
 
 // ---------- Global event subscriptions ---------------------------------
 

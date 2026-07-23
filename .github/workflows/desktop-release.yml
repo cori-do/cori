@@ -236,6 +236,13 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          # Updater artifact signing (tauri-plugin-updater). With the key
+          # present, tauri-cli emits a `.sig` next to each updater
+          # artifact (`.app.tar.gz` / `.AppImage` / `.msi`); the release
+          # job below assembles them into latest.json. Empty secret →
+          # no sigs → the manifest step skips itself.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Verify macOS signature + notarization
         if: runner.os == 'macOS'
@@ -265,10 +272,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # NOT merge-multiple: both macOS targets name their updater
+      # artifact `Cori.app.tar.gz` — merged, one would clobber the
+      # other. Per-target directories keep them apart; the manifest
+      # step below renames on upload.
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -279,7 +289,80 @@ jobs:
             dist/**/*.deb
           generate_release_notes: true
 
-      # TODO: update tauri-plugin-updater manifest at
-      # https://cori.do/updates/latest.json once the updater signing
-      # keypair is generated (`tauri signer generate`) and the public
-      # key is hard-coded into tauri.conf.json's plugins.updater.pubkey.
+      # Updater manifest: collect the signed updater artifacts from each
+      # per-target directory, upload them (uniquely named) onto the
+      # release, and publish latest.json alongside. The feed at
+      # https://cori.do/updates/latest.json redirects here. Skips itself
+      # (with a notice) when no .sig files exist — i.e. when
+      # TAURI_SIGNING_PRIVATE_KEY wasn't configured for the build.
+      - name: Assemble + upload updater manifest
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os, subprocess, sys
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          version = tag.removeprefix("desktop-v")
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          # target-dir suffix -> (updater artifact glob, platform key, unique upload name)
+          PLATFORMS = [
+              ("aarch64-apple-darwin", "**/macos/*.app.tar.gz", "darwin-aarch64",
+               f"Cori_{version}_darwin-aarch64.app.tar.gz"),
+              ("x86_64-apple-darwin", "**/macos/*.app.tar.gz", "darwin-x86_64",
+               f"Cori_{version}_darwin-x86_64.app.tar.gz"),
+              ("x86_64-unknown-linux-gnu", "**/appimage/*.AppImage", "linux-x86_64", None),
+              ("x86_64-pc-windows-msvc", "**/msi/*.msi", "windows-x86_64", None),
+          ]
+
+          platforms = {}
+          uploads = []
+          for target, pattern, key, rename in PLATFORMS:
+              root = f"dist/cori-console-{target}"
+              files = [f for f in glob.glob(f"{root}/{pattern}", recursive=True)
+                       if not f.endswith(".sig")]
+              if not files:
+                  print(f"::notice::no updater artifact for {key} under {root} — skipping")
+                  continue
+              artifact = files[0]
+              sig = artifact + ".sig"
+              if not os.path.exists(sig):
+                  print(f"::notice::{artifact} has no .sig (signing key not set?) — skipping {key}")
+                  continue
+              name = rename or os.path.basename(artifact)
+              if rename:
+                  renamed = os.path.join(os.path.dirname(artifact), rename)
+                  os.rename(artifact, renamed)
+                  os.rename(sig, renamed + ".sig")
+                  artifact, sig = renamed, renamed + ".sig"
+                  uploads.append(artifact)  # msi/AppImage are uploaded by the release step
+              uploads.append(sig)
+              platforms[key] = {
+                  "url": f"{base}/{name}",
+                  "signature": open(sig).read().strip(),
+              }
+
+          if not platforms:
+              print("::notice::no signed updater artifacts found — latest.json not published")
+              sys.exit(0)
+
+          manifest = {
+              "version": version,
+              "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "platforms": platforms,
+          }
+          with open("latest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          uploads.append("latest.json")
+          print(json.dumps(manifest, indent=2))
+          subprocess.run(["gh", "release", "upload", tag, *uploads, "--clobber"],
+                         check=True)
+          PY

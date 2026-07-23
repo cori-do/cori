@@ -41,19 +41,61 @@ pub async fn list_decided_approvals() -> IpcResult<Value> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn decide_approval(nonce: String, approved: bool) -> IpcResult<()> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        // Capture the request before deciding — decide() retires it.
+        let request = approvals::list_pending()?
+            .into_iter()
+            .find(|r| r.nonce == nonce);
         let decision = if approved {
             approvals::Decision::Approved
         } else {
             approvals::Decision::Declined
         };
-        approvals::decide(&nonce, decision, "console")
+        approvals::decide(&nonce, decision, "console")?;
+
+        // Approving a schedule re-consent carries an effect beyond the
+        // decision file: trust the new sha and resume the schedule.
+        if approved
+            && let Some(req) = request
+            && req.kind == approvals::ApprovalKind::ScheduleReconsent
+        {
+            apply_schedule_reconsent(&req)?;
+        }
+        Ok(())
     })
     .await
     .map_err(|e| IpcError::Internal(anyhow::anyhow!("approvals task join: {e}")))?
-    .map(|_| ())
     // Deciding an unknown/expired nonce is a caller mistake, not a crash.
     .map_err(|e| IpcError::BadRequest(format!("{e:#}")))
+}
+
+/// The human approved running the new upstream version of a scheduled
+/// workflow: record trust for the new sha (same `trust.json` as every
+/// other consent surface) and re-pin + resume the schedule.
+fn apply_schedule_reconsent(req: &cori_run::approvals::ApprovalRequest) -> anyhow::Result<()> {
+    let get = |k: &str| req.payload.get(k).and_then(|v| v.as_str());
+    let (Some(schedule_id), Some(source), Some(new_sha)) =
+        (get("schedule_id"), get("source"), get("new_sha"))
+    else {
+        anyhow::bail!("schedule_reconsent item is missing schedule_id/source/new_sha");
+    };
+    let caps: Vec<String> = req
+        .payload
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let cori_run::remote::ArgClass::Remote(spec) = cori_run::remote::classify_arg(source)? {
+        cori_run::remote::trust::record_consent(&spec, new_sha, caps)?;
+    }
+    cori_run::schedules::repin(schedule_id, new_sha)?;
+    tracing::info!(schedule_id, new_sha, "schedule re-consented and resumed");
+    Ok(())
 }
 
 /// Spawn the heartbeat + pending-inbox watcher. Emits

@@ -7,6 +7,7 @@
 
 mod approvals_cmd;
 mod browse;
+mod updater;
 mod capability_cmd;
 mod cli_install;
 mod commands;
@@ -108,6 +109,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Window-state plugin persists size/position across restarts.
         // The launcher is the only window we explicitly want restored;
         // disposable kinds (launch-*, run-*, manage) get tracked but
@@ -146,6 +148,9 @@ pub fn run() {
             // Heartbeat + approval-inbox watcher — the Console is the
             // rich human-decision surface for ~/.cori/approvals/.
             approvals_cmd::spawn_watcher(app.handle().clone());
+
+            // Update checks (announce-only; install is human-initiated).
+            updater::spawn_check(app.handle().clone());
 
             // Spawn the Temporal sidecar supervisor.
             let sidecar_stop = supervisor::spawn(app.handle().clone());
@@ -201,10 +206,12 @@ pub fn run() {
             approvals_cmd::list_approvals,
             approvals_cmd::list_decided_approvals,
             approvals_cmd::decide_approval,
+            updater::install_update,
             workers_schedules::list_workers,
             workers_schedules::list_schedules,
             workers_schedules::enable_schedule,
             workers_schedules::set_schedule_enabled,
+            workers_schedules::update_schedule,
             workers_schedules::delete_schedule,
         ])
         .run(tauri::generate_context!())

@@ -475,6 +475,23 @@ table.runs td.mono {
 .pill.warn { background: var(--amber-soft); color: var(--amber); }
 .pill.muted { background: var(--surface-2); color: var(--muted); }
 
+/* ─── First-run CLI prompt ───────────────────────────────────────── */
+.first-run-cli {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.first-run-cli-text {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
 /* ─── Approvals (human-in-the-loop inbox) ────────────────────────── */
 .approvals {
   display: flex;
