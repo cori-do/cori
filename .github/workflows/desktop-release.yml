@@ -361,6 +361,10 @@ jobs:
               json.dump(manifest, f, indent=2)
           uploads.append("latest.json")
           print(json.dumps(manifest, indent=2))
-          subprocess.run(["gh", "release", "upload", tag, *uploads, "--clobber"],
+          # --repo is required: this job never checks out the repo, so gh
+          # has no git remote to infer the target from and would fail with
+          # "not a git repository".
+          subprocess.run(["gh", "release", "upload", tag, *uploads,
+                          "--repo", repo, "--clobber"],
                          check=True)
           PY
