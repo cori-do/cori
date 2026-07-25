@@ -6,7 +6,7 @@ import {
   OUTPUT_TOKEN_PRICE_PER_MILLION_USD,
   readJson,
 } from "./artifacts.js";
-import type { BenchmarkResultV1 } from "./types.js";
+import type { BenchmarkResultV2 } from "./types.js";
 
 export interface ViewerArtifact {
   path: string;
@@ -38,7 +38,7 @@ export type ArtifactKind =
   | "other";
 
 interface ViewerPayload {
-  result: BenchmarkResultV1;
+  result: BenchmarkResultV2;
   artifacts: readonly ViewerArtifact[];
   sessions: readonly ViewerSession[];
   sessionRows: readonly ViewerSessionComparison[];
@@ -70,7 +70,6 @@ interface ViewerSessionComparison {
   status: string;
   startedAt: string | null;
   durationMs: number | null;
-  attempt: number | null;
   seed: number | null;
   score: number | null;
   toolCalls: number | null;
@@ -95,7 +94,7 @@ interface ViewerSessionComparison {
  * stay in their original files and are reached through relative links.
  */
 export function benchmarkViewerDocument(
-  result: BenchmarkResultV1,
+  result: BenchmarkResultV2,
   artifacts: readonly ViewerArtifact[],
 ): string {
   const payload: ViewerPayload = {
@@ -567,7 +566,7 @@ export function benchmarkViewerDocument(
         crumb.textContent = "Run overview";
         const direct = result.trials.filter((trial) => trial.lane === "direct");
         const replay = result.trials.filter((trial) => trial.lane === "replay");
-        const qualified = (result.capture.tasks || []).filter((task) => task.qualificationPassed).length;
+        const qualified = (result.capture.tasks || []).filter((task) => task.outcomes?.check?.status === "succeeded").length;
         content.replaceChildren(
           title("Benchmark run", result.runId, "A reviewable record of direct agent work, workflow capture, and unchanged Cori replays.", result.status),
           ...(result.error ? [el("div", { class: "notice", text: result.error })] : []),
@@ -623,7 +622,7 @@ export function benchmarkViewerDocument(
         const table = el("table", { class: "session-table" });
         const headers = [
           ["#", "sticky-order"], ["Session", "sticky-session"], ["Started", ""], ["Task", ""], ["Engine", ""],
-          ["Attempt / seed", ""], ["Score", "number-cell"], ["Status", ""], ["Duration", "number-cell"],
+          ["Seed", ""], ["Score", "number-cell"], ["Status", ""], ["Duration", "number-cell"],
           ["Tools / activities", "number-cell"], ["CLI", "number-cell"], ["LLM", "number-cell"], ["Code", "number-cell"],
           ["Messages", "number-cell"], ["Events", "number-cell"], ["Input tokens", "number-cell"],
           ["Output tokens", "number-cell"], ["Total tokens", "number-cell"], ["Tokens / sec", "number-cell"],
@@ -640,7 +639,7 @@ export function benchmarkViewerDocument(
           const visible = sessionRows.filter((row) => {
             if (engineFilter !== "all" && row.engine !== engineFilter) return false;
             if (!searchValue) return true;
-            return [row.taskId, row.label, row.status, row.seed, row.attempt, row.workflowHash]
+            return [row.taskId, row.label, row.status, row.seed, row.workflowHash]
               .some((value) => String(value ?? "").toLowerCase().includes(searchValue));
           });
           summary.textContent = visible.length + " of " + sessionRows.length + " sessions";
@@ -655,7 +654,7 @@ export function benchmarkViewerDocument(
       function sessionTableRow(row) {
         const order = sessionRows.indexOf(row) + 1;
         const started = tableDate(row.startedAt);
-        const attemptSeed = [row.attempt === null ? null : "attempt " + row.attempt, row.seed === null ? null : "seed " + row.seed].filter(Boolean);
+        const seed = row.seed === null ? null : "seed " + row.seed;
         const evidence = artifacts.find((artifact) => artifact.path === row.evidencePath);
         const href = evidence?.href || "./" + row.evidencePath.split("/").map(encodeURIComponent).join("/");
         return el("tr", { "data-engine": row.engine }, [
@@ -667,7 +666,7 @@ export function benchmarkViewerDocument(
           el("td", {}, [el("span", { class: "session-primary", text: started.time }), el("span", { class: "session-secondary", text: started.date })]),
           el("td", {}, [el("span", { class: "session-primary", text: prettyTask(row.taskId) }), el("span", { class: "session-secondary", text: row.track })]),
           el("td", {}, [el("span", { class: "engine-pill " + row.engine, text: row.engine })]),
-          el("td", {}, attemptSeed.length ? attemptSeed.map((value) => el("span", { class: "session-secondary", text: value })) : [el("span", { class: "small", text: "—" })]),
+          el("td", {}, seed ? [el("span", { class: "session-secondary", text: seed })] : [el("span", { class: "small", text: "—" })]),
           numericTrendCell(row, "score", scoreText),
           el("td", {}, [el("span", { class: "table-status " + statusClass(row.status), text: row.status })]),
           numericTrendCell(row, "durationMs", formatDuration),
@@ -782,7 +781,7 @@ export function benchmarkViewerDocument(
             el("div", { class: "task-meta" }, [
               el("span", { text: "Direct " + scoreText(directScore) }),
               el("span", { text: "Replay " + scoreText(replayScore) }),
-              el("span", { text: capture?.qualificationPassed ? "qualified" : "review" }),
+              el("span", { text: capture?.outcomes?.check?.status === "succeeded" ? "captured" : "review" }),
             ]),
           ]);
           grid.append(card);
@@ -823,7 +822,7 @@ export function benchmarkViewerDocument(
           el("h1", { text: prettyTask(taskId) }),
           el("div", { class: "task-facts" }, [
             el("span", { class: "fact", text: "author score " + (capture ? capture.authorGrade.score : "—") }),
-            el("span", { class: "fact", text: capture?.qualificationPassed ? "qualification passed" : "qualification needs review" }),
+            el("span", { class: "fact", text: capture?.outcomes?.check?.status === "succeeded" ? "capture checked" : "capture needs review" }),
             el("span", { class: "fact", text: direct.length + " direct / " + replay.length + " replay" }),
           ]),
         ]);
@@ -869,10 +868,12 @@ export function benchmarkViewerDocument(
         const panel = el("section", { class: "panel" });
         const items = [
           ["Preview", capture.previewDidNotWrite ? "passed — no workflow write" : "failed"],
-          ["Static check", capture.checkPassed ? "passed" : "failed"],
+          ["Overall check gate", capture.checkPassed ? "passed" : "failed"],
           ["Policy", capture.policy?.ok ? "passed" : capture.policy ? capture.policy.violations.join("; ") : "not recorded"],
-          ["Qualification", capture.qualificationPassed ? "passed at 100/100" : "not passed"],
-          ["Attempts", String((capture.attempts || []).length || 1) + (capture.selectedAttempt ? "; selected #" + capture.selectedAttempt : "")],
+          ["Author check attempt", capture.skillCheckObserved ? "observed" : "not observed"],
+          ["Author ready check", capture.skillCheckSucceeded ? "Result: ✓ ready" : "not successful"],
+          ["Independent ready check", capture.benchmarkCheckSucceeded ? "Result: ✓ ready" : "not successful"],
+          ["Replay", capture.outcomes?.replay?.status || "not recorded"],
         ];
         panel.append(el("div", { class: "rubric" }, items.map(([label, value]) =>
           el("div", { class: "rubric-item" }, [el("div", { class: "rubric-score", text: label }), el("div", { class: "rubric-title", text: value })]),
@@ -979,9 +980,6 @@ export function benchmarkViewerDocument(
         root.append(el("div", { class: "comparison" }, [
           lanePanel("Direct snapshots and grades", direct), lanePanel("Replay snapshots and trace", replay),
         ]));
-        if (capture?.qualificationGrade) {
-          root.append(el("h2", { text: "Qualification grading" }), gradePanel({ lane: "qualification", seed: capture.selectedAttempt || 1, grade: capture.qualificationGrade }));
-        }
         if (workspaceLinks.length) {
           root.append(el("h2", { text: "Workspace resources" }), resourceLinkPanel(workspaceLinks));
         }
@@ -1170,7 +1168,7 @@ export async function writeBenchmarkViewer(
 
 /** Regenerate the review page after any command changes a run's artifacts. */
 export async function writeBenchmarkViewerForRun(runDir: string): Promise<string> {
-  const result = await readJson<BenchmarkResultV1>(join(runDir, "result.json"));
+  const result = await readJson<BenchmarkResultV2>(join(runDir, "result.json"));
   const artifacts = await collectArtifacts(runDir);
   const destination = join(runDir, "viewer.html");
   await writeFile(destination, benchmarkViewerDocument(result, artifacts), "utf8");
@@ -1213,8 +1211,8 @@ function classifyArtifact(path: string): ArtifactKind {
   if (path.startsWith("transcripts/")) return "transcript";
   if (path.startsWith("snapshots/")) return "snapshot";
   if (path.startsWith("author-grades/")) return "grade";
-  if (path.startsWith("qualification/") && /-(before|after)\.json$/u.test(path)) return "snapshot";
-  if (path.startsWith("cori-traces/") || path.startsWith("qualification/")) return "trace";
+  if (path.startsWith("policy/") || path.startsWith("workflow-hashes/")) return "check";
+  if (path.startsWith("cori-traces/")) return "trace";
   if (path.startsWith("generated-workflows/")) return "workflow";
   if (path.startsWith("cori-check/")) return "check";
   if (path === "scorecard.md" || path === "results.csv") return "report";
@@ -1228,7 +1226,7 @@ const viewerMessageLimit = 12_000;
 const viewerSessionLimit = 400;
 const viewerLinkLimit = 40;
 
-function compactResult(result: BenchmarkResultV1): BenchmarkResultV1 {
+function compactResult(result: BenchmarkResultV2): BenchmarkResultV2 {
   return {
     ...result,
     trials: result.trials.map((trial) => trial.harness
@@ -1294,11 +1292,10 @@ function compareViewerArtifacts(left: ViewerArtifact, right: ViewerArtifact): nu
 }
 
 function artifactPathSequence(path: string): { base: string; order: number } {
-  const transcript = path.match(/^(.*?)(?:-attempt-(\d+))?-(direct|capture-preview|capture-approval)\.json$/u);
+  const transcript = path.match(/^(.*?)-(direct|capture-preview|capture-approval)\.json$/u);
   if (transcript) {
-    const attempt = Number(transcript[2] ?? "1");
-    const phase = transcript[3] === "direct" ? 0 : transcript[3] === "capture-preview" ? 1 : 2;
-    return { base: transcript[1] ?? path, order: attempt * 10 + phase };
+    const phase = transcript[2] === "direct" ? 0 : transcript[2] === "capture-preview" ? 1 : 2;
+    return { base: transcript[1] ?? path, order: phase };
   }
   const snapshot = path.match(/^(.*)-(before|after)\.json$/u);
   if (snapshot) return { base: snapshot[1] ?? path, order: snapshot[2] === "before" ? 0 : 1 };
@@ -1310,7 +1307,7 @@ function artifactHref(path: string): string {
 }
 
 function buildViewerSessions(
-  result: BenchmarkResultV1,
+  result: BenchmarkResultV2,
   artifacts: readonly ViewerArtifact[],
 ): ViewerSession[] {
   const taskIds = [...new Set([
@@ -1364,7 +1361,7 @@ function buildViewerSessions(
 }
 
 function buildViewerSessionComparisons(
-  result: BenchmarkResultV1,
+  result: BenchmarkResultV2,
   artifacts: readonly ViewerArtifact[],
 ): ViewerSessionComparison[] {
   const rows: ViewerSessionComparison[] = [];
@@ -1380,8 +1377,6 @@ function buildViewerSessionComparisons(
     const envelope = parseJsonValue(artifact.content);
     if (!isRecord(envelope)) continue;
     const capture = result.capture.tasks.find((task) => task.taskId === taskId);
-    const attempt = Number(artifact.path.match(/-attempt-(\d+)-/u)?.[1] ?? "1");
-    const attemptRecord = capture?.attempts?.find((item) => item.attempt === attempt);
     const phase = artifact.path.includes("capture-preview")
       ? "preview"
       : artifact.path.includes("capture-approval") ? "approval" : "direct";
@@ -1397,7 +1392,7 @@ function buildViewerSessionComparisons(
       ? envelope.sessionId
       : typeof envelope.session_id === "string" ? envelope.session_id : null;
     rows.push({
-      id: `${sessionId ?? artifact.path}:${phase}:attempt-${attempt}`,
+      id: `${sessionId ?? artifact.path}:${phase}`,
       taskId,
       label: viewerSessionName(artifact.path, taskId),
       engine: "agent",
@@ -1405,10 +1400,9 @@ function buildViewerSessionComparisons(
       status: exitCode === null || exitCode === 0 ? "succeeded" : "failed",
       startedAt: inferredHarnessStart(artifact.modifiedAt, durationMs, sessionId),
       durationMs,
-      attempt,
-      seed: attemptRecord?.seed ?? (phase === "direct" ? result.seed : null),
+      seed: phase === "direct" ? result.seed : null,
       score: phase === "direct"
-        ? attemptRecord?.authorGrade.score ?? capture?.authorGrade.score ?? null
+        ? capture?.authorGrade.score ?? null
         : null,
       toolCalls: normalized.filter((message) => message.role === "tool").length,
       cliCalls: normalized.filter((message) => message.role === "tool").length,
@@ -1421,48 +1415,7 @@ function buildViewerSessionComparisons(
       ...totals,
       workflowHash: phase === "approval" ? capture?.policy?.workflowHash ?? null : null,
       evidencePath: artifact.path,
-      pairId: phase === "direct" ? `capture:${taskId}:${attempt}` : null,
-    });
-  }
-
-  for (const capture of result.capture.tasks) {
-    if (!capture.qualificationGrade && !capture.qualificationTracePath) continue;
-    const traceArtifact = findTraceArtifact(
-      artifacts,
-      capture.qualificationTracePath,
-      `qualification/${capture.taskId}-trace.json`,
-    );
-    const trace = traceArtifact ? parseViewerTrace(traceArtifact.content) : null;
-    const activities = traceActivities(trace);
-    const traceTokens = traceTokenTotals(activities);
-    const durationMs = numberOrNull(trace?.duration_ms);
-    const totals = viewerTokenTotals(traceTokens.inputTokens, traceTokens.outputTokens, durationMs);
-    const selectedAttempt = capture.selectedAttempt ?? null;
-    const attemptRecord = capture.attempts?.find((item) => item.attempt === selectedAttempt);
-    rows.push({
-      id: stringOrNull(trace?.run_id) ?? `qualification:${capture.taskId}`,
-      taskId: capture.taskId,
-      label: "Cori qualification",
-      engine: "cori",
-      track: "cori",
-      status: stringOrNull(trace?.status) ?? (capture.qualificationPassed ? "succeeded" : "failed"),
-      startedAt: stringOrNull(trace?.started_at),
-      durationMs,
-      attempt: selectedAttempt,
-      seed: attemptRecord?.seed ?? null,
-      score: capture.qualificationGrade?.score ?? null,
-      toolCalls: activities.length || null,
-      cliCalls: activityKindCount(activities, "cli"),
-      llmCalls: activityKindCount(activities, "llm"),
-      codeCalls: activityKindCount(activities, "code"),
-      messages: null,
-      events: null,
-      inputTokens: traceTokens.inputTokens,
-      outputTokens: traceTokens.outputTokens,
-      ...totals,
-      workflowHash: capture.policy?.workflowHash ?? null,
-      evidencePath: traceArtifact?.path ?? "result.json",
-      pairId: selectedAttempt === null ? null : `capture:${capture.taskId}:${selectedAttempt}`,
+      pairId: phase === "direct" ? `capture:${taskId}` : null,
     });
   }
 
@@ -1484,7 +1437,6 @@ function buildViewerSessionComparisons(
         status: harness && harness.exitCode !== 0 ? "failed" : "succeeded",
         startedAt: uuidV7Timestamp(harness?.sessionId),
         durationMs,
-        attempt: null,
         seed: trial.seed,
         score: trial.grade.score,
         toolCalls: normalized.filter((message) => message.role === "tool").length,
@@ -1520,7 +1472,6 @@ function buildViewerSessionComparisons(
       status: stringOrNull(trace?.status) ?? "succeeded",
       startedAt: stringOrNull(trace?.started_at),
       durationMs,
-      attempt: null,
       seed: trial.seed,
       score: trial.grade.score,
       toolCalls: activities.length || null,
@@ -1653,11 +1604,10 @@ function compareViewerSessions(left: ViewerSession, right: ViewerSession): numbe
 
 function viewerSessionOrder(session: ViewerSession): number {
   if (!session.sourcePath.startsWith("transcripts/authors/")) return 10_000;
-  const attempt = Number(session.sourcePath.match(/-attempt-(\d+)-/u)?.[1] ?? "1");
   const phase = session.sourcePath.includes("-direct.json")
     ? 0
     : session.sourcePath.includes("capture-preview") ? 1 : 2;
-  return attempt * 10 + phase;
+  return phase;
 }
 
 function prependViewerPrompt(
@@ -1681,10 +1631,10 @@ function fallbackSessionPrompt(
   artifacts: readonly ViewerArtifact[],
 ): string | null {
   if (path.includes("capture-preview")) {
-    return "The direct task attempt is complete. Capture the demonstrated procedure as a reusable Cori workflow. Show a read-only preview only; do not create, edit, or run workflow files yet.";
+    return "Save this as a Cori workflow under ./captured-workflow.";
   }
   if (path.includes("capture-approval")) {
-    return "Approved. Write the reviewed workflow to ./captured-workflow and run the pinned Cori check. Do not run the workflow.";
+    return "yes";
   }
   const fileName = path.split("/").at(-1)?.replace(/-direct\.json$/u, "") ?? taskId;
   const exactPath = `agent-workspace/authors/${fileName}/TASK.md`;
@@ -1708,12 +1658,10 @@ function taskPromptArtifact(
 function viewerSessionName(path: string, taskId: string): string {
   const stem = path.split("/").at(-1)?.replace(/\.json$/iu, "") ?? path;
   const suffix = stem.startsWith(taskId) ? stem.slice(taskId.length).replace(/^-+/u, "") : stem;
-  const attempt = suffix.match(/^attempt-(\d+)-(.+)$/u);
-  const phase = attempt?.[2] ?? suffix;
-  const prefix = attempt ? `Author attempt ${attempt[1]}` : "Author";
-  if (phase === "direct") return `${prefix} · direct task`;
-  if (phase === "capture-preview") return `${prefix} · capture preview`;
-  if (phase === "capture-approval") return `${prefix} · capture approval`;
+  const phase = suffix;
+  if (phase === "direct") return "Author · direct task";
+  if (phase === "capture-preview") return "Author · capture preview";
+  if (phase === "capture-approval") return "Author · capture approval";
   return suffix.replaceAll("-", " ");
 }
 

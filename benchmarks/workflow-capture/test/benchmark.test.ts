@@ -1,46 +1,68 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dirname, join, resolve } from "node:path";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
   codexAutomationArgs,
   codexModel,
+  CodexAdapter,
   DEFAULT_CODEX_MODEL,
   parseJsonl,
 } from "../src/harness.js";
+import type { HarnessAdapter } from "../src/harness.js";
 import { gradeExternalState } from "../src/grader.js";
 import {
   benchmarkCalendarEnv,
   configuredBenchmarkCalendarId,
+  fixtureWriteRange,
   gmailFixtureReady,
   GwsClient,
   requireBenchmarkCalendarId,
   WorkspaceScenarioDriver,
 } from "../src/gws.js";
 import { inspectWorkflowPolicy } from "../src/policy.js";
+import {
+  benchmarkDiagnosticOutput,
+  benchmarkProgressOutput,
+  benchmarkProgressText,
+} from "../src/progress.js";
 import { normalizedCsv, readJson, scorecard, writeJson } from "../src/artifacts.js";
 import {
   aggregateCaptures,
   approvalPrompt,
-  authoringReference,
+  assertResultCoriIdentity,
+  captureConversationTurns,
   captureReady,
+  captureRequestPrompt,
+  cleanup,
+  combineRuns,
+  createBenchmarkHarnessEnvironment,
   failedTraceDiagnostic,
   formatWorkflowCheckFailure,
+  hardGate,
+  isCanonicalCoriReadyOutput,
   isCoriWorkflowCliHelp,
   parseBatch,
+  profilePairs,
   prepareCaptureWorkspace,
   prepareDirectWorkspace,
+  probeHarnessCoriEnvironment,
   renderedTaskPrompt,
   report,
-  retryableCaptureFailure,
   runBenchmark,
   selectTasks,
   traceUsage,
   trialIntegrityError,
   transcriptExecutedCoriRun,
+  transcriptExecutedCoriCheck,
+  transcriptHasWorkflowPreview,
+  transcriptSuccessfulCoriCheck,
+  validateCoriLoginShellProbe,
   workspaceCoriBinary,
 } from "../src/runner.js";
 import {
@@ -52,7 +74,7 @@ import { pairedDifferenceCi95, reuseAdvantage } from "../src/statistics.js";
 import { assertTaskCatalog, TASKS } from "../src/tasks.js";
 import { benchmarkViewerDocument } from "../src/viewer.js";
 import type {
-  BenchmarkResultV1,
+  BenchmarkResultV2,
   Grade,
   Json,
   Scenario,
@@ -75,37 +97,7 @@ test("task catalog contains ten 100-point tasks", () => {
   );
 });
 
-test("authoring guidance locks the flat shallow-merged state contract", async () => {
-  const guidance = authoringReference(
-    "gpt-5.4",
-    "hybrid",
-    "support_inbox_triage",
-  );
-  assert.match(
-    guidance,
-    /execution state begins with manifest parameters as top-level keys/u,
-  );
-  assert.match(
-    guidance,
-    /Successful object outputs are shallow-merged into one flat state object/u,
-  );
-  assert.match(
-    guidance,
-    /duplicate top-level key overwrites the earlier value/u,
-  );
-  assert.match(
-    guidance,
-    /required step input key must exactly match a parameter or a top-level key emitted by an earlier step/u,
-  );
-  assert.match(
-    guidance,
-    /multiple records and side-effect IDs in arrays or unique wrapper keys/u,
-  );
-  assert.match(
-    guidance,
-    /statically parses and type-checks every workflow module without executing callbacks/u,
-  );
-
+test("the staged real skill owns the workflow dataflow contract", async () => {
   const skill = await readFile(
     join(packageRoot, "..", "..", "skills", "cori_save_workflow", "SKILL.md"),
     "utf8",
@@ -121,25 +113,49 @@ test("authoring guidance locks the flat shallow-merged state contract", async ()
   assert.match(skill, /duplicate top-level output key overwrites/u);
 });
 
-test("support authoring keeps messages and created label IDs uniquely addressable", () => {
-  const guidance = authoringReference(
-    "gpt-5.4",
-    "hybrid",
-    "support_inbox_triage",
-  );
-  assert.match(guidance, /IDs in one message_ids array/u);
-  assert.match(guidance, /all three fetched messages uniquely addressable/u);
-  assert.match(
-    guidance,
-    /created category\/priority label ID uniquely addressable by message and label purpose/u,
+test("the staged real skill preserves explicit parameter contracts", async () => {
+  const skill = await readFile(
+    join(packageRoot, "..", "..", "skills", "cori_save_workflow", "SKILL.md"),
+    "utf8",
   );
   assert.match(
-    guidance,
-    /Never reuse a shared message or label_id output key/u,
+    skill,
+    /explicit `Parameters`, `Inputs`, or run-arguments list is authoritative/u,
+  );
+  assert.match(
+    skill,
+    /Do not add another parameter merely\s+because a fixed requirement could be made configurable/u,
+  );
+  assert.match(
+    skill,
+    /manifest parameter names with any explicit input[\s\S]*must match exactly/u,
   );
 });
 
-test("direct and capture prompts keep live execution separate from workflow authoring", () => {
+test("the staged real skill requires valid Gmail raw-message separators", async () => {
+  const skillRoot = join(
+    packageRoot,
+    "..",
+    "..",
+    "skills",
+    "cori_save_workflow",
+  );
+  const [skill, activityKinds] = await Promise.all([
+    readFile(join(skillRoot, "SKILL.md"), "utf8"),
+    readFile(join(skillRoot, "references", "activity_kinds.md"), "utf8"),
+  ]);
+  assert.match(skill, /Gmail raw messages use real RFC line breaks/u);
+  assert.ok(activityKinds.includes(String.raw`].join("\r\n");`));
+  assert.ok(
+    activityKinds.includes(String.raw`message.includes("\\r\\n")`),
+  );
+  assert.match(
+    activityKinds,
+    /Gmail raw message must use real CRLF separators/u,
+  );
+});
+
+test("capture uses the natural skill request and literal approval", () => {
   const task = TASKS.find((candidate) =>
     candidate.id === "support_inbox_triage"
   )!;
@@ -152,32 +168,23 @@ test("direct and capture prompts keep live execution separate from workflow auth
   assert.match(direct, /read \.\/GWS\.md/u);
   assert.match(
     direct,
+    /resources are freshly provisioned[\s\S]*run tag is unique/u,
+  );
+  assert.match(
+    direct,
+    /Do not add stale-state cleanup or cross-run already-exists guards/u,
+  );
+  assert.match(
+    direct,
     /do not create a Cori workflow, manifest\.md, steps\/, or tests\//u,
   );
   assert.doesNotMatch(direct, /read \.\/CORI_AUTHORING\.md/u);
   assert.doesNotMatch(direct, /cori_save_workflow/u);
-  const approval = approvalPrompt(task);
-  assert.match(approval, /First read \.\/CORI_AUTHORING\.md/u);
-  assert.match(
-    approval,
-    /"\$CORI_BENCH_CORI" check \.\/captured-workflow/u,
+  assert.equal(
+    captureRequestPrompt(),
+    "Save this as a Cori workflow under ./captured-workflow.",
   );
-  assert.match(approval, /Do not substitute another cori from PATH/u);
-  assert.match(
-    approval,
-    /second argument may contain only stderr and exitCode, never workflow parameters or earlier outputs/u,
-  );
-  assert.doesNotMatch(approval, /fresh retry/u);
-
-  const retryApproval = approvalPrompt(
-    task,
-    "qualification failed: SyntaxError at steps/06_read_presentation.ts:13:182",
-  );
-  assert.match(retryApproval, /fresh retry after a previous independent capture failed/u);
-  assert.match(
-    retryApproval,
-    /SyntaxError at steps\/06_read_presentation\.ts:13:182/u,
-  );
+  assert.equal(approvalPrompt(), "yes");
 });
 
 test("workflow authoring materials are staged only after direct task execution", async () => {
@@ -208,11 +215,8 @@ test("workflow authoring materials are staged only after direct task execution",
       ),
     );
 
-    await prepareCaptureWorkspace(workspace, scenario.taskId, "gpt-5.4");
-    assert.match(
-      await readFile(join(workspace, "CORI_AUTHORING.md"), "utf8"),
-      /# Cori authoring constraints/u,
-    );
+    await prepareCaptureWorkspace(workspace);
+    await assert.rejects(readFile(join(workspace, "CORI_AUTHORING.md"), "utf8"));
     assert.match(
       await readFile(
         join(
@@ -224,11 +228,48 @@ test("workflow authoring materials are staged only after direct task execution",
         ),
         "utf8",
       ),
-      /name: cori_save_workflow/u,
+      /name: cori-save-workflow/u,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test("capture resumes one conversation for task, preview, and approval", async () => {
+  const calls: Array<{ sessionId: string; prompt: string }> = [];
+  const session = (sessionId: string, prompt: string) => ({
+    sessionId,
+    prompt,
+    transcript: [],
+    usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+    wallTimeMs: 1,
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+  });
+  const adapter: HarnessAdapter = {
+    name: "codex",
+    version: async () => "test",
+    start: async (prompt) => session("author-session", prompt),
+    resume: async (sessionId, prompt) => {
+      calls.push({ sessionId, prompt });
+      return session(
+        prompt === approvalPrompt() ? "approval-session" : "preview-session",
+        prompt,
+      );
+    },
+  };
+  let previewObserved = false;
+  await captureConversationTurns(adapter, "author-session", "/tmp", {
+    afterPreview: () => {
+      previewObserved = true;
+    },
+  });
+  assert.equal(previewObserved, true);
+  assert.deepEqual(calls, [
+    { sessionId: "author-session", prompt: captureRequestPrompt() },
+    { sessionId: "preview-session", prompt: "yes" },
+  ]);
 });
 
 test("every task builds valid author and held-out fixture contracts", () => {
@@ -279,10 +320,29 @@ test("every task builds valid author and held-out fixture contracts", () => {
     support.resources.filter((resource) => resource.service === "gmail").length,
     3,
   );
+  assert.deepEqual(support.fixtures[0]?.table, [
+    ["benchmark_tag"],
+    [support.runTag],
+  ]);
+  assert.equal(fixtureWriteRange(support.fixtures[0]!.table!), "Source!A1:A2");
+  assert.match(
+    TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
+    /gmail_query contract is exactly three unread messages per run/u,
+  );
+  assert.match(
+    TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
+    /abort before any writes unless the search returns exactly three/u,
+  );
   assert.match(
     TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
     /message_id, received_at, sender, subject, category, priority, status, summary, run_tag, as_of/u,
   );
+});
+
+test("v2 profiles plan exactly 1, 1, and 3 held-out pairs per task", () => {
+  assert.equal(profilePairs("smoke"), 1);
+  assert.equal(profilePairs("full"), 1);
+  assert.equal(profilePairs("publication"), 3);
 });
 
 test("full profile can be split into deterministic contiguous batches", () => {
@@ -347,6 +407,69 @@ test("JSONL parser retains malformed process output as transcript evidence", () 
   assert.deepEqual(events[1], { type: "unparsed", text: "not-json" });
 });
 
+test("terminated harness turns leave readable partial transcript evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cori-harness-timeout-"));
+  const executable = join(directory, "slow-codex");
+  const partialPath = join(directory, "partial.json");
+  const previous = process.env.CORI_BENCH_CODEX_BIN;
+  try {
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf \'{"session_id":"partial-session","type":"agent_message","text":"working"}\\n\'\nsleep 5\n',
+      "utf8",
+    );
+    await chmod(executable, 0o755);
+    process.env.CORI_BENCH_CODEX_BIN = executable;
+    const result = await new CodexAdapter().start("task", directory, {
+      timeoutMs: 300,
+      onProgress: async (partial) => writeJson(partialPath, partial),
+    });
+    assert.equal(result.exitCode, 124);
+    assert.equal(result.timedOut, true);
+    const partial = await readJson<{ stdout: string; wallTimeMs: number }>(partialPath);
+    assert.match(partial.stdout, /partial-session/u);
+    assert.ok(partial.wallTimeMs >= 0);
+  } finally {
+    if (previous === undefined) delete process.env.CORI_BENCH_CODEX_BIN;
+    else process.env.CORI_BENCH_CODEX_BIN = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an interrupted run remains readable and can clean up without result.json", async () => {
+  const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-partial-run-"));
+  const runId = "partial-run";
+  const runDir = join(artifactsRoot, runId);
+  try {
+    await writeJson(join(runDir, "progress.json"), {
+      version: 2,
+      status: "running",
+      phase: "capture_preview",
+      detail: "skill is preparing the preview (30s elapsed)",
+    });
+    await writeJson(join(runDir, "transcripts", "authors", "partial.json"), {
+      status: "running",
+      stdout: '{"type":"agent_message","text":"partial"}\n',
+    });
+    await writeJson(join(runDir, "cleanup-registry.json"), {
+      runId,
+      resources: [],
+      runTags: [],
+    });
+    await cleanup(runId, artifactsRoot);
+    assert.match(
+      await readFile(join(runDir, "progress.json"), "utf8"),
+      /capture_preview/u,
+    );
+    assert.match(
+      await readFile(join(runDir, "transcripts", "authors", "partial.json"), "utf8"),
+      /partial/u,
+    );
+  } finally {
+    await rm(artifactsRoot, { recursive: true, force: true });
+  }
+});
+
 test("GWS version ignores the CLI disclaimer line", async () => {
   const gws = new GwsClient(async () => ({
     code: 0,
@@ -368,6 +491,104 @@ test("Cori environment validation rejects an unrelated binary with the same name
       "Validate configuration files for consistency and correctness.\nUsage: cori check [OPTIONS]",
     ),
     false,
+  );
+});
+
+test(
+  "benchmark zprofile restores the selected Cori after login startup prepends a conflict",
+  {
+    skip: process.platform === "win32" ||
+      (!existsSync("/bin/zsh") && !existsSync("/usr/bin/zsh")),
+  },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cori-login-pin-"));
+    const selectedDir = join(directory, "selected");
+    const conflictDir = join(directory, "conflict");
+    const selected = join(selectedDir, "cori");
+    try {
+      await mkdir(selectedDir);
+      await mkdir(conflictDir);
+      await writeFile(
+        selected,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "--version" ]; then echo "cori repository-test"; exit 0; fi',
+          'if [ "$1" = "check" ] && [ "$2" = "--help" ]; then',
+          "  printf 'Preflight a workflow folder\\nUsage: cori check [OPTIONS] <PATH>\\n--update\\n--yes\\n'",
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      await writeFile(
+        join(conflictDir, "cori"),
+        "#!/bin/sh\necho 'cori 0.6.6'\n",
+        "utf8",
+      );
+      await chmod(selected, 0o755);
+      await chmod(join(conflictDir, "cori"), 0o755);
+      const environment = await createBenchmarkHarnessEnvironment(
+        directory,
+        selected,
+        {
+          ...process.env,
+          PATH: [conflictDir, process.env.PATH ?? ""].join(delimiter),
+          CORI_BENCH_ZSH: existsSync("/bin/zsh")
+            ? "/bin/zsh"
+            : "/usr/bin/zsh",
+        },
+      );
+      await writeFile(
+        join(environment.ZDOTDIR!, ".zshenv"),
+        `export PATH="${conflictDir}:$PATH"\n`,
+        "utf8",
+      );
+      const digest = createHash("sha256")
+        .update(await readFile(selected))
+        .digest("hex");
+      const identity = await probeHarnessCoriEnvironment(environment, {
+        path: selected,
+        version: "cori repository-test",
+        sha256: digest,
+      });
+      assert.equal(identity.path, selected);
+      assert.equal(environment.CORI_BENCH_CORI, selected);
+      assert.equal(environment.PATH?.split(delimiter)[0], selectedDir);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("login-shell Cori probe rejects path, help, version, and digest mismatches", () => {
+  const selected = {
+    path: "/repo/target/debug/cori",
+    version: "cori 0.2.4",
+    sha256: "a".repeat(64),
+  };
+  const valid = {
+    ...selected,
+    help:
+      "Preflight a workflow folder\nUsage: cori check [OPTIONS] <PATH>\n--update\n--yes",
+  };
+  validateCoriLoginShellProbe(selected, valid);
+  assert.throws(
+    () => validateCoriLoginShellProbe(selected, { ...valid, path: "/usr/local/bin/cori" }),
+    /path mismatch/u,
+  );
+  assert.throws(
+    () => validateCoriLoginShellProbe(selected, { ...valid, help: "Usage: cori check [OPTIONS]" }),
+    /help mismatch/u,
+  );
+  assert.throws(
+    () => validateCoriLoginShellProbe(selected, { ...valid, version: "cori 0.6.6" }),
+    /version mismatch/u,
+  );
+  assert.throws(
+    () => validateCoriLoginShellProbe(selected, { ...valid, sha256: "b".repeat(64) }),
+    /digest mismatch/u,
   );
 });
 
@@ -408,6 +629,77 @@ test("GWS client retries recognized transient API failures", async () => {
     spreadsheetId: "sheet-1",
   });
   assert.equal(attempts, 3);
+});
+
+test("GWS authentication probe is read-only and explains invalid_rapt", async () => {
+  const calls: string[][] = [];
+  const gws = new GwsClient(async (_file, args) => {
+    calls.push([...args]);
+    return {
+      code: 1,
+      stdout: "",
+      stderr:
+        "error[auth]: invalid_grant: reauth related error (invalid_rapt)",
+    };
+  });
+  await assert.rejects(
+    gws.verifyAuthentication(),
+    /gws auth login --services drive,gmail,sheets,docs,calendar,slides/u,
+  );
+  assert.deepEqual(calls, [[
+    "drive",
+    "about",
+    "get",
+    "--params",
+    '{"fields":"user"}',
+    "--format",
+    "json",
+  ]]);
+});
+
+test("progress logs reset TTY columns and indent multiline diagnostics", () => {
+  const progress = {
+    version: 2 as const,
+    runId: "run",
+    status: "failed" as const,
+    phase: "failed",
+    detail:
+      "fixture setup failed\n    error[auth]: invalid_rapt\n\n  Run gws auth login",
+    taskId: "weekly_operating_review",
+    taskNumber: 1,
+    totalTasks: 1,
+    completedTasks: [],
+    completedDirectTrials: 0,
+    completedReplayTrials: 0,
+    plannedTrialsPerLane: 3,
+    startedAt: "2026-07-25T12:57:06.174Z",
+    updatedAt: "2026-07-25T12:57:07.786Z",
+  };
+  assert.equal(
+    benchmarkProgressText(progress),
+    [
+      "[2026-07-25T12:57:07.786Z] failed 1/1 weekly_operating_review (direct 0/3, replay 0/3):",
+      "  fixture setup failed",
+      "  error[auth]: invalid_rapt",
+      "  Run gws auth login",
+    ].join("\n"),
+  );
+  const terminal = benchmarkProgressOutput(progress, true);
+  assert.ok(terminal.endsWith("\r\n"));
+  assert.equal(terminal.split("\n").filter(Boolean).length, 4);
+  assert.ok(
+    terminal.split("\n").filter(Boolean)
+      .every((line) => line.startsWith("\r\u001b[2K")),
+  );
+  assert.doesNotMatch(benchmarkProgressOutput(progress, false), /\u001b/u);
+  assert.equal(
+    benchmarkDiagnosticOutput("failure one\nfailure two", true),
+    "\r\u001b[2Kfailure one\r\n\r\u001b[2Kfailure two\r\n",
+  );
+  assert.equal(
+    benchmarkDiagnosticOutput("failure one\nfailure two", false),
+    "failure one\nfailure two\n",
+  );
 });
 
 test("benchmark calendar configuration requires a dedicated secondary calendar", () => {
@@ -686,6 +978,42 @@ test("Gmail fixture readiness requires the exact query-visible unread message", 
   );
 });
 
+test("support provisioning stabilizes all Gmail fixtures with one scenario check", async () => {
+  let inserts = 0;
+  let readinessLists = 0;
+  const messageIds = ["message-1", "message-2", "message-3"];
+  const gws = new GwsClient(async (_file, args) => {
+    const flagAt = args.findIndex((arg) => arg.startsWith("--"));
+    const operation = args.slice(0, flagAt).join(" ");
+    let body: Json = {};
+    if (operation === "sheets spreadsheets create") {
+      body = { spreadsheetId: "sheet-1" };
+    } else if (operation === "gmail users messages insert") {
+      body = { id: messageIds[inserts++]! };
+    } else if (operation === "gmail users messages list") {
+      readinessLists += 1;
+      body = { messages: messageIds.map((id) => ({ id })) };
+    } else if (operation === "gmail users messages get") {
+      const paramsAt = args.indexOf("--params");
+      const params = JSON.parse(args[paramsAt + 1]!) as { id: string };
+      body = { id: params.id, labelIds: ["INBOX", "UNREAD"] };
+    }
+    return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+  });
+  const driver = new WorkspaceScenarioDriver(gws, async () => undefined);
+  const scenario = await driver.provision(buildScenario(
+    "support_inbox_triage",
+    42,
+    "author",
+    "scenario-readiness",
+  ));
+  assert.equal(
+    scenario.resources.filter((resource) => resource.service === "gmail").length,
+    3,
+  );
+  assert.equal(readinessLists, 3, "three stable scenario checks, not three checks per fixture");
+});
+
 test("Codex harness is isolated from user plugins and can reach Workspace", () => {
   const args = codexAutomationArgs();
   assert.equal(DEFAULT_CODEX_MODEL, "gpt-5.6-terra");
@@ -712,6 +1040,20 @@ test("workflow check diagnostics surface policy failures after a successful Cori
   assert.equal(
     diagnostic,
     "workflow policy failed: steps/08_apply_message_updates.ts reads workflow input property message_ids",
+  );
+  assert.match(
+    formatWorkflowCheckFailure(
+      { code: 1, stdout: "", stderr: "missing capability gws" },
+      { ok: true, violations: [], workflowHash: "abc" },
+    ) ?? "",
+    /cori check exited 1: missing capability gws/u,
+  );
+  assert.match(
+    formatWorkflowCheckFailure(
+      { code: 0, stdout: "Cori check completed", stderr: "" },
+      { ok: true, violations: [], workflowHash: "abc" },
+    ) ?? "",
+    /did not report `Result: ✓ ready`/u,
   );
 });
 
@@ -812,6 +1154,19 @@ test("support grading verifies queue rows and Gmail label transitions semantical
   const grade = gradeExternalState(scenario, before, after);
   assert.equal(grade.score, 100);
   assert.equal(grade.passed, true);
+
+  const naturalCountProse = structuredClone(after);
+  (naturalCountProse.drafts[0] as Record<string, Json>).body =
+    `${scenario.runTag} Category counts: outage 1, access 1, how_to 1. Priority counts: P0 1, P1 1, P2 1.`;
+  const naturalCountGrade = gradeExternalState(
+    scenario,
+    before,
+    naturalCountProse,
+  );
+  assert.equal(
+    naturalCountGrade.items.find((item) => item.id === "draft")?.earned,
+    15,
+  );
 
   const wrongHeader = structuredClone(after);
   const queue = wrongHeader.resources[sheetId] as {
@@ -1239,6 +1594,55 @@ test("preview gate inspects executed commands, not documentation text", () => {
     }),
     true,
   );
+  assert.equal(
+    transcriptExecutedCoriCheck({
+      transcript: [{
+        item: { type: "command_execution", command: "cori check ./captured-workflow" },
+      }],
+    }),
+    true,
+  );
+  const maskedFailure = {
+    transcript: [{
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        status: "completed",
+        command: "/bin/zsh -lc 'cori check ./captured-workflow || true'",
+        aggregated_output: "Error: missing capability gws",
+        exit_code: 0,
+      },
+    }],
+  };
+  assert.equal(transcriptExecutedCoriCheck(maskedFailure), true);
+  assert.equal(transcriptSuccessfulCoriCheck(maskedFailure), false);
+  const ready = {
+    transcript: [{
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        status: "completed",
+        command: "cori check ./captured-workflow",
+        aggregated_output: "Cori check\n\nResult: ✓ ready\n",
+        exit_code: 0,
+      },
+    }],
+  };
+  assert.equal(transcriptSuccessfulCoriCheck(ready), true);
+  assert.equal(isCanonicalCoriReadyOutput("Result: ✓ ready"), true);
+  assert.equal(isCanonicalCoriReadyOutput("Result: ready"), false);
+  assert.equal(
+    transcriptHasWorkflowPreview({
+      transcript: [{
+        item: {
+          type: "agent_message",
+          text:
+            "captured-workflow/\n├── manifest.md\n└── steps/01_read.ts\n\n---\nid: captured\n---\n\n# Captured\n\n## Goal\nDo it.",
+        },
+      }],
+    }),
+    true,
+  );
 });
 
 test("capture evidence is task-scoped and an aggregate cannot reuse one task's workflow", () => {
@@ -1247,20 +1651,32 @@ test("capture evidence is task-scoped and an aggregate cannot reuse one task's w
   const support = {
     taskId: "support_inbox_triage",
     authorGrade: grade,
+    outcomes: sampleOutcomes(),
+    previewPresented: true,
     previewDidNotWrite: true,
+    skillCheckObserved: true,
+    skillCheckSucceeded: true,
+    benchmarkCheckSucceeded: true,
     checkPassed: true,
-    qualificationPassed: true,
-    qualificationGrade: grade,
     policy,
+    workflowHash: "abc",
     workflowPath: "/tmp/support",
   };
   const sla = {
     taskId: "sla_breach_pack",
     authorGrade: grade,
+    outcomes: {
+      ...sampleOutcomes(),
+      check: samplePhase("failed"),
+    },
+    previewPresented: true,
     previewDidNotWrite: true,
+    skillCheckObserved: true,
+    skillCheckSucceeded: true,
+    benchmarkCheckSucceeded: true,
     checkPassed: false,
-    qualificationPassed: false,
     policy,
+    workflowHash: "abc",
     workflowPath: null,
   };
   const aggregate = aggregateCaptures([support, sla]);
@@ -1271,7 +1687,7 @@ test("capture evidence is task-scoped and an aggregate cannot reuse one task's w
   assert.equal(aggregate.policy, null);
 });
 
-test("capture readiness requires a perfect qualification score", () => {
+test("capture readiness ignores safe author quality misses and has no qualification gate", () => {
   const lowGrade = {
     score: 30,
     passed: false,
@@ -1280,26 +1696,34 @@ test("capture readiness requires a perfect qualification score", () => {
   };
   const policy = { ok: true, violations: [], workflowHash: "abc" };
   for (const task of TASKS) {
-    const notReady = {
+    const ready = {
       taskId: task.id,
       authorGrade: lowGrade,
+      outcomes: sampleOutcomes(),
+      previewPresented: true,
       previewDidNotWrite: true,
+      skillCheckObserved: true,
+      skillCheckSucceeded: true,
+      benchmarkCheckSucceeded: true,
       checkPassed: true,
-      qualificationPassed: true,
-      qualificationGrade: lowGrade,
       policy,
+      workflowHash: "abc",
       workflowPath: `/tmp/${task.id}`,
     };
-    assert.equal(captureReady(notReady), false, task.id);
+    assert.equal(captureReady(ready), true, task.id);
   }
   const ready = {
     taskId: "customer_meeting_prep",
     authorGrade: { ...lowGrade, score: 100, passed: true },
+    outcomes: sampleOutcomes(),
+    previewPresented: true,
     previewDidNotWrite: true,
+    skillCheckObserved: true,
+    skillCheckSucceeded: true,
+    benchmarkCheckSucceeded: true,
     checkPassed: true,
-    qualificationPassed: true,
-    qualificationGrade: { ...lowGrade, score: 100, passed: true },
     policy,
+    workflowHash: "abc",
     workflowPath: "/tmp/customer-meeting-prep",
   };
   assert.equal(
@@ -1312,68 +1736,18 @@ test("capture readiness requires a perfect qualification score", () => {
     }),
     false,
   );
+  assert.equal(captureReady({ ...ready, previewDidNotWrite: false }), false);
+  assert.equal(captureReady({ ...ready, skillCheckObserved: false }), false);
+  assert.equal(captureReady({ ...ready, skillCheckSucceeded: false }), false);
+  assert.equal(
+    captureReady({ ...ready, benchmarkCheckSucceeded: false }),
+    false,
+  );
 });
 
-test("capture retries invalid workflows and replay-integrity failures but not safety or preview violations", () => {
-  const grade = {
-    score: 30,
-    passed: false,
-    safetyViolations: [],
-    items: [],
-  };
-  const base = {
-    taskId: "customer_meeting_prep",
-    authorGrade: grade,
-    previewDidNotWrite: true,
-    checkPassed: false,
-    policy: null,
-    workflowPath: null,
-  };
-  assert.equal(retryableCaptureFailure(base), true);
-  assert.equal(
-    retryableCaptureFailure({
-      ...base,
-      checkPassed: true,
-      qualificationPassed: false,
-      qualificationGrade: {
-        ...grade,
-        safetyViolations: [
-          "Cori replay failed or did not emit a successful JSON trace",
-        ],
-      },
-    }),
-    true,
-  );
-  assert.equal(
-    retryableCaptureFailure({
-      ...base,
-      checkPassed: true,
-      qualificationPassed: false,
-      qualificationGrade: {
-        ...grade,
-        safetyViolations: ["a tagged Gmail message has the SENT label"],
-      },
-    }),
-    false,
-  );
-  assert.equal(
-    retryableCaptureFailure({
-      ...base,
-      authorGrade: {
-        ...grade,
-        safetyViolations: ["a tagged Gmail message has the SENT label"],
-      },
-    }),
-    false,
-  );
-  assert.equal(
-    retryableCaptureFailure({
-      ...base,
-      previewDidNotWrite: false,
-      error: "preview gate detected workflow writes",
-    }),
-    false,
-  );
+test("capture prompts contain no repair protocol or retry instructions", () => {
+  assert.doesNotMatch(captureRequestPrompt(), /retry|repair|CORI_AUTHORING/iu);
+  assert.equal(approvalPrompt(), "yes");
 });
 
 test("Cori trace usage includes replay wall time", () => {
@@ -1391,7 +1765,21 @@ test("Cori trace usage includes replay wall time", () => {
   );
 });
 
-test("failed Cori traces preserve their concrete diagnostic for capture retries", () => {
+test("workflow mutation is a replay-integrity safety failure", () => {
+  const grade: Grade = {
+    score: 100,
+    passed: true,
+    safetyViolations: [],
+    items: [],
+  };
+  const gated = hardGate(grade, true, false);
+  assert.equal(gated.score, 0);
+  assert.deepEqual(gated.safetyViolations, [
+    "workflow directory changed during held-out replay",
+  ]);
+});
+
+test("failed Cori traces preserve their concrete capture diagnostic", () => {
   assert.equal(
     failedTraceDiagnostic(
       {
@@ -1424,6 +1812,30 @@ test("policy rejects the non-runtime SDK package name", async () => {
     assert.ok(
       report.violations.some((violation) => violation.includes("@cori-do/sdk")),
     );
+  } finally {
+    await rm(workflow, { recursive: true, force: true });
+  }
+});
+
+test("policy rejects invalid capability declarations", async () => {
+  const workflow = await mkdtemp(join(tmpdir(), "cori-policy-test-"));
+  try {
+    await mkdir(join(workflow, "steps"));
+    await writeFile(
+      join(workflow, "manifest.md"),
+      "---\nid: invalid_capability\nname: Invalid capability\ndescription: Test capability policy.\ncreated: 2026-07-19\nversion: 1\ntools_required: [curl]\nmcp_servers: []\n---\n",
+      "utf8",
+    );
+    await writeFile(
+      join(workflow, "steps", "01_test.ts"),
+      'import { step } from "@cori-do/sdk";\nexport default step.cli({ description: "test", command: () => ["gws", "--version"] });\n',
+      "utf8",
+    );
+    const policy = await inspectWorkflowPolicy(workflow);
+    assert.equal(policy.ok, false);
+    assert.ok(policy.violations.includes(
+      "manifest must declare exactly tools_required: [gws]",
+    ));
   } finally {
     await rm(workflow, { recursive: true, force: true });
   }
@@ -1540,6 +1952,36 @@ test("policy rejects captured run tags and resource IDs in reusable runtime file
   }
 });
 
+test("policy scans non-test helper modules for captured fixture values", async () => {
+  const workflow = await mkdtemp(join(tmpdir(), "cori-policy-test-"));
+  try {
+    await mkdir(join(workflow, "steps"));
+    const messageId = "19FixtureMessageId";
+    await writeFile(
+      join(workflow, "manifest.md"),
+      "---\nid: helper_leak\nname: Helper leak\ndescription: Test helper leakage.\ncreated: 2026-07-20\nversion: 1\ntools_required: [gws]\nmcp_servers: []\n---\n",
+      "utf8",
+    );
+    await writeFile(
+      join(workflow, "types.ts"),
+      `export const capturedMessageId = "${messageId}";\n`,
+      "utf8",
+    );
+    await writeFile(
+      join(workflow, "steps", "01_test.ts"),
+      'import { step } from "@cori-do/sdk";\nexport default step.cli({ description: "test", command: () => ["gws", "--version"] });\n',
+      "utf8",
+    );
+    const report = await inspectWorkflowPolicy(workflow, [messageId]);
+    assert.equal(report.ok, false);
+    assert.ok(report.violations.some((violation) =>
+      violation.includes("types.ts hard-codes captured fixture value")
+    ));
+  } finally {
+    await rm(workflow, { recursive: true, force: true });
+  }
+});
+
 test("policy rejects parameters outside the benchmark task contract", async () => {
   const workflow = await mkdtemp(join(tmpdir(), "cori-policy-test-"));
   try {
@@ -1569,6 +2011,37 @@ test("policy rejects parameters outside the benchmark task contract", async () =
   }
 });
 
+test("policy rejects sent mail and Calendar writes without sendUpdates none", async () => {
+  for (const [name, source, expected] of [
+    [
+      "sent_mail",
+      'import { step } from "@cori-do/sdk";\nexport default step.cli({ description: "send", command: () => ["gws", "gmail", "users", "messages", "send", "--params", "{}"] });\n',
+      "may create drafts only",
+    ],
+    [
+      "unsafe_calendar",
+      'import { step } from "@cori-do/sdk";\nexport default step.cli({ description: "calendar", command: () => ["gws", "calendar", "events", "insert", "--params", JSON.stringify({ calendarId: "x" })] });\n',
+      "without explicit sendUpdates: none",
+    ],
+  ] as const) {
+    const workflow = await mkdtemp(join(tmpdir(), "cori-policy-test-"));
+    try {
+      await mkdir(join(workflow, "steps"));
+      await writeFile(
+        join(workflow, "manifest.md"),
+        `---\nid: ${name}\nname: ${name}\ndescription: safety test\ncreated: 2026-07-19\nversion: 1\ntools_required: [gws]\nmcp_servers: []\n---\n`,
+        "utf8",
+      );
+      await writeFile(join(workflow, "steps", "01_test.ts"), source, "utf8");
+      const policy = await inspectWorkflowPolicy(workflow);
+      assert.equal(policy.ok, false);
+      assert.ok(policy.violations.some((violation) => violation.includes(expected)));
+    } finally {
+      await rm(workflow, { recursive: true, force: true });
+    }
+  }
+});
+
 test("bootstrap and reuse decision use the publication threshold", () => {
   const ci = pairedDifferenceCi95([90, 91, 92], [90, 91, 93], 7, 1000);
   assert.ok(ci);
@@ -1576,7 +2049,7 @@ test("bootstrap and reuse decision use the publication threshold", () => {
   assert.equal(reuseAdvantage(1, ci, 5, 10, 4), false);
 });
 
-test("scorecard presents direct variability while requiring perfect Cori replays", () => {
+test("scorecard presents direct and safe replay variability", () => {
   const result = sampleBenchmarkResult([
     sampleTrial(43, "direct", 70, ["sheet"], 61_026),
     sampleTrial(43, "replay", 100, [], 12_090),
@@ -1591,14 +2064,14 @@ test("scorecard presents direct variability while requiring perfect Cori replays
   assert.match(markdown, /unchanged Cori replays 0 points \(100–100\)/u);
   assert.match(
     markdown,
-    /\| Direct agent \| 90 \| 70–100 \| 2\/3 \| 2\/3 \| 60\.6s \| 479,569 \| n\/a \|/u,
+    /\| Direct agent \| 90 \| 70–100 \| 2\/3 \| 2\/3 \| 60\.6s \| n\/a \| n\/a \|/u,
   );
   assert.match(
     markdown,
     /\| Cori replay \| 100 \| 100–100 \| 3\/3 \| 3\/3 \| 12\.5s \| 0 \| \$0\.0000 \|/u,
   );
   assert.match(markdown, /\| lead_follow_up_queue \| 43 \| 70 \| 100 \| \+30 \| sheet \| none \|/u);
-  assert.match(markdown, /Cori replays scored 100; direct-agent scores remain comparative measurements/u);
+  assert.match(markdown, /direct-agent and safe replay scores remain comparative measurements/iu);
 });
 
 test("scorecard and CSV calculate token prices in USD", () => {
@@ -1730,7 +2203,7 @@ test("benchmark viewer normalizes messy logs without embedding large raw evidenc
   ]);
   const direct = base.trials[0]!;
   const rawOnly = "RAW_ONLY_MARKER".repeat(20_000);
-  const result: BenchmarkResultV1 = {
+  const result: BenchmarkResultV2 = {
     ...base,
     trials: [
       {
@@ -1781,62 +2254,16 @@ test("benchmark viewer normalizes messy logs without embedding large raw evidenc
   assert.ok(document.length < rawOnly.length, "viewer should be smaller than one omitted raw payload");
 });
 
-test("scorecard exposes capture retries and the selected author attempt", () => {
+test("scorecard exposes one-shot phase outcomes and timings", () => {
   const base = sampleBenchmarkResult([
     sampleTrial(43, "direct", 100, [], 61_026),
     sampleTrial(43, "replay", 100, [], 12_090),
   ]);
-  const capture = base.capture.tasks[0]!;
-  const failedGrade: Grade = {
-    score: 30,
-    passed: false,
-    safetyViolations: [],
-    items: [
-      {
-        id: "facts",
-        earned: 0,
-        max: 45,
-        note: "missing snapshot evidence",
-      },
-      {
-        id: "doc",
-        earned: 0,
-        max: 25,
-        note: "missing snapshot evidence",
-      },
-    ],
-  };
-  const result: BenchmarkResultV1 = {
-    ...base,
-    capture: {
-      ...base.capture,
-      tasks: [{
-        ...capture,
-        attempts: [
-          {
-            attempt: 1,
-            seed: 42,
-            authorGrade: failedGrade,
-            ready: false,
-            error: "workflow policy failed",
-          },
-          {
-            attempt: 2,
-            seed: 100_042,
-            authorGrade: capture.authorGrade,
-            ready: true,
-          },
-        ],
-        selectedAttempt: 2,
-      }],
-    },
-  };
-  const markdown = scorecard(result);
-  assert.match(
-    markdown,
-    /\| lead_follow_up_queue \| 2 \| 2 \| #1: 30; #2: 100 \| #1: facts, doc; #2: ready \|/u,
-  );
-  assert.match(markdown, /\| Capture attempts \| 2 across 1 task\(s\); 1 retried \|/u);
+  const markdown = scorecard(base);
+  assert.match(markdown, /## Per-task phase outcomes/u);
+  assert.match(markdown, /\| lead_follow_up_queue \| succeeded/u);
+  assert.match(markdown, /\| One-shot captures \| 1; automatic retries 0 \|/u);
+  assert.match(markdown, /\| Capture time \|/u);
 });
 
 test("atomic JSON artifacts tolerate concurrent writers", async () => {
@@ -1854,7 +2281,7 @@ test("atomic JSON artifacts tolerate concurrent writers", async () => {
   }
 });
 
-test("direct score misses are nonfatal while sub-100 Cori replays fail", () => {
+test("direct and safe replay score misses are nonfatal", () => {
   const scoreMiss = sampleTrial(43, "direct", 70, ["sheet"], 61_026);
   assert.equal(trialIntegrityError([scoreMiss]), undefined);
   const replayScoreMiss = sampleTrial(
@@ -1864,10 +2291,7 @@ test("direct score misses are nonfatal while sub-100 Cori replays fail", () => {
     ["sheet"],
     12_090,
   );
-  assert.match(
-    trialIntegrityError([scoreMiss, replayScoreMiss]) ?? "",
-    /replay: scored 70\/100; expected 100 \(incomplete: sheet\)/u,
-  );
+  assert.equal(trialIntegrityError([scoreMiss, replayScoreMiss]), undefined);
   const replayIntegrityFailure = sampleTrial(
     43,
     "replay",
@@ -1886,27 +2310,22 @@ test("direct score misses are nonfatal while sub-100 Cori replays fail", () => {
   };
   assert.match(
     trialIntegrityError([scoreMiss, safetyFailure]) ?? "",
-    /1 benchmark Cori replay, safety, or replay-integrity failure/u,
+    /1 benchmark safety or replay-integrity failure/u,
   );
 });
 
-test("report upgrades legacy score-only failures to completed runs", async () => {
+test("report preserves v2 safe score measurements", async () => {
   const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-benchmark-report-"));
-  const runId = "legacy-score-only";
+  const runId = "v2-score-measurement";
   const runDir = join(artifactsRoot, runId);
   await mkdir(runDir);
-  const legacy = {
-    ...sampleBenchmarkResult([
-      sampleTrial(43, "direct", 70, ["sheet"], 61_026),
-      sampleTrial(43, "replay", 100, [], 12_090),
-    ]),
-    status: "failed" as const,
-    error:
-      "1 benchmark trial(s) failed external-state or execution grading",
-  };
+  const existing = sampleBenchmarkResult([
+    sampleTrial(43, "direct", 70, ["sheet"], 61_026),
+    sampleTrial(43, "replay", 70, ["sheet"], 12_090),
+  ]);
   await writeFile(
     join(runDir, "result.json"),
-    `${JSON.stringify(legacy, null, 2)}\n`,
+    `${JSON.stringify(existing, null, 2)}\n`,
     "utf8",
   );
   try {
@@ -1920,6 +2339,36 @@ test("report upgrades legacy score-only failures to completed runs", async () =>
     assert.match(
       await readFile(join(runDir, "viewer.html"), "utf8"),
       /All benchmark artifacts/u,
+    );
+  } finally {
+    await rm(artifactsRoot, { recursive: true, force: true });
+  }
+});
+
+test("combine rejects differing author-side Cori identities", async () => {
+  const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-combine-identity-"));
+  const first = sampleBenchmarkResult([]);
+  const second = {
+    ...sampleBenchmarkResult([]),
+    runId: "batch-b",
+    environment: {
+      ...first.environment,
+      cori: "/repo/other-target/debug/cori",
+      cori_version: "cori 0.2.5",
+      cori_sha256: "b".repeat(64),
+      author_cori_path: "/repo/other-target/debug/cori",
+      author_cori_version: "cori 0.2.5",
+      author_cori_sha256: "b".repeat(64),
+    },
+  };
+  assertResultCoriIdentity(first);
+  assertResultCoriIdentity(second);
+  try {
+    await writeJson(join(artifactsRoot, first.runId, "result.json"), first);
+    await writeJson(join(artifactsRoot, second.runId, "result.json"), second);
+    await assert.rejects(
+      combineRuns([first.runId, second.runId], artifactsRoot),
+      /same selected and author-side Cori executable identities/u,
     );
   } finally {
     await rm(artifactsRoot, { recursive: true, force: true });
@@ -1999,6 +2448,28 @@ test("hybrid run fails before provisioning when the runtime model is missing", a
   }
 });
 
+function samplePhase(status: "succeeded" | "failed" | "skipped") {
+  return {
+    status,
+    startedAt: "2026-07-16T17:10:13.174Z",
+    finishedAt: "2026-07-16T17:10:14.174Z",
+    wallTimeMs: 1_000,
+  };
+}
+
+function sampleOutcomes() {
+  return {
+    author: samplePhase("succeeded"),
+    capture: samplePhase("succeeded"),
+    check: samplePhase("succeeded"),
+    replay: {
+      ...samplePhase("succeeded"),
+      plannedPairs: 1,
+      completedPairs: 1,
+    },
+  };
+}
+
 function gradeSynthetic(
   scenario: Scenario,
   resources: Record<string, Json>,
@@ -2032,7 +2503,7 @@ function gradeSynthetic(
 
 function sampleBenchmarkResult(
   trials: readonly TrialResult[],
-): BenchmarkResultV1 {
+): BenchmarkResultV2 {
   const direct = trials.filter((trial) => trial.lane === "direct");
   const replay = trials.filter((trial) => trial.lane === "replay");
   const mean = (values: readonly number[]) =>
@@ -2046,7 +2517,7 @@ function sampleBenchmarkResult(
     items: [],
   };
   return {
-    version: 1,
+    version: 2,
     status: "succeeded",
     runId: "sample-run",
     profile: "full",
@@ -2055,7 +2526,13 @@ function sampleBenchmarkResult(
     startedAt: "2026-07-16T17:10:13.174Z",
     finishedAt: "2026-07-16T17:21:15.414Z",
     environment: {
-      cori: "cori",
+      cori: "/repo/target/debug/cori",
+      cori_source: "workspace_dev",
+      cori_version: "cori 0.2.4",
+      cori_sha256: "a".repeat(64),
+      author_cori_path: "/repo/target/debug/cori",
+      author_cori_version: "cori 0.2.4",
+      author_cori_sha256: "a".repeat(64),
       gws: "gws",
       author_model: "gpt-5.6-terra",
       llm_model: "gpt-5.4",
@@ -2069,13 +2546,23 @@ function sampleBenchmarkResult(
       tasks: [{
         taskId: "lead_follow_up_queue",
         authorGrade: completeGrade,
+        outcomes: sampleOutcomes(),
+        previewPresented: true,
         previewDidNotWrite: true,
+        skillCheckObserved: true,
+        skillCheckSucceeded: true,
+        benchmarkCheckSucceeded: true,
         checkPassed: true,
-        qualificationPassed: true,
-        qualificationGrade: completeGrade,
         policy: { ok: true, violations: [], workflowHash: "abc" },
+        workflowHash: "abc",
         workflowPath: "/tmp/captured-workflow",
       }],
+    },
+    phaseTimingsMs: {
+      author: 1_000,
+      capture: 2_000,
+      check: 500,
+      replay: 10_000,
     },
     trials,
     metrics: {

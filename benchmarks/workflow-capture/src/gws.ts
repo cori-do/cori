@@ -7,9 +7,15 @@ export interface ProcessResult {
   code: number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
-export type ProcessRunner = (file: string, args: readonly string[], cwd?: string) => Promise<ProcessResult>;
+export type ProcessRunner = (
+  file: string,
+  args: readonly string[],
+  cwd?: string,
+  environment?: NodeJS.ProcessEnv,
+) => Promise<ProcessResult>;
 
 export const benchmarkCalendarEnv = "CORI_BENCH_CALENDAR_ID";
 
@@ -33,15 +39,54 @@ export function requireBenchmarkCalendarId(): string {
   return calendarId;
 }
 
-export const runProcess: ProcessRunner = (file, args, cwd) => new Promise((resolve, reject) => {
-  const child = spawn(file, [...args], { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+export const runProcess: ProcessRunner = (file, args, cwd, environment) => new Promise((resolve, reject) => {
+  const child = spawn(file, [...args], {
+    cwd,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+    env: environment,
+  });
   let stdout = "";
   let stderr = "";
+  let timedOut = false;
+  const timeoutMs = phaseProcessTimeoutMs();
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    stderr += `\nprocess timed out after ${timeoutMs}ms\n`;
+    terminateProcessTree(child, "SIGTERM");
+    setTimeout(() => terminateProcessTree(child, "SIGKILL"), 2_000).unref();
+  }, timeoutMs);
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
   child.once("error", reject);
-  child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  child.once("close", (code) => {
+    clearTimeout(deadline);
+    resolve({ code: timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
+  });
 });
+
+function terminateProcessTree(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    // The process may already be gone.
+  }
+}
+
+function phaseProcessTimeoutMs(): number {
+  const configured = Number(process.env.CORI_BENCH_PROCESS_TIMEOUT_MS ?? "300000");
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : 300_000;
+}
 
 export class GwsClient {
   constructor(
@@ -60,7 +105,7 @@ export class GwsClient {
       result = await this.runner(this.binary, args);
       if (result.code === 0) break;
       if (!isTransientGwsFailure(result) || attempt === 3) {
-        throw new Error(`gws ${path.join(" ")} failed (${result.code}): ${result.stderr || result.stdout}`);
+        throw new Error(gwsFailureMessage(path, result));
       }
       await this.sleep(500 * 2 ** (attempt - 1));
     }
@@ -79,6 +124,14 @@ export class GwsClient {
     return result.stdout.split(/\r?\n/u).map((line) => line.trim()).find(Boolean) ?? "";
   }
 
+  /** Read-only token refresh probe used before provisioning any fixture. */
+  async verifyAuthentication(): Promise<void> {
+    await this.call(
+      ["drive", "about", "get"],
+      { fields: "user" },
+    );
+  }
+
   /** A namespaced spreadsheet that is immediately trashed; only used by explicit preflight. */
   async canary(runTag: string): Promise<void> {
     const created = await this.call(["sheets", "spreadsheets", "create"], undefined, {
@@ -88,6 +141,22 @@ export class GwsClient {
     const id = stringField(created, "spreadsheetId");
     await this.call(["drive", "files", "update"], { fileId: id }, { trashed: true });
   }
+}
+
+function gwsFailureMessage(
+  path: readonly string[],
+  result: ProcessResult,
+): string {
+  const diagnostic = (result.stderr || result.stdout).trim();
+  const prefix = `gws ${path.join(" ")} failed (${result.code})`;
+  if (/(?:invalid_rapt|reauth related error)/iu.test(diagnostic)) {
+    return [
+      `${prefix}: Google Workspace rejected the cached OAuth session and requires reauthentication (invalid_rapt).`,
+      "Run `gws auth login --services drive,gmail,sheets,docs,calendar,slides` in an interactive terminal, then rerun the benchmark.",
+      `Original diagnostic: ${diagnostic}`,
+    ].join("\n");
+  }
+  return `${prefix}: ${diagnostic}`;
 }
 
 function isTransientGwsFailure(result: ProcessResult): boolean {
@@ -140,6 +209,12 @@ export class WorkspaceScenarioDriver {
         resources.push({ ...created, role: blueprint.role });
         if (blueprint.parameter) parameters[blueprint.parameter] = created.id;
       }
+      const gmailIds = resources.filter((resource) =>
+        resource.service === "gmail"
+      ).map((resource) => resource.id);
+      if (gmailIds.length > 0) {
+        await this.waitForUnreadMessages(gmailIds, scenario.runTag);
+      }
     } catch (error) {
       await this.cleanup(resources).catch(() => undefined);
       if (task.requiredServices.includes("calendar")) {
@@ -161,22 +236,41 @@ export class WorkspaceScenarioDriver {
     for (const resource of scenario.resources) {
       if (resource.id.startsWith("pending-")) throw new Error(`scenario ${scenario.id} is not provisioned`);
       if (resource.service === "sheets") {
-        resources[resource.id] = await this.gws.call(["sheets", "spreadsheets", "get"], { spreadsheetId: resource.id, includeGridData: true });
+        resources[resource.id] = await this.gws.call(["sheets", "spreadsheets", "get"], {
+          spreadsheetId: resource.id,
+          includeGridData: true,
+          fields:
+            "sheets(properties(title),data(rowData(values(formattedValue,effectiveValue))))",
+        });
       } else if (resource.service === "docs") {
-        resources[resource.id] = await this.gws.call(["docs", "documents", "get"], { documentId: resource.id });
+        resources[resource.id] = await this.gws.call(["docs", "documents", "get"], {
+          documentId: resource.id,
+          fields: "documentId,title,body/content",
+        });
       } else if (resource.service === "slides") {
-        resources[resource.id] = await this.gws.call(["slides", "presentations", "get"], { presentationId: resource.id });
+        resources[resource.id] = await this.gws.call(["slides", "presentations", "get"], {
+          presentationId: resource.id,
+          fields:
+            "presentationId,title,slides(objectId,pageElements(shape/text/textElements/textRun/content))",
+        });
       } else if (resource.service === "calendar") {
         const events = await this.gws.call(["calendar", "events", "list"], {
           calendarId: resource.id,
           q: scenario.runTag,
           singleEvents: false,
           showDeleted: false,
+          fields:
+            "items(id,summary,description,eventType,start,end,htmlLink,attendees)",
         });
         resources[resource.id] = events;
         calendarEvents.push(events);
       } else if (resource.service === "gmail") {
-        resources[resource.id] = await this.gws.call(["gmail", "users", "messages", "get"], { userId: "me", id: resource.id, format: "full" });
+        resources[resource.id] = await this.gws.call(["gmail", "users", "messages", "get"], {
+          userId: "me",
+          id: resource.id,
+          format: "full",
+          fields: "id,labelIds,internalDate,payload,snippet",
+        });
       } else {
         resources[resource.id] = await this.gws.call(["drive", "files", "get"], { fileId: resource.id });
       }
@@ -185,18 +279,30 @@ export class WorkspaceScenarioDriver {
     const listed = await this.taggedResults(
       () => this.gws.call(
         ["gmail", "users", "drafts", "list"],
-        { userId: "me", q: `"${scenario.runTag}"` },
+        { userId: "me", q: `"${scenario.runTag}"`, fields: "drafts(id,message(id,threadId))" },
       ),
       "drafts",
       options.settleTaggedOutputs === true ? 1 : 0,
     );
     resources[`__drafts_${scenario.id}`] = listed;
     for (const draftId of draftIds(listed)) {
-      drafts.push(await this.gws.call(["gmail", "users", "drafts", "get"], { userId: "me", id: draftId, format: "full" }));
+      drafts.push(await this.gws.call(["gmail", "users", "drafts", "get"], {
+        userId: "me",
+        id: draftId,
+        format: "full",
+        fields: "id,message(id,labelIds,payload,snippet,threadId)",
+      }));
     }
-    resources[`__sent_${scenario.id}`] = await this.gws.call(["gmail", "users", "messages", "list"], { userId: "me", q: `label:SENT "${scenario.runTag}"` });
+    resources[`__sent_${scenario.id}`] = await this.gws.call(["gmail", "users", "messages", "list"], {
+      userId: "me",
+      q: `label:SENT "${scenario.runTag}"`,
+      fields: "messages(id,threadId)",
+    });
     if (scenario.taskId === "support_inbox_triage") {
-      resources[`__labels_${scenario.id}`] = await this.gws.call(["gmail", "users", "labels", "list"], { userId: "me" });
+      resources[`__labels_${scenario.id}`] = await this.gws.call(["gmail", "users", "labels", "list"], {
+        userId: "me",
+        fields: "labels(id,name,type)",
+      });
     }
     const taggedDrive = await this.taggedResults(
       () => this.gws.call(
@@ -216,12 +322,63 @@ export class WorkspaceScenarioDriver {
     for (const file of objectsFrom(taggedDrive, "files")) {
       if (typeof file.id !== "string" || typeof file.mimeType !== "string") continue;
       if (file.mimeType === "application/vnd.google-apps.document") {
-        resources[`__drive_file_${file.id}`] = await this.gws.call(["docs", "documents", "get"], { documentId: file.id });
+        resources[`__drive_file_${file.id}`] = await this.gws.call(["docs", "documents", "get"], {
+          documentId: file.id,
+          fields: "documentId,title,body/content",
+        });
       } else if (file.mimeType === "application/vnd.google-apps.presentation") {
-        resources[`__drive_file_${file.id}`] = await this.gws.call(["slides", "presentations", "get"], { presentationId: file.id });
+        resources[`__drive_file_${file.id}`] = await this.gws.call(["slides", "presentations", "get"], {
+          presentationId: file.id,
+          fields:
+            "presentationId,title,slides(objectId,pageElements(shape/text/textElements/textRun/content))",
+        });
       }
     }
-    return { capturedAt: new Date().toISOString(), resources, drafts, calendarEvents };
+    return {
+      capturedAt: new Date().toISOString(),
+      source: "workspace",
+      resources,
+      drafts,
+      calendarEvents,
+    };
+  }
+
+  /** Canonical state of a fixture immediately after provisioning, with no API reads. */
+  baselineSnapshot(scenario: Scenario): WorkspaceSnapshot {
+    const resources: Record<string, Json> = {};
+    const calendarEvents: Json[] = [];
+    scenario.resources.forEach((resource, index) => {
+      const fixture = scenario.fixtures[index];
+      if (!fixture) return;
+      if (resource.service === "sheets") {
+        resources[resource.id] = gridFixture(fixture.table ?? []);
+      } else if (resource.service === "gmail") {
+        resources[resource.id] = { id: resource.id, labelIds: ["INBOX", "UNREAD"] };
+      } else if (resource.service === "calendar") {
+        const events = { items: fixture.events ?? [] };
+        resources[resource.id] = events;
+        calendarEvents.push(events);
+      } else if (resource.service === "docs") {
+        resources[resource.id] = { documentId: resource.id, title: fixture.title, text: fixture.text ?? "" };
+      } else if (resource.service === "slides") {
+        resources[resource.id] = { presentationId: resource.id, title: fixture.title, slides: [] };
+      } else {
+        resources[resource.id] = { id: resource.id, name: fixture.title };
+      }
+    });
+    resources[`__drafts_${scenario.id}`] = {};
+    resources[`__sent_${scenario.id}`] = {};
+    resources[`__drive_${scenario.id}`] = { files: [] };
+    if (scenario.taskId === "support_inbox_triage") {
+      resources[`__labels_${scenario.id}`] = { labels: [] };
+    }
+    return {
+      capturedAt: new Date().toISOString(),
+      source: "canonical_fixture",
+      resources,
+      drafts: [],
+      calendarEvents,
+    };
   }
 
   private async taggedResults(
@@ -313,7 +470,11 @@ export class WorkspaceScenarioDriver {
         if (fixture.table) {
           await this.gws.call(
             ["sheets", "spreadsheets", "values", "update"],
-            { spreadsheetId: id, range: "Source!A1", valueInputOption: "RAW" },
+            {
+              spreadsheetId: id,
+              range: fixtureWriteRange(fixture.table),
+              valueInputOption: "RAW",
+            },
             { values: fixture.table },
           );
         }
@@ -369,7 +530,6 @@ export class WorkspaceScenarioDriver {
         await this.gws.call(["gmail", "users", "messages", "modify"], { userId: "me", id }, {
           addLabelIds: ["INBOX", "UNREAD"],
         });
-        await this.waitForUnreadMessage(id, runTag);
       } catch (error) {
         await this.gws.call(["gmail", "users", "messages", "trash"], { userId: "me", id }).catch(() => undefined);
         throw error;
@@ -379,26 +539,46 @@ export class WorkspaceScenarioDriver {
     throw new Error(`unsupported fixture service: ${fixture.service}`);
   }
 
-  private async waitForUnreadMessage(id: string, runTag: string): Promise<void> {
+  private async waitForUnreadMessages(
+    ids: readonly string[],
+    runTag: string,
+  ): Promise<void> {
     const query = `label:inbox is:unread "${runTag}"`;
     let consecutiveReadyChecks = 0;
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      const [message, listed] = await Promise.all([
-        this.gws.call(["gmail", "users", "messages", "get"], { userId: "me", id, format: "minimal" }),
-        this.gws.call(["gmail", "users", "messages", "list"], { userId: "me", q: query, maxResults: 10 }),
-      ]);
-      if (gmailFixtureReady(message, listed, id)) {
+      const listed = await this.gws.call(
+        ["gmail", "users", "messages", "list"],
+        { userId: "me", q: query, maxResults: Math.max(10, ids.length) },
+      );
+      const messages: Json[] = [];
+      for (const id of ids) {
+        messages.push(await this.gws.call(["gmail", "users", "messages", "get"], {
+          userId: "me",
+          id,
+          format: "minimal",
+        }));
+      }
+      if (
+        ids.every((id, index) =>
+          gmailFixtureReady(messages[index] ?? null, listed, id)
+        )
+      ) {
         consecutiveReadyChecks += 1;
         if (consecutiveReadyChecks >= 3) return;
       } else {
         consecutiveReadyChecks = 0;
-        await this.gws.call(["gmail", "users", "messages", "modify"], { userId: "me", id }, {
-          addLabelIds: ["INBOX", "UNREAD"],
-        });
+        for (const id of ids) {
+          await this.gws.call(["gmail", "users", "messages", "modify"], {
+            userId: "me",
+            id,
+          }, { addLabelIds: ["INBOX", "UNREAD"] });
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await this.sleep(250);
     }
-    throw new Error(`Gmail fixture ${id} never became stably queryable as unread for ${runTag}`);
+    throw new Error(
+      `Gmail fixtures ${ids.join(", ")} never became stably queryable as unread for ${runTag}`,
+    );
   }
 
   private requireCalendarId(): string {
@@ -441,6 +621,35 @@ export function gmailFixtureReady(message: Json, listed: Json, id: string): bool
   if (!message || typeof message !== "object" || Array.isArray(message) || !Array.isArray(message.labelIds)) return false;
   const labels = message.labelIds.filter((label): label is string => typeof label === "string");
   return labels.includes("INBOX") && labels.includes("UNREAD") && idsFrom(listed, "messages").includes(id);
+}
+
+export function fixtureWriteRange(table: readonly (readonly string[])[]): string {
+  const rows = Math.max(1, table.length);
+  const columns = Math.max(1, ...table.map((row) => row.length));
+  return `Source!A1:${columnName(columns)}${rows}`;
+}
+
+function columnName(column: number): string {
+  let remaining = column;
+  let name = "";
+  while (remaining > 0) {
+    const digit = (remaining - 1) % 26;
+    name = String.fromCharCode(65 + digit) + name;
+    remaining = Math.floor((remaining - 1) / 26);
+  }
+  return name;
+}
+
+function gridFixture(table: readonly (readonly string[])[]): Json {
+  return {
+    sheets: [{
+      data: [{
+        rowData: table.map((row) => ({
+          values: row.map((formattedValue) => ({ formattedValue })),
+        })),
+      }],
+    }],
+  };
 }
 
 function stringField(value: Json, field: string): string {

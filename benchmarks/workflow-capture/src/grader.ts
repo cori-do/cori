@@ -452,7 +452,22 @@ function supportDigestMatches(scenario: Scenario, after: WorkspaceSnapshot): boo
   if (after.drafts.length !== 1) return false;
   const text = mailText(after.drafts[0]).toLowerCase();
   if (!includesAll(text, ["support-lead@example.test", scenario.runTag, "outage", "access", "how_to", "p0", "p1", "p2"])) return false;
-  return ["outage", "access", "how_to", "p0", "p1", "p2"].every((label) => new RegExp(`${label}\\s*[:=]\\s*1`, "u").test(text));
+  return ["outage", "access", "how_to", "p0", "p1", "p2"].every(
+    (label) => mailCountMatches(text, label, 1),
+  );
+}
+
+function mailCountMatches(text: string, label: string, count: number): boolean {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const afterLabel = new RegExp(
+    `(?:^|\\W)${escaped}(?:\\s+(?:count|total))?\\s*(?::|=|is)?\\s*\\(?${count}\\)?(?=\\W|$)`,
+    "u",
+  );
+  const beforeLabel = new RegExp(
+    `(?:^|\\W)${count}\\s+${escaped}(?=\\W|$)`,
+    "u",
+  );
+  return afterLabel.test(text) || beforeLabel.test(text);
 }
 
 function findSlaResultTable(scenario: Scenario, snapshot: WorkspaceSnapshot): readonly string[][] | null {

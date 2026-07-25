@@ -44,6 +44,7 @@ pub fn run(
     step_file_path: &Path,
     input: &JsonValue,
     user_id: &str,
+    expected_binary: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -63,6 +64,7 @@ pub fn run(
             message: "cli step produced an empty command".to_string(),
             stack: None,
         })?;
+    validate_binary_boundary(expected_binary, &binary)?;
 
     // 2. Resolve binary. Fast path: the startup snapshot. Fall back to a
     //    live PATH probe — the compiler already enforced declaration in
@@ -154,6 +156,24 @@ pub fn run(
     })
 }
 
+/// Enforce the compiler's static argv[0] at the last point before process
+/// resolution. `None` remains available to callers that have not performed
+/// static step parsing; Cori activities always pass `Some`.
+pub(crate) fn validate_binary_boundary(expected: Option<&str>, actual: &str) -> Result<()> {
+    if let Some(expected) = expected
+        && expected != actual
+    {
+        return Err(BrokerError::CapabilityDenied {
+            kind: "CLI",
+            name: actual.to_string(),
+            hint: format!(
+                "step was compiled for `{expected}` but its command builder produced `{actual}`; argv[0] must remain the directly declared executable"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -185,4 +205,30 @@ fn combine_stderr(runner_a: &str, child: &str, runner_b: &str) -> String {
         out.push_str(runner_b);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_compiled_binary() {
+        validate_binary_boundary(Some("gws"), "gws").expect("matching binary");
+    }
+
+    #[test]
+    fn rejects_a_runtime_binary_switch() {
+        let error = validate_binary_boundary(Some("gws"), "deno")
+            .expect_err("runtime argv must not cross the compiled boundary");
+        assert!(matches!(
+            error,
+            BrokerError::CapabilityDenied { name, hint, .. }
+                if name == "deno" && hint.contains("compiled for `gws`")
+        ));
+    }
+
+    #[test]
+    fn permits_legacy_inputs_without_an_expected_binary() {
+        validate_binary_boundary(None, "gws").expect("legacy payload compatibility");
+    }
 }

@@ -8,8 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && node --test dist/test/benchmark.test.js",
-    "benchmark": "pnpm run build && node dist/src/cli.js"
+    "test": "tsc -p tsconfig.json && node --test dist/test/benchmark.test.js",
+    "benchmark": "tsc -p tsconfig.json && node dist/src/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

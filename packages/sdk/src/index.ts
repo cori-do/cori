@@ -11,7 +11,11 @@
  * Zod is the only supported schema library for v1.
  */
 
-import type { infer as ZodInfer, ZodTypeAny } from "zod";
+import type {
+  input as ZodInput,
+  output as ZodOutput,
+  ZodTypeAny,
+} from "zod";
 
 // ---------------------------------------------------------------------------
 // Kinds & shared shapes
@@ -47,21 +51,39 @@ export interface StepDef<K extends StepKind = StepKind> {
   readonly __cori_step: true;
 }
 
+/**
+ * Callback results are validated by Zod after the step runs. Accept readonly
+ * literal inference at authoring time while retaining the schema's input
+ * shape as the constraint.
+ */
+export type RecursiveReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly unknown[]
+  ? { readonly [K in keyof T]: RecursiveReadonly<T[K]> }
+  : T extends object
+  ? { readonly [K in keyof T]: RecursiveReadonly<T[K]> }
+  : T;
+
 // ---------------------------------------------------------------------------
 // cli
 // ---------------------------------------------------------------------------
 
-export interface CliStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
+export interface CliStepOpts<
+  I extends ZodTypeAny,
+  O extends ZodTypeAny,
+  R extends RecursiveReadonly<ZodInput<O>> =
+    RecursiveReadonly<ZodInput<O>>,
+>
   extends BaseStepOpts {
   readonly input?: I;
   readonly output?: O;
   /** Argv builder — return an array, never a single string. */
-  readonly command: (input: ZodInfer<I>) => readonly string[];
+  readonly command: (input: ZodOutput<I>) => readonly string[];
   /** Parse the captured stdout into the typed output. */
   readonly parse?: (
     stdout: string,
     ctx: { stderr: string; exitCode: number },
-  ) => ZodInfer<O> | Promise<ZodInfer<O>>;
+  ) => R | Promise<R>;
   /** Extra environment variables for the spawned process. */
   readonly env?: Record<string, string>;
 }
@@ -84,7 +106,7 @@ export interface McpStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
   readonly tool: string;
   readonly input?: I;
   readonly output?: O;
-  readonly args: (input: ZodInfer<I>) => Record<string, unknown>;
+  readonly args: (input: ZodOutput<I>) => Record<string, unknown>;
 }
 
 export interface McpStepDef extends StepDef<"mcp_tool"> {
@@ -99,11 +121,16 @@ export interface McpStepDef extends StepDef<"mcp_tool"> {
 // code
 // ---------------------------------------------------------------------------
 
-export interface CodeStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
+export interface CodeStepOpts<
+  I extends ZodTypeAny,
+  O extends ZodTypeAny,
+  R extends RecursiveReadonly<ZodInput<O>> =
+    RecursiveReadonly<ZodInput<O>>,
+>
   extends BaseStepOpts {
   readonly input?: I;
   readonly output?: O;
-  readonly run: (input: ZodInfer<I>) => ZodInfer<O> | Promise<ZodInfer<O>>;
+  readonly run: (input: ZodOutput<I>) => R | Promise<R>;
 }
 
 export interface CodeStepDef extends StepDef<"code"> {
@@ -126,7 +153,7 @@ export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
   readonly model: string;
   readonly input?: I;
   readonly output?: O;
-  readonly prompt: (input: ZodInfer<I>) => string;
+  readonly prompt: (input: ZodOutput<I>) => string;
   readonly batch?: LlmBatchOpts;
 }
 
@@ -160,6 +187,13 @@ export interface BranchOpts<T extends string> extends BaseStepOpts {
   readonly cases: Record<T, StepDef>;
 }
 
+type InferredBranchOpts<
+  C extends Readonly<Record<string, StepDef>>,
+> = BaseStepOpts & {
+  readonly cases: C;
+  readonly on: (input: unknown) => NoInfer<Extract<keyof C, string>>;
+};
+
 export interface ParallelOpts extends BaseStepOpts {
   readonly steps: readonly StepDef[];
 }
@@ -192,8 +226,13 @@ function base<K extends StepKind>(kind: K, opts: BaseStepOpts): StepDef<K> {
 }
 
 export const step = {
-  cli<I extends ZodTypeAny, O extends ZodTypeAny>(
-    opts: CliStepOpts<I, O>,
+  cli<
+    I extends ZodTypeAny,
+    O extends ZodTypeAny,
+    const R extends RecursiveReadonly<ZodInput<O>> =
+      RecursiveReadonly<ZodInput<O>>,
+  >(
+    opts: CliStepOpts<I, O, R>,
   ): CliStepDef {
     return {
       ...base("cli", opts),
@@ -218,8 +257,13 @@ export const step = {
     };
   },
 
-  code<I extends ZodTypeAny, O extends ZodTypeAny>(
-    opts: CodeStepOpts<I, O>,
+  code<
+    I extends ZodTypeAny,
+    O extends ZodTypeAny,
+    const R extends RecursiveReadonly<ZodInput<O>> =
+      RecursiveReadonly<ZodInput<O>>,
+  >(
+    opts: CodeStepOpts<I, O, R>,
   ): CodeStepDef {
     return {
       ...base("code", opts),
@@ -250,7 +294,9 @@ export const step = {
     return { ...base("builtin", opts), builtin: "for_each" };
   },
 
-  branch<T extends string>(opts: BranchOpts<T>): BuiltinStepDef {
+  branch<const C extends Readonly<Record<string, StepDef>>>(
+    opts: InferredBranchOpts<C>,
+  ): BuiltinStepDef {
     return { ...base("builtin", opts), builtin: "branch" };
   },
 

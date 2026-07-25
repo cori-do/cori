@@ -12,8 +12,32 @@ export function codexModel(): string {
 export interface HarnessAdapter {
   readonly name: HarnessName;
   version(): Promise<string>;
-  start(prompt: string, cwd: string): Promise<HarnessSession>;
-  resume(sessionId: string, prompt: string, cwd: string): Promise<HarnessSession>;
+  start(
+    prompt: string,
+    cwd: string,
+    options?: HarnessExecutionOptions,
+  ): Promise<HarnessSession>;
+  resume(
+    sessionId: string,
+    prompt: string,
+    cwd: string,
+    options?: HarnessExecutionOptions,
+  ): Promise<HarnessSession>;
+}
+
+export interface HarnessProgress {
+  status: "running";
+  prompt: string;
+  transcript: readonly Json[];
+  usage: HarnessUsage;
+  wallTimeMs: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface HarnessExecutionOptions {
+  timeoutMs?: number;
+  onProgress?: (progress: HarnessProgress) => void | Promise<void>;
 }
 
 export interface HarnessCommand {
@@ -22,6 +46,12 @@ export interface HarnessCommand {
 }
 
 abstract class JsonlAdapter implements HarnessAdapter {
+  private readonly environment: NodeJS.ProcessEnv;
+
+  constructor(environment: NodeJS.ProcessEnv = process.env) {
+    this.environment = { ...environment };
+  }
+
   abstract readonly name: HarnessName;
   protected abstract startCommand(prompt: string): HarnessCommand;
   protected abstract resumeCommand(sessionId: string, prompt: string): HarnessCommand;
@@ -29,7 +59,14 @@ abstract class JsonlAdapter implements HarnessAdapter {
   async version(): Promise<string> {
     let result: { code: number; stdout: string; stderr: string };
     try {
-      result = await exec(this.binary(), ["--version"]);
+      result = await exec(
+        this.binary(),
+        ["--version"],
+        undefined,
+        undefined,
+        undefined,
+        this.environment,
+      );
     } catch (error) {
       if (isMissingExecutable(error)) {
         const variable = `CORI_BENCH_${this.name.toUpperCase()}_BIN`;
@@ -41,16 +78,31 @@ abstract class JsonlAdapter implements HarnessAdapter {
     return result.stdout.trim();
   }
 
-  async start(prompt: string, cwd: string): Promise<HarnessSession> {
-    return this.execute(this.startCommand(prompt), cwd, prompt);
+  async start(
+    prompt: string,
+    cwd: string,
+    options: HarnessExecutionOptions = {},
+  ): Promise<HarnessSession> {
+    return this.execute(this.startCommand(prompt), cwd, prompt, options);
   }
 
-  async resume(sessionId: string, prompt: string, cwd: string): Promise<HarnessSession> {
-    return this.execute(this.resumeCommand(sessionId, prompt), cwd, prompt);
+  async resume(
+    sessionId: string,
+    prompt: string,
+    cwd: string,
+    options: HarnessExecutionOptions = {},
+  ): Promise<HarnessSession> {
+    return this.execute(
+      this.resumeCommand(sessionId, prompt),
+      cwd,
+      prompt,
+      options,
+    );
   }
 
   protected binary(): string {
-    const configured = process.env[`CORI_BENCH_${this.name.toUpperCase()}_BIN`];
+    const configured =
+      this.environment[`CORI_BENCH_${this.name.toUpperCase()}_BIN`];
     if (configured) return configured;
     if (this.name === "codex") {
       const appBundled = "/Applications/ChatGPT.app/Contents/Resources/codex";
@@ -59,11 +111,34 @@ abstract class JsonlAdapter implements HarnessAdapter {
     return this.name;
   }
 
-  private async execute(command: HarnessCommand, cwd: string, prompt: string): Promise<HarnessSession> {
+  private async execute(
+    command: HarnessCommand,
+    cwd: string,
+    prompt: string,
+    options: HarnessExecutionOptions,
+  ): Promise<HarnessSession> {
     const started = performance.now();
-    let result: { code: number; stdout: string; stderr: string };
+    let result: { code: number; stdout: string; stderr: string; timedOut: boolean };
     try {
-      result = await exec(command.file, command.args, cwd);
+      result = await exec(
+        command.file,
+        command.args,
+        cwd,
+        options.timeoutMs,
+        async (stdout, stderr) => {
+          const transcript = parseJsonl(stdout);
+          await options.onProgress?.({
+            status: "running",
+            prompt,
+            transcript,
+            usage: usageFrom(transcript),
+            wallTimeMs: Math.round(performance.now() - started),
+            stdout,
+            stderr,
+          });
+        },
+        this.environment,
+      );
     } catch (error) {
       if (isMissingExecutable(error)) {
         const variable = `CORI_BENCH_${this.name.toUpperCase()}_BIN`;
@@ -81,6 +156,7 @@ abstract class JsonlAdapter implements HarnessAdapter {
       exitCode: result.code,
       stdout: result.stdout,
       stderr: result.stderr,
+      ...(result.timedOut ? { timedOut: true } : {}),
     };
   }
 }
@@ -140,10 +216,13 @@ export class GeminiAdapter extends JsonlAdapter {
   }
 }
 
-export function adapterFor(name: HarnessName): HarnessAdapter {
-  if (name === "codex") return new CodexAdapter();
-  if (name === "claude") return new ClaudeAdapter();
-  return new GeminiAdapter();
+export function adapterFor(
+  name: HarnessName,
+  environment: NodeJS.ProcessEnv = process.env,
+): HarnessAdapter {
+  if (name === "codex") return new CodexAdapter(environment);
+  if (name === "claude") return new ClaudeAdapter(environment);
+  return new GeminiAdapter(environment);
 }
 
 export function parseJsonl(stdout: string): readonly Json[] {
@@ -169,15 +248,23 @@ function sessionIdFrom(events: readonly Json[]): string | null {
 function usageFrom(events: readonly Json[]): HarnessUsage {
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
-  let toolCalls: number | null = 0;
+  // A single tool call emits a lifecycle pair (item.started + item.completed)
+  // sharing one item id. Counting raw matching events double-counts every call,
+  // so identified calls are deduplicated and only unidentifiable ones are
+  // counted positionally.
+  const seenToolIds = new Set<string>();
+  let anonymousToolCalls = 0;
   for (const event of events) {
     const input = findNumber(event, ["input_tokens", "inputTokens", "prompt_tokens"]);
     const output = findNumber(event, ["output_tokens", "outputTokens", "completion_tokens"]);
     if (input !== null) inputTokens = (inputTokens ?? 0) + input;
     if (output !== null) outputTokens = (outputTokens ?? 0) + output;
-    if (containsToolEvent(event)) toolCalls = (toolCalls ?? 0) + 1;
+    if (!containsToolEvent(event)) continue;
+    const id = findString(event, ["id", "item_id", "itemId", "call_id", "callId"]);
+    if (id === null) anonymousToolCalls += 1;
+    else seenToolIds.add(id);
   }
-  return { inputTokens, outputTokens, toolCalls };
+  return { inputTokens, outputTokens, toolCalls: seenToolIds.size + anonymousToolCalls };
 }
 
 function findString(value: Json, names: readonly string[]): string | null {
@@ -201,18 +288,86 @@ function findNumber(value: Json, names: readonly string[]): number | null {
 }
 
 function containsToolEvent(value: Json): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  return Object.values(value).some((entry) => typeof entry === "string" && /tool|function_call/u.test(entry));
+  if (Array.isArray(value)) return value.some(containsToolEvent);
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).some((entry) =>
+    typeof entry === "string"
+      ? /(?:tool|function_call|command_execution|mcp_call)/u.test(entry)
+      : containsToolEvent(entry)
+  );
 }
 
-async function exec(file: string, args: readonly string[], cwd?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function exec(
+  file: string,
+  args: readonly string[],
+  cwd?: string,
+  timeoutMs?: number,
+  onProgress?: (stdout: string, stderr: string) => void | Promise<void>,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, [...args], { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(file, [...args], {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      env: environment,
+    });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    let timedOut = false;
+    let progressWrites = Promise.resolve();
+    const publish = (): void => {
+      progressWrites = progressWrites.then(async () => {
+        await onProgress?.(stdout, stderr);
+      }).catch(() => undefined);
+    };
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      publish();
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+      publish();
+    });
+    const heartbeat = onProgress
+      ? setInterval(publish, 5_000)
+      : undefined;
+    const deadline = timeoutMs && timeoutMs > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        stderr += `\nbenchmark phase timed out after ${timeoutMs}ms\n`;
+        publish();
+        terminateProcessTree(child, "SIGTERM");
+        setTimeout(() => terminateProcessTree(child, "SIGKILL"), 2_000)
+          .unref();
+      }, timeoutMs)
+      : undefined;
     child.once("error", reject);
-    child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.once("close", (code) => {
+      if (heartbeat) clearInterval(heartbeat);
+      if (deadline) clearTimeout(deadline);
+      progressWrites.finally(() => resolve({
+        code: timedOut ? 124 : code ?? 1,
+        stdout,
+        stderr,
+        timedOut,
+      }));
+    });
   });
+}
+
+function terminateProcessTree(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    // The process may have exited between the deadline and signal delivery.
+  }
 }

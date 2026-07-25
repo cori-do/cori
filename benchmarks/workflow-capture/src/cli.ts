@@ -1,8 +1,12 @@
 import { join, resolve } from "node:path";
 
 import { scorecard } from "./artifacts.js";
-import { cleanup, combineRuns, parseBatch, preflight, report, runBenchmark, selectTasks, validate } from "./runner.js";
-import type { BenchmarkResultV1 } from "./types.js";
+import { cleanup, combineRuns, parseBatch, preflight, profilePairs, report, runBenchmark, selectTasks, validate } from "./runner.js";
+import {
+  writeBenchmarkDiagnostic,
+  writeBenchmarkProgress,
+} from "./progress.js";
+import type { BenchmarkResultV2 } from "./types.js";
 import type { BenchmarkProfile, HarnessName } from "./types.js";
 import { writeBenchmarkViewer } from "./viewer.js";
 
@@ -19,7 +23,12 @@ try {
     const taskIds = value(args, "--task")?.split(",").filter(Boolean);
     const batch = parseBatch(value(args, "--batch"));
     const tasks = selectTasks({ profile, harness: "codex", seed: Number(value(args, "--seed") ?? "42"), taskIds, batch });
-    console.log(JSON.stringify({ profile, batch: batch ?? null, tasks: tasks.map((task) => ({ id: task.id, runtimeTrack: task.runtimeTrack })) }, null, 2));
+    console.log(JSON.stringify({
+      profile,
+      batch: batch ?? null,
+      pairsPerTask: profilePairs(profile),
+      tasks: tasks.map((task) => ({ id: task.id, runtimeTrack: task.runtimeTrack })),
+    }, null, 2));
   } else if (command === "run") {
     const profile = requiredEnum(value(args, "--profile") ?? "smoke", ["smoke", "full", "publication"] as const, "--profile");
     const harness = requiredEnum(value(args, "--harness") ?? "codex", ["codex", "claude", "gemini"] as const, "--harness");
@@ -35,7 +44,7 @@ try {
       batch: parseBatch(value(args, "--batch")),
       artifactsRoot,
       runId: value(args, "--run-id"),
-      onProgress: (progress) => console.error(`[${progress.updatedAt}] ${progress.phase}${progress.taskId ? ` ${progress.taskNumber}/${progress.totalTasks} ${progress.taskId}` : ""}: ${progress.detail} (direct ${progress.completedDirectTrials}/${progress.plannedTrialsPerLane}, replay ${progress.completedReplayTrials}/${progress.plannedTrialsPerLane})`),
+      onProgress: writeBenchmarkProgress,
     });
     printResult(result, args, artifactsRoot);
   } else if (command === "cleanup") {
@@ -63,7 +72,7 @@ try {
     throw new Error("usage: benchmark validate | preflight | plan --profile full --batch INDEX/COUNT | run --profile smoke|full|publication [--task id[,id]] [--batch INDEX/COUNT] --harness codex|claude|gemini --seed N [--json] | combine --run-ids id1,id2,... [--run-id ID] [--json] | cleanup --run-id ID | report --run-id ID [--json] | view --run-id ID [--artifacts path] [--json]");
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  writeBenchmarkDiagnostic(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 }
 
@@ -83,7 +92,7 @@ function requiredEnum<T extends string>(value: string, values: readonly T[], fla
 }
 
 function printResult(
-  result: BenchmarkResultV1,
+  result: BenchmarkResultV2,
   args: readonly string[],
   artifactsRoot: string | undefined,
 ): void {

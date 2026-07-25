@@ -81,6 +81,7 @@ export interface Scenario {
 
 export interface WorkspaceSnapshot {
   capturedAt: string;
+  source?: "canonical_fixture" | "workspace";
   resources: Record<string, Json>;
   drafts: readonly Json[];
   calendarEvents: readonly Json[];
@@ -109,6 +110,31 @@ export interface HarnessSession {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** True when the benchmark terminated this turn at its phase deadline. */
+  timedOut?: boolean;
+}
+
+export type BenchmarkPhase = "author" | "capture" | "check" | "replay";
+export type PhaseStatus = "succeeded" | "failed" | "skipped";
+
+export interface PhaseOutcome {
+  status: PhaseStatus;
+  startedAt: string;
+  finishedAt: string;
+  wallTimeMs: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  toolCalls?: number | null;
+  plannedPairs?: number;
+  completedPairs?: number;
+  error?: string;
+}
+
+export interface TaskPhaseOutcomes {
+  author: PhaseOutcome;
+  capture: PhaseOutcome;
+  check: PhaseOutcome;
+  replay: PhaseOutcome;
 }
 
 export interface WorkflowPolicyReport {
@@ -121,26 +147,21 @@ export interface WorkflowPolicyReport {
 export interface TaskCapture {
   taskId: string;
   authorGrade: Grade;
-  /** Every independent design-time attempt, including attempts rejected before replay. */
-  attempts?: readonly {
-    attempt: number;
-    seed: number;
-    authorGrade: Grade;
-    ready: boolean;
-    error?: string;
-  }[];
-  /** One-based attempt selected for held-out replay. */
-  selectedAttempt?: number;
+  outcomes: TaskPhaseOutcomes;
+  /** The skill displayed a tree and complete manifest before approval. */
+  previewPresented: boolean;
   previewDidNotWrite: boolean;
+  /** The real skill invoked `cori check` after the natural `yes` approval. */
+  skillCheckObserved: boolean;
+  /** A completed author command reported the canonical `Result: ✓ ready`. */
+  skillCheckSucceeded: boolean;
+  /** The benchmark's independent absolute-binary check reported ready. */
+  benchmarkCheckSucceeded: boolean;
+  /** Both successful checks and static policy passed. */
   checkPassed: boolean;
-  /**
-   * Whether the disposable Cori execution passed safety and replay-integrity
-   * checks. Its external-state score remains a measurement and may be below 90.
-   */
-  qualificationPassed?: boolean;
-  qualificationGrade?: Grade;
-  qualificationTracePath?: string;
   policy: WorkflowPolicyReport | null;
+  /** Immutable hash recorded after capture and checked around every replay. */
+  workflowHash: string | null;
   /** Absolute author-workspace path used for this run; absent when capture failed. */
   workflowPath: string | null;
   /** Actionable reason the workflow cannot enter held-out replay. */
@@ -163,8 +184,8 @@ export interface TrialResult {
   };
 }
 
-export interface BenchmarkResultV1 {
-  version: 1;
+export interface BenchmarkResultV2 {
+  version: 2;
   status: "succeeded" | "failed";
   runId: string;
   profile: BenchmarkProfile;
@@ -180,6 +201,7 @@ export interface BenchmarkResultV1 {
     policy: WorkflowPolicyReport | null;
     tasks: readonly TaskCapture[];
   };
+  phaseTimingsMs: Record<BenchmarkPhase, number>;
   trials: readonly TrialResult[];
   metrics: {
     directWallTimeMs: number | null;

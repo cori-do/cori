@@ -99,10 +99,10 @@ pub struct CompiledStep {
 pub struct CompiledWorkflow {
     pub manifest: Manifest,
     pub steps: Vec<CompiledStep>,
-    /// CLI binary names referenced anywhere in the steps. Subset of
+    /// CLI binary names referenced anywhere in the steps. Exactly matches
     /// `manifest.tools_required` after validation.
     pub required_cli_binaries: Vec<String>,
-    /// MCP server names referenced anywhere in the steps. Subset of
+    /// MCP server names referenced anywhere in the steps. Exactly matches
     /// `manifest.mcp_servers` after validation.
     pub required_mcp_servers: Vec<String>,
     /// LLM providers (`openai` / `anthropic` / `gemini`) referenced by

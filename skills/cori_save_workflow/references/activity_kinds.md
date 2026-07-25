@@ -67,6 +67,7 @@ Key fields:
 
 - **`command`** is a function from input → string array. Cori passes it to the OS as argv — no shell, no injection. Always return an array, never a single string.
 - **argv[0] is the capability boundary.** It must be a string literal naming the actual executable Cori should discover and spawn, and that exact name must be in `tools_required`. Do not put generic dispatchers such as `env`, `sh`, `bash`, or `xargs` first merely to launch a dynamic executable path.
+- **Invoke GWS directly.** A Google Workspace step always starts with literal `"gws"`; never use `deno`, `node`, `python`, or a shell to spawn `gws`. Cori must see GWS at argv[0] so capability discovery, authentication checks, and routing apply to the real side effect.
 - **`parse`** is required for non-trivial output. If the CLI returns plain text and the step's `Output` is `{ stdout: string }`, you can omit `parse` and Cori uses the raw stdout.
 - **`parse` receives only CLI results, never workflow input.** Its full signature
   is `parse(stdout, { stderr, exitCode })`. The second argument is metadata, so
@@ -107,6 +108,75 @@ For longer inline Python programs, build the `-c` argument with newline joins:
 Do not use `.join("; ")` when the program contains compound statements such as `if`, `for`, `try`, or `def`; Python rejects those after a semicolon. Syntax-check the final assembled snippet separately, because `cori check` parses the TypeScript module but cannot parse Python code stored inside a string.
 
 When the CLI doesn't exist on the worker, Cori fails the activity with a clear "binary not found" error before scheduling. Workflow registration also fails early if `tools_required` lists a binary the worker doesn't have — surface this with the suggestion `cori workers status`.
+
+### Validating GWS commands before saving
+
+Do not rely on remembered GWS syntax. For every distinct literal API method in
+the workflow, run the read-only schema lookup against the installed CLI:
+
+```bash
+gws schema gmail.users.messages.list --resolve-refs
+gws schema sheets.spreadsheets.values.batchUpdate --resolve-refs
+```
+
+Use `gws <service> <resource> [sub-resource] <method> --help` when checking
+CLI flags. Keep URL/query fields inside `--params`, request bodies inside
+`--json`, and compare both objects with the returned schema. Do not execute a
+write merely to validate authoring.
+
+GWS query results are runtime data. Message IDs, document IDs, event IDs,
+subjects, timestamps, classifications, and counts from the captured run may
+appear in `tests/fixtures/`, but never in a runtime command or helper module.
+Pass them through the flat workflow state from the GWS read that produced them.
+
+### Creating Gmail raw messages safely
+
+Gmail's `message.raw` field is a Base64url-encoded RFC message. Header lines
+must be separated by actual CRLF bytes, and an empty CRLF-delimited line must
+separate the headers from the body. In TypeScript source, use `"\r\n"`, not
+`"\\r\\n"`. The latter produces the four literal characters backslash-r and
+backslash-n, so Gmail can interpret the entire payload as one malformed header
+and reject it with errors such as `Invalid To header`.
+
+Use this pattern for Gmail draft and message creation:
+
+```ts
+function base64UrlUtf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+const message = [
+  "To: finance@example.com",
+  `Subject: ${subject}`,
+  "MIME-Version: 1.0",
+  "Content-Type: text/plain; charset=UTF-8",
+  "",
+  body,
+].join("\r\n");
+
+if (!message.includes("\r\n\r\n") || message.includes("\\r\\n")) {
+  throw new Error("Gmail raw message must use real CRLF separators");
+}
+
+const raw = base64UrlUtf8(message);
+return [
+  "gws", "gmail", "users", "drafts", "create",
+  "--params", JSON.stringify({ userId: "me" }),
+  "--json", JSON.stringify({ message: { raw } }),
+  "--format", "json",
+];
+```
+
+The UTF-8 conversion is required before `btoa`; calling `btoa(message)`
+directly fails or corrupts non-ASCII subjects and bodies. Do not remove the
+separator guard: `cori check` type-checks the callback but does not execute it,
+so it cannot detect an accidentally double-escaped join.
 
 ---
 

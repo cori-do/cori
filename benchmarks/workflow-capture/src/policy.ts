@@ -53,6 +53,12 @@ export async function inspectWorkflowPolicy(
   }
 
   const stepFiles = files.filter((file) => /\/steps\/\d\d_[a-z0-9_]+\.ts$/u.test(file));
+  const runtimeSourceFiles = files.filter((file) => {
+    const path = relative(workflowDir, file);
+    return path !== "manifest.md" &&
+      !path.startsWith("tests/") &&
+      /\.(?:[cm]?[jt]sx?|jsonc?)$/u.test(path);
+  });
   if (stepFiles.length === 0) violations.push("workflow has no numbered TypeScript steps");
   for (const file of stepFiles) {
     const source = await readFile(file, "utf8");
@@ -68,6 +74,12 @@ export async function inspectWorkflowPolicy(
     if (source.includes("step.cli") && !hasLiteralGwsArgv(source)) {
       violations.push(`${relative(workflowDir, file)} has a CLI step without literal gws argv[0]`);
     }
+    if (hasGmailSendCommand(source)) {
+      violations.push(`${relative(workflowDir, file)} can send Gmail; benchmark workflows may create drafts only`);
+    }
+    if (hasCalendarWriteCommand(source) && !hasSafeCalendarUpdatePolicy(source)) {
+      violations.push(`${relative(workflowDir, file)} writes Calendar state without explicit sendUpdates: none`);
+    }
     for (const flag of literalLongFlags(source)) {
       if (!GWS_FLAGS.has(flag)) violations.push(`${relative(workflowDir, file)} uses unsupported gws flag ${flag}`);
     }
@@ -80,6 +92,9 @@ export async function inspectWorkflowPolicy(
     if (/\b(?:process\.env|Deno\.env|getenv)\b/u.test(source)) {
       violations.push(`${relative(workflowDir, file)} reads environment state directly`);
     }
+  }
+  for (const file of runtimeSourceFiles) {
+    const source = await readFile(file, "utf8");
     for (const literal of forbiddenRuntimeLiterals.filter(Boolean)) {
       if (source.includes(literal)) violations.push(`${relative(workflowDir, file)} hard-codes captured fixture value ${redactedLiteral(literal)}`);
     }
@@ -114,6 +129,21 @@ function hasCanonicalSdkImport(source: string): boolean {
 
 function hasLiteralGwsArgv(source: string): boolean {
   return /command\s*:\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{[\s\S]*?return\s*)?\[\s*["']gws["']/u.test(source);
+}
+
+function hasGmailSendCommand(source: string): boolean {
+  return /["']gmail["'][\s\S]{0,240}["'](?:messages|drafts)["'][\s\S]{0,120}["']send["']/u
+    .test(source);
+}
+
+function hasCalendarWriteCommand(source: string): boolean {
+  return /["']calendar["'][\s\S]{0,240}["']events["'][\s\S]{0,120}["'](?:insert|update|patch|move|delete)["']/u
+    .test(source);
+}
+
+function hasSafeCalendarUpdatePolicy(source: string): boolean {
+  return /sendUpdates\s*:\s*["']none["']/u.test(source) ||
+    /["']sendUpdates["']\s*:\s*["']none["']/u.test(source);
 }
 
 async function listFiles(directory: string): Promise<string[]> {

@@ -19,6 +19,10 @@ import {
 } from "./artifacts.js";
 import { gradeExternalState } from "./grader.js";
 import { adapterFor, codexModel } from "./harness.js";
+import type {
+  HarnessAdapter,
+  HarnessExecutionOptions,
+} from "./harness.js";
 import {
   configuredBenchmarkCalendarId,
   GwsClient,
@@ -26,6 +30,7 @@ import {
   runProcess,
   WorkspaceScenarioDriver,
 } from "./gws.js";
+import type { ProcessResult, ProcessRunner } from "./gws.js";
 import { hashDirectory, inspectWorkflowPolicy } from "./policy.js";
 import { assertTwinEquivalent, buildScenario } from "./scenario.js";
 import {
@@ -38,8 +43,11 @@ import { assertTaskCatalog, taskById, TASKS } from "./tasks.js";
 import { writeBenchmarkViewerForRun } from "./viewer.js";
 import type {
   BenchmarkProfile,
-  BenchmarkResultV1,
+  BenchmarkResultV2,
+  Grade,
   HarnessName,
+  HarnessSession,
+  PhaseOutcome,
   RegisteredResource,
   Scenario,
   TaskCapture,
@@ -53,21 +61,28 @@ const repoRoot = resolve(packageRoot, "../..");
 const referencesRoot = join(packageRoot, "reference-workflows");
 const defaultArtifactsRoot = join(packageRoot, "artifacts");
 const workspaceCoriTargetRoot = join(repoRoot, "target");
-const maxCaptureAttempts = 3;
 const replayTraceFailure =
   "Cori replay failed or did not emit a successful JSON trace";
 const replayMutationFailure =
   "workflow directory changed during held-out replay";
-const retryableReplayIntegrityFailures = new Set([
-  replayTraceFailure,
-  replayMutationFailure,
-]);
 let coriPreparation: Promise<void> | undefined;
 let coriBinarySha256: string | null = null;
+let coriBinaryVersion: string | null = null;
 let coriBinarySource: "workspace_dev" | "override" = process.env
     .CORI_BENCH_CORI
   ? "override"
   : "workspace_dev";
+let authorCoriIdentity: CoriIdentity | null = null;
+
+export interface CoriIdentity {
+  path: string;
+  version: string;
+  sha256: string;
+}
+
+export interface CoriLoginShellProbe extends CoriIdentity {
+  help: string;
+}
 
 export interface RunOptions {
   profile: BenchmarkProfile;
@@ -81,7 +96,7 @@ export interface RunOptions {
 }
 
 export interface BenchmarkProgress {
-  version: 1;
+  version: 2;
   runId: string;
   status: "running" | "succeeded" | "failed";
   phase: string;
@@ -118,9 +133,8 @@ interface CaptureWorkflowArgs {
   runDir: string;
   agentRoot: string;
   driver: WorkspaceScenarioDriver;
-  adapter: ReturnType<typeof adapterFor>;
+  adapter: HarnessAdapter;
   registry: CleanupRegistry;
-  model: string;
   onProgress: (phase: string, detail: string) => Promise<void>;
 }
 
@@ -204,7 +218,7 @@ export async function preflight(
 
 export async function runBenchmark(
   options: RunOptions,
-): Promise<BenchmarkResultV1> {
+): Promise<BenchmarkResultV2> {
   await validate();
   const tasks = selectTasks(options);
   const batchSuffix = options.batch
@@ -225,7 +239,6 @@ export async function runBenchmark(
   const calendarId = configuredBenchmarkCalendarId();
   const gws = new GwsClient();
   const driver = new WorkspaceScenarioDriver(gws, undefined, calendarId);
-  const adapter = adapterFor(options.harness);
   const registry: CleanupRegistry = {
     runId,
     resources: [],
@@ -236,9 +249,9 @@ export async function runBenchmark(
   const captures: TaskCapture[] = [];
   const startedAt = new Date().toISOString();
   const completedTasks: string[] = [];
-  const repetitions = profileShape(options.profile);
+  const pairsPerTask = profilePairs(options.profile);
   let progress: BenchmarkProgress = {
-    version: 1,
+    version: 2,
     runId,
     status: "running",
     phase: "starting",
@@ -249,8 +262,7 @@ export async function runBenchmark(
     completedTasks,
     completedDirectTrials: 0,
     completedReplayTrials: 0,
-    plannedTrialsPerLane: tasks.length * repetitions.trials *
-      repetitions.heldoutPairs,
+    plannedTrialsPerLane: tasks.length * pairsPerTask,
     startedAt,
     updatedAt: startedAt,
   };
@@ -277,19 +289,23 @@ export async function runBenchmark(
     await writeJson(join(runDir, "progress.json"), progress);
     options.onProgress?.(progress);
   };
-  let runError: string | undefined;
+  const taskFailures: string[] = [];
+  let globalError: string | undefined;
+  authorCoriIdentity = null;
 
   try {
-    if (tasks.some((task) => task.requiredServices.includes("calendar"))) {
-      requireBenchmarkCalendarId();
-      await driver.verifyCalendar();
-    }
     await publishProgress(
       "environment_check",
       process.env.CORI_BENCH_CORI
         ? "checking the explicitly selected Cori executable and harness capabilities"
         : "building the current workspace Cori development binary and checking harness capabilities",
     );
+    await prepareCoriWorkflowCli();
+    const harnessEnvironment = await createBenchmarkHarnessEnvironment(
+      runDir,
+      coriBinary(),
+    );
+    const adapter = adapterFor(options.harness, harnessEnvironment);
     await adapter.version();
     if (
       tasks.some((task) => task.runtimeTrack === "hybrid") &&
@@ -299,7 +315,6 @@ export async function runBenchmark(
         "CORI_BENCH_LLM_MODEL is required when the selected benchmark tasks include the hybrid runtime track",
       );
     }
-    await prepareCoriWorkflowCli();
     await publishProgress(
       "environment_check",
       `using ${coriBinary()}${
@@ -307,10 +322,27 @@ export async function runBenchmark(
       }`,
     );
     await ensureCoriWorkflowCli();
+    authorCoriIdentity = await probeHarnessCoriEnvironment(
+      harnessEnvironment,
+      selectedCoriIdentity(),
+    );
+    await publishProgress(
+      "environment_check",
+      `login-shell author environment resolves ${authorCoriIdentity.path} (${authorCoriIdentity.version}, sha256 ${authorCoriIdentity.sha256.slice(0, 12)})`,
+    );
+    await publishProgress(
+      "environment_check",
+      "verifying Google Workspace OAuth credentials with a read-only API call",
+    );
+    await gws.verifyAuthentication();
     if (tasks.some((task) => task.runtimeTrack === "hybrid")) {
       await ensureCoriCapability(
         providerForModel(process.env.CORI_BENCH_LLM_MODEL ?? ""),
       );
+    }
+    if (tasks.some((task) => task.requiredServices.includes("calendar"))) {
+      requireBenchmarkCalendarId();
+      await driver.verifyCalendar();
     }
     for (const task of tasks) {
       await publishProgress(
@@ -318,33 +350,47 @@ export async function runBenchmark(
         "running task author against the live fixture",
         task,
       );
-      const captured = await captureWorkflowForTask({
-        task,
-        seed: options.seed,
-        runId,
-        runDir,
-        agentRoot,
-        driver,
-        adapter,
-        registry,
-        model: process.env.CORI_BENCH_LLM_MODEL ?? "",
-        onProgress: (phase, detail) => publishProgress(phase, detail, task),
-      });
-      captures.push(captured.capture);
+      let captured: CapturedTaskWorkflow;
+      try {
+        captured = await captureWorkflowForTask({
+          task,
+          seed: options.seed,
+          runId,
+          runDir,
+          agentRoot,
+          driver,
+          adapter,
+          registry,
+          onProgress: (phase, detail) => publishProgress(phase, detail, task),
+        });
+      } catch (error) {
+        const message = errorMessage(error);
+        captured = failedTaskWorkflow(task, message, agentRoot);
+      }
       if (!captureReady(captured.capture)) {
-        throw new Error(
-          `captured workflow for ${task.id} is not replayable: ${
-            captured.capture.error ?? "capture safety or check gate failed"
+        captures.push(captured.capture);
+        taskFailures.push(
+          `${task.id}: ${
+            captured.capture.error ?? "capture or check phase failed"
           }`,
         );
+        completedTasks.push(task.id);
+        await publishProgress(
+          "task_skipped",
+          `capture is not replayable; held-out pairs skipped: ${
+            captured.capture.error ?? "capture or check phase failed"
+          }`,
+          task,
+        );
+        continue;
       }
-      for (let trial = 0; trial < repetitions.trials; trial += 1) {
-        for (
-          let heldout = 0;
-          heldout < repetitions.heldoutPairs;
-          heldout += 1
-        ) {
-          const scenarioSeed = options.seed + trial * 10_000 + heldout + 1;
+
+      const replayTimer = startPhase();
+      let replayFailure: string | undefined;
+      let completedPairs = 0;
+      for (let pair = 0; pair < pairsPerTask; pair += 1) {
+        try {
+          const scenarioSeed = options.seed + pair + 1;
           const directScenarioBase = buildScenario(
             task.id,
             scenarioSeed,
@@ -364,40 +410,47 @@ export async function runBenchmark(
             registry,
             runDir,
           );
-          const replayScenario = await provision(
-            driver,
-            replayScenarioBase,
-            registry,
-            runDir,
-          );
-
           await publishProgress(
             "heldout_direct",
-            `running direct pair ${trial + 1}.${heldout + 1}`,
+            `running direct/replay pair ${pair + 1}/${pairsPerTask}`,
             task,
           );
           const directWorkspace = join(
             agentRoot,
-            `${task.id}-${trial}-${heldout}-direct`,
+            `${task.id}-${pair}-direct`,
           );
           await prepareDirectWorkspace(
             directWorkspace,
             task.id,
             directScenario,
           );
-          const beforeDirect = await driver.snapshot(directScenario);
+          const beforeDirect = driver.baselineSnapshot(directScenario);
           await writeJson(
             artifactPath(
               runDir,
               "snapshots",
-              `${task.id}-${trial}-${heldout}-direct-before.json`,
+              `${task.id}-${pair}-direct-before.json`,
             ),
             beforeDirect,
+          );
+          const directTranscriptPath = artifactPath(
+            runDir,
+            "transcripts",
+            "direct",
+            `${task.id}-${pair}.json`,
           );
           const direct = await adapter.start(
             renderedTaskPrompt(task.id, directScenario, "direct"),
             directWorkspace,
+            harnessEvidenceOptions(
+              directTranscriptPath,
+              "heldout_direct",
+              `direct agent pair ${pair + 1}/${pairsPerTask}`,
+              (phase, detail) => publishProgress(phase, detail, task),
+              phaseTimeoutMs("direct"),
+            ),
           );
+          await writeJson(directTranscriptPath, direct);
           const afterDirect = await driver.snapshot(
             directScenario,
             { settleTaggedOutputs: true },
@@ -406,7 +459,7 @@ export async function runBenchmark(
             artifactPath(
               runDir,
               "snapshots",
-              `${task.id}-${trial}-${heldout}-direct-after.json`,
+              `${task.id}-${pair}-direct-after.json`,
             ),
             afterDirect,
           );
@@ -424,98 +477,129 @@ export async function runBenchmark(
           });
           await publishProgress(
             "heldout_direct_complete",
-            `direct pair ${trial + 1}.${
-              heldout + 1
-            } scored ${directGrade.score}`,
+            `direct pair ${pair + 1}/${pairsPerTask} scored ${directGrade.score}`,
             task,
           );
-
-          if (captured.workflowDir && captureReady(captured.capture)) {
-            await publishProgress(
-              "heldout_replay",
-              `running Cori replay pair ${trial + 1}.${heldout + 1}`,
-              task,
-            );
-            const beforeReplay = await driver.snapshot(replayScenario);
-            await writeJson(
-              artifactPath(
-                runDir,
-                "snapshots",
-                `${task.id}-${trial}-${heldout}-replay-before.json`,
-              ),
-              beforeReplay,
-            );
-            const workflowHash = await hashDirectory(captured.workflowDir);
-            const replay = await runCori([
-              "run",
-              captured.workflowDir,
-              "--json",
-              ...parameterArgs(replayScenario),
-            ], captured.authorWorkspace);
-            await writeJson(
-              artifactPath(
-                runDir,
-                "cori-traces",
-                `${task.id}-${trial}-${heldout}.json`,
-              ),
-              replay,
-            );
-            const afterReplay = await driver.snapshot(
-              replayScenario,
-              { settleTaggedOutputs: true },
-            );
-            await writeJson(
-              artifactPath(
-                runDir,
-                "snapshots",
-                `${task.id}-${trial}-${heldout}-replay-after.json`,
-              ),
-              afterReplay,
-            );
-            const trace = parseTrace(replay.stdout);
-            const unchanged =
-              workflowHash === await hashDirectory(captured.workflowDir);
-            const replayGrade = hardGate(
-              gradeExternalState(replayScenario, beforeReplay, afterReplay),
-              replay.code === 0 && traceSucceeded(trace),
-              unchanged,
-            );
-            trials.push({
-              taskId: task.id,
-              seed: scenarioSeed,
-              lane: "replay",
-              grade: replayGrade,
-              tracePath: artifactPath(
-                runDir,
-                "cori-traces",
-                `${task.id}-${trial}-${heldout}.json`,
-              ),
-              workflowHash,
-              runtime: traceUsage(trace),
-            });
-            await publishProgress(
-              "heldout_replay_complete",
-              `replay pair ${trial + 1}.${
-                heldout + 1
-              } scored ${replayGrade.score}`,
-              task,
-            );
+          if (directGrade.safetyViolations.length > 0) {
+            replayFailure = `direct pair ${pair + 1} violated safety: ${
+              directGrade.safetyViolations.join("; ")
+            }`;
+            break;
           }
+
+          const replayScenario = await provision(
+            driver,
+            replayScenarioBase,
+            registry,
+            runDir,
+          );
+          await publishProgress(
+            "heldout_replay",
+            `running Cori replay pair ${pair + 1}/${pairsPerTask}`,
+            task,
+          );
+          const beforeReplay = driver.baselineSnapshot(replayScenario);
+          await writeJson(
+            artifactPath(
+              runDir,
+              "snapshots",
+              `${task.id}-${pair}-replay-before.json`,
+            ),
+            beforeReplay,
+          );
+          const expectedHash = captured.capture.workflowHash!;
+          const intactBefore = expectedHash ===
+            await hashDirectory(captured.workflowDir!);
+          const replay = await runCori([
+            "run",
+            captured.workflowDir!,
+            "--json",
+            ...parameterArgs(replayScenario),
+          ], captured.authorWorkspace);
+          const tracePath = artifactPath(
+            runDir,
+            "cori-traces",
+            `${task.id}-${pair}.json`,
+          );
+          await writeJson(tracePath, replay);
+          const afterReplay = await driver.snapshot(
+            replayScenario,
+            { settleTaggedOutputs: true },
+          );
+          await writeJson(
+            artifactPath(
+              runDir,
+              "snapshots",
+              `${task.id}-${pair}-replay-after.json`,
+            ),
+            afterReplay,
+          );
+          const trace = parseTrace(replay.stdout);
+          const unchanged = intactBefore && expectedHash ===
+            await hashDirectory(captured.workflowDir!);
+          const replayGrade = hardGate(
+            gradeExternalState(replayScenario, beforeReplay, afterReplay),
+            replay.code === 0 && traceSucceeded(trace),
+            unchanged,
+          );
+          trials.push({
+            taskId: task.id,
+            seed: scenarioSeed,
+            lane: "replay",
+            grade: replayGrade,
+            tracePath,
+            workflowHash: expectedHash,
+            runtime: traceUsage(trace),
+          });
+          completedPairs += 1;
+          await publishProgress(
+            "heldout_replay_complete",
+            `replay pair ${pair + 1}/${pairsPerTask} scored ${replayGrade.score}`,
+            task,
+          );
+          if (replayGrade.safetyViolations.length > 0) {
+            replayFailure = `replay pair ${pair + 1} failed safety or workflow integrity: ${
+              replayGrade.safetyViolations.join("; ")
+            }`;
+            break;
+          }
+        } catch (error) {
+          replayFailure = errorMessage(error);
+          break;
         }
       }
+      captured.capture.outcomes.replay = finishPhase(
+        replayTimer,
+        replayFailure ? "failed" : "succeeded",
+        replayFailure,
+        { plannedPairs: pairsPerTask, completedPairs },
+      );
+      if (replayFailure) taskFailures.push(`${task.id}: ${replayFailure}`);
+      captures.push(captured.capture);
       completedTasks.push(task.id);
       await publishProgress(
         "task_complete",
-        `completed all direct/replay pairs for ${task.id}`,
+        replayFailure
+          ? `stopped ${task.id} after ${completedPairs}/${pairsPerTask} pairs: ${replayFailure}`
+          : `completed ${completedPairs}/${pairsPerTask} direct/replay pairs for ${task.id}`,
         task,
       );
     }
-    runError = trialIntegrityError(trials);
   } catch (error) {
-    runError = error instanceof Error ? error.message : String(error);
+    globalError = errorMessage(error);
   } finally {
     await writeJson(join(runDir, "cleanup-registry.json"), registry);
   }
+
+  const integrityError = trialIntegrityError(trials);
+  const failures = [
+    ...(globalError ? [globalError] : []),
+    ...taskFailures,
+    ...(integrityError ? [integrityError] : []),
+  ];
+  const runError = failures.length > 0
+    ? `${failures.length} benchmark phase failure(s):\n${failures.join("\n")}`
+    : undefined;
 
   const result = summarize(
     runId,
@@ -572,7 +656,9 @@ export async function cleanup(
       resources: [],
       runTags: [],
     });
-    await writeBenchmarkViewerForRun(runDir);
+    if (await exists(join(runDir, "result.json"))) {
+      await writeBenchmarkViewerForRun(runDir);
+    }
   }
   if (failures.length > 0) {
     throw new Error(`cleanup completed with failures:\n${failures.join("\n")}`);
@@ -582,9 +668,9 @@ export async function cleanup(
 export async function report(
   runId: string,
   artifactsRoot = defaultArtifactsRoot,
-): Promise<BenchmarkResultV1> {
+): Promise<BenchmarkResultV2> {
   const runDir = join(artifactsRoot, runId);
-  const existing = await readJson<BenchmarkResultV1>(
+  const existing = await readJson<BenchmarkResultV2>(
     join(runDir, "result.json"),
   );
   const trials = await Promise.all(existing.trials.map(async (trial) => {
@@ -597,9 +683,7 @@ export async function report(
     }
   }));
   const currentTrialError = trialIntegrityError(trials);
-  const runError = recoverableLegacyScoreError(existing)
-    ? currentTrialError
-    : existing.error ?? currentTrialError;
+  const runError = existing.error ?? currentTrialError;
   const summarized = summarize(
     existing.runId,
     {
@@ -628,13 +712,13 @@ export async function combineRuns(
   runIds: readonly string[],
   artifactsRoot = defaultArtifactsRoot,
   requestedRunId?: string,
-): Promise<BenchmarkResultV1> {
+): Promise<BenchmarkResultV2> {
   if (runIds.length < 2) {
     throw new Error("combine requires at least two batch run IDs");
   }
   const sources = await Promise.all(
     runIds.map((runId) =>
-      readJson<BenchmarkResultV1>(join(artifactsRoot, runId, "result.json"))
+      readJson<BenchmarkResultV2>(join(artifactsRoot, runId, "result.json"))
     ),
   );
   const first = sources[0]!;
@@ -649,9 +733,9 @@ export async function combineRuns(
     );
   }
   for (const source of sources) {
+    assertResultCoriIdentity(source);
     if (
-      source.status !== "succeeded" &&
-      !recoverableLegacyScoreError(source)
+      source.status !== "succeeded"
     ) {
       throw new Error(`cannot combine failed run ${source.runId}`);
     }
@@ -667,10 +751,17 @@ export async function combineRuns(
       source.environment.llm_model !== first.environment.llm_model ||
       source.environment.author_model !== first.environment.author_model ||
       source.environment.cori !== first.environment.cori ||
-      source.environment.cori_sha256 !== first.environment.cori_sha256
+      source.environment.cori_version !== first.environment.cori_version ||
+      source.environment.cori_sha256 !== first.environment.cori_sha256 ||
+      source.environment.author_cori_path !==
+        first.environment.author_cori_path ||
+      source.environment.author_cori_version !==
+        first.environment.author_cori_version ||
+      source.environment.author_cori_sha256 !==
+        first.environment.author_cori_sha256
     ) {
       throw new Error(
-        "combined runs must use the same Cori executable build, author model, and workflow LLM model",
+        "combined runs must use the same selected and author-side Cori executable identities, author model, and workflow LLM model",
       );
     }
   }
@@ -697,8 +788,7 @@ export async function combineRuns(
       }; extra: ${extra.join(", ") || "none"})`,
     );
   }
-  const repetitions = profileShape(first.profile);
-  const expectedPerLane = repetitions.trials * repetitions.heldoutPairs;
+  const expectedPerLane = profilePairs(first.profile);
   const trials = sources.flatMap((source) => source.trials);
   for (const task of TASKS) {
     for (const lane of ["direct", "replay"] as const) {
@@ -748,14 +838,47 @@ export async function combineRuns(
   return result;
 }
 
+export function assertResultCoriIdentity(
+  result: Pick<BenchmarkResultV2, "runId" | "environment">,
+): void {
+  const environment = result.environment;
+  const selected: CoriIdentity = {
+    path: environment.cori ?? "",
+    version: environment.cori_version ?? "",
+    sha256: environment.cori_sha256 ?? "",
+  };
+  const author: CoriIdentity = {
+    path: environment.author_cori_path ?? "",
+    version: environment.author_cori_version ?? "",
+    sha256: environment.author_cori_sha256 ?? "",
+  };
+  if (
+    !selected.path || !selected.version || !selected.sha256 ||
+    !author.path || !author.version || !author.sha256
+  ) {
+    throw new Error(
+      `run ${result.runId} is missing selected or author-side Cori identity evidence`,
+    );
+  }
+  if (
+    selected.path !== author.path ||
+    selected.version !== author.version ||
+    selected.sha256 !== author.sha256
+  ) {
+    throw new Error(
+      `run ${result.runId} selected and author-side Cori identities do not match`,
+    );
+  }
+}
+
 function summarize(
   runId: string,
   options: RunOptions,
   startedAt: string,
-  capture: BenchmarkResultV1["capture"],
+  capture: BenchmarkResultV2["capture"],
   trials: readonly TrialResult[],
   runError?: string,
-): BenchmarkResultV1 {
+): BenchmarkResultV2 {
   const direct = trials.filter((trial) => trial.lane === "direct");
   const replay = trials.filter((trial) => trial.lane === "replay");
   const directScore = mean(direct.map((trial) => trial.grade.score));
@@ -776,22 +899,31 @@ function summarize(
         : []
     ),
   );
-  const designTokens = sumNullable(
-    direct.map((trial) => tokenSum(trial.harness)),
-  );
+  const designTokens = sumNullable(capture.tasks.flatMap((task) =>
+    [task.outcomes.author, task.outcomes.capture].map((phase) =>
+      phase.inputTokens !== null && phase.inputTokens !== undefined &&
+        phase.outputTokens !== null && phase.outputTokens !== undefined
+        ? phase.inputTokens + phase.outputTokens
+        : null
+    )
+  ));
   const safetyViolations = trials.reduce(
     (sum, trial) => sum + trial.grade.safetyViolations.length,
     0,
   );
-  const designCost = directTime ?? null;
+  const designCost = capture.tasks.length > 0
+    ? capture.tasks.reduce((sum, task) =>
+      sum + task.outcomes.author.wallTimeMs +
+      task.outcomes.capture.wallTimeMs + task.outcomes.check.wallTimeMs, 0)
+    : null;
   const runtimeInputTokens = sumNullable(
     replay.map((trial) => trial.runtime?.inputTokens ?? null),
   );
   const runtimeOutputTokens = sumNullable(
     replay.map((trial) => trial.runtime?.outputTokens ?? null),
   );
-  const result: BenchmarkResultV1 = {
-    version: 1,
+  const result: BenchmarkResultV2 = {
+    version: 2,
     status: runError ? "failed" : "succeeded",
     runId,
     profile: options.profile,
@@ -802,7 +934,11 @@ function summarize(
     environment: {
       cori: coriBinary(),
       cori_source: coriBinarySource,
+      cori_version: coriBinaryVersion,
       cori_sha256: coriBinarySha256,
+      author_cori_path: authorCoriIdentity?.path ?? null,
+      author_cori_version: authorCoriIdentity?.version ?? null,
+      author_cori_sha256: authorCoriIdentity?.sha256 ?? null,
       gws: process.env.GWS_BIN ?? "gws",
       calendar_id: configuredBenchmarkCalendarId() ?? null,
       author_model: options.harness === "codex" ? codexModel() : null,
@@ -811,6 +947,12 @@ function summarize(
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
     capture,
+    phaseTimingsMs: {
+      author: sumPhaseTime(capture.tasks, "author"),
+      capture: sumPhaseTime(capture.tasks, "capture"),
+      check: sumPhaseTime(capture.tasks, "check"),
+      replay: sumPhaseTime(capture.tasks, "replay"),
+    },
     trials,
     metrics: {
       directWallTimeMs: directTime,
@@ -846,7 +988,7 @@ function summarize(
 
 async function writeArtifacts(
   runDir: string,
-  result: BenchmarkResultV1,
+  result: BenchmarkResultV2,
 ): Promise<void> {
   await writeJson(join(runDir, "result.json"), result);
   await writeFile(
@@ -876,80 +1018,6 @@ async function provision(
  * not measuring reuse of the task the agent actually completed.
  */
 async function captureWorkflowForTask({
-  ...args
-}: CaptureWorkflowArgs): Promise<CapturedTaskWorkflow> {
-  const attempts: Array<NonNullable<TaskCapture["attempts"]>[number]> = [];
-  let latest: CapturedTaskWorkflow | null = null;
-  let priorCaptureError: string | undefined;
-  for (let attempt = 1; attempt <= maxCaptureAttempts; attempt += 1) {
-    const attemptSeed = args.seed + (attempt - 1) * 100_000;
-    const captured = await captureWorkflowAttempt({
-      ...args,
-      seed: attemptSeed,
-      attempt,
-      priorCaptureError,
-    });
-    const ready = captureReady(captured.capture);
-    attempts.push({
-      attempt,
-      seed: attemptSeed,
-      authorGrade: captured.capture.authorGrade,
-      ready,
-      ...(captured.capture.error ? { error: captured.capture.error } : {}),
-    });
-    latest = {
-      ...captured,
-      capture: {
-        ...captured.capture,
-        attempts: [...attempts],
-        ...(ready ? { selectedAttempt: attempt } : {}),
-      },
-    };
-    if (ready) {
-      if (captured.workflowDir) {
-        await copyWorkflow(
-          captured.workflowDir,
-          artifactPath(args.runDir, "generated-workflows", args.task.id),
-        );
-      }
-      return latest;
-    }
-    if (
-      attempt === maxCaptureAttempts ||
-      !retryableCaptureFailure(captured.capture)
-    ) {
-      if (
-        attempt === maxCaptureAttempts &&
-        latest.capture.error
-      ) {
-        latest = {
-          ...latest,
-          capture: {
-            ...latest.capture,
-            error:
-              `capture did not become replayable after ${attempts.length} attempts; last attempt: ${
-                latest.capture.error
-              }`,
-          },
-        };
-      }
-      return latest;
-    }
-    await args.onProgress(
-      "capture_retry",
-      `capture attempt ${attempt}/${maxCaptureAttempts} was not replayable (${
-        captured.capture.error ?? `score ${captured.capture.authorGrade.score}`
-      }); retrying on a fresh fixture`,
-    );
-    priorCaptureError = captured.capture.error;
-  }
-  if (!latest) {
-    throw new Error(`capture for ${args.task.id} produced no attempts`);
-  }
-  return latest;
-}
-
-async function captureWorkflowAttempt({
   task,
   seed,
   runId,
@@ -958,23 +1026,13 @@ async function captureWorkflowAttempt({
   driver,
   adapter,
   registry,
-  model,
   onProgress,
-  attempt,
-  priorCaptureError,
-}: CaptureWorkflowArgs & {
-  attempt: number;
-  priorCaptureError?: string;
-}): Promise<CapturedTaskWorkflow> {
-  const attemptNamespace = attempt === 1
-    ? runId
-    : `${runId}-capture-attempt-${attempt}`;
-  const artifactStem = attempt === 1
-    ? task.id
-    : `${task.id}-attempt-${attempt}`;
+}: CaptureWorkflowArgs): Promise<CapturedTaskWorkflow> {
+  const artifactStem = task.id;
+  const authorTimer = startPhase();
   const authorScenario = await provision(
     driver,
-    buildScenario(task.id, seed, "author", attemptNamespace),
+    buildScenario(task.id, seed, "author", runId),
     registry,
     runDir,
   );
@@ -982,21 +1040,31 @@ async function captureWorkflowAttempt({
   await prepareDirectWorkspace(authorWorkspace, task.id, authorScenario);
   await onProgress(
     "author_direct",
-    `agent is completing the author fixture (capture attempt ${attempt}/${maxCaptureAttempts})`,
+    "agent is completing the single author fixture",
   );
-  const beforeAuthor = await driver.snapshot(authorScenario);
+  const beforeAuthor = driver.baselineSnapshot(authorScenario);
   await writeJson(
     artifactPath(runDir, "snapshots", "authors", `${artifactStem}-before.json`),
     beforeAuthor,
   );
+  const authorTranscriptPath = artifactPath(
+    runDir,
+    "transcripts",
+    "authors",
+    `${artifactStem}-direct.json`,
+  );
   const directAuthor = await adapter.start(
     renderedTaskPrompt(task.id, authorScenario, "direct"),
     authorWorkspace,
+    harnessEvidenceOptions(
+      authorTranscriptPath,
+      "author_direct",
+      "agent is working on the author fixture",
+      onProgress,
+      phaseTimeoutMs("author"),
+    ),
   );
-  await writeJson(
-    artifactPath(runDir, "transcripts", "authors", `${artifactStem}-direct.json`),
-    directAuthor,
-  );
+  await writeJson(authorTranscriptPath, directAuthor);
   const afterAuthor = await driver.snapshot(
     authorScenario,
     { settleTaggedOutputs: true },
@@ -1018,78 +1086,145 @@ async function captureWorkflowAttempt({
     artifactPath(runDir, "author-grades", `${task.id}.json`),
     authorGrade,
   );
+  const authorFailure = authorGrade.safetyViolations.length > 0
+    ? `author task violated benchmark safety: ${
+      authorGrade.safetyViolations.join("; ")
+    }`
+    : directAuthor.exitCode !== 0
+    ? `author harness exited ${directAuthor.exitCode}`
+    : undefined;
+  const authorOutcome = finishPhase(
+    authorTimer,
+    authorFailure ? "failed" : "succeeded",
+    authorFailure,
+    sessionUsage(directAuthor),
+  );
   if (authorGrade.safetyViolations.length > 0) {
+    const captureOutcome = skippedOutcome("author safety violation");
+    const checkOutcome = skippedOutcome("author safety violation");
+    const replayOutcome = skippedOutcome("author safety violation");
     return {
       capture: {
         taskId: task.id,
         authorGrade,
+        outcomes: {
+          author: authorOutcome,
+          capture: captureOutcome,
+          check: checkOutcome,
+          replay: replayOutcome,
+        },
+        previewPresented: false,
         previewDidNotWrite: false,
+        skillCheckObserved: false,
+        skillCheckSucceeded: false,
+        benchmarkCheckSucceeded: false,
         checkPassed: false,
         policy: null,
+        workflowHash: null,
         workflowPath: null,
-        error:
-          `author task violated benchmark safety: ${
-            authorGrade.safetyViolations.join("; ")
-          }`,
+        error: authorFailure,
       },
       workflowDir: null,
       authorWorkspace,
     };
   }
 
-  await prepareCaptureWorkspace(authorWorkspace, task.id, model);
+  await prepareCaptureWorkspace(authorWorkspace);
   const workflowDir = join(authorWorkspace, "captured-workflow");
-  await onProgress("capture_preview", "requesting read-only workflow preview");
-  const absentBeforePreview =
-    !(await containsWorkflowManifest(authorWorkspace));
-  const preview = directAuthor.sessionId
-    ? await adapter.resume(
-      directAuthor.sessionId,
-      previewPrompt(),
-      authorWorkspace,
-    )
-    : directAuthor;
-  await writeJson(
-    artifactPath(
+  const captureTimer = startPhase();
+  const absentBeforePreview = !(await containsWorkflowManifest(authorWorkspace)) &&
+    !(await containsFiles(workflowDir));
+  let previewDidNotWrite = false;
+  let previewPresented = false;
+  let preview: HarnessSession | undefined;
+  let approval: HarnessSession | undefined;
+  if (directAuthor.sessionId) {
+    const previewTranscriptPath = artifactPath(
       runDir,
       "transcripts",
       "authors",
       `${artifactStem}-capture-preview.json`,
-    ),
-    preview,
-  );
-  const previewDidNotWrite = absentBeforePreview &&
-    !(await containsWorkflowManifest(authorWorkspace)) &&
-    !transcriptExecutedCoriRun(preview);
-
-  await onProgress(
-    "capture_approval",
-    "approving workflow files after preview gate",
-  );
-  const approval = preview.sessionId
-    ? await adapter.resume(
-      preview.sessionId,
-      approvalPrompt(task, priorCaptureError),
-      authorWorkspace,
-    )
-    : preview;
-  await writeJson(
-    artifactPath(
+    );
+    const approvalTranscriptPath = artifactPath(
       runDir,
       "transcripts",
       "authors",
       `${artifactStem}-capture-approval.json`,
-    ),
-    approval,
+    );
+    await onProgress("capture_preview", "requesting the skill's read-only tree and manifest preview");
+    ({ preview, approval } = await captureConversationTurns(
+      adapter,
+      directAuthor.sessionId,
+      authorWorkspace,
+      {
+        preview: harnessEvidenceOptions(
+          previewTranscriptPath,
+          "capture_preview",
+          "skill is preparing the preview",
+          onProgress,
+          phaseTimeoutMs("capture_preview"),
+        ),
+        approval: harnessEvidenceOptions(
+          approvalTranscriptPath,
+          "capture_approval",
+          "skill is writing and checking the approved workflow",
+          onProgress,
+          phaseTimeoutMs("capture_approval"),
+        ),
+        afterPreview: async (session) => {
+          await writeJson(previewTranscriptPath, session);
+          previewPresented = transcriptHasWorkflowPreview(session);
+          previewDidNotWrite = absentBeforePreview &&
+            !(await containsWorkflowManifest(authorWorkspace)) &&
+            !(await containsFiles(workflowDir)) &&
+            !transcriptExecutedCoriRun(session) &&
+            !transcriptExecutedCoriCheck(session);
+          await onProgress(
+            "capture_approval",
+            previewDidNotWrite
+              ? "preview recorded without writes; replying yes"
+              : "preview gate failed; recording the required yes turn without repairing",
+          );
+        },
+      },
+    ));
+    await writeJson(approvalTranscriptPath, approval);
+  }
+
+  const workflowExists = await exists(workflowDir);
+  const captureFailures = [
+    ...(!directAuthor.sessionId ? ["author harness did not return a resumable session"] : []),
+    ...(!previewPresented ? ["skill did not present a complete workflow tree and manifest preview"] : []),
+    ...(!previewDidNotWrite ? ["preview gate detected workflow files or Cori execution before approval"] : []),
+    ...(!approval ? ["approval turn was not recorded"] : []),
+    ...(approval && approval.exitCode !== 0
+      ? [`approval harness exited ${approval.exitCode}`]
+      : []),
+    ...(!workflowExists ? ["approved skill session did not create captured-workflow"] : []),
+  ];
+  const captureOutcome = finishPhase(
+    captureTimer,
+    captureFailures.length > 0 ? "failed" : "succeeded",
+    captureFailures.join("; ") || undefined,
+    combinedSessionUsage([preview, approval]),
   );
 
   let policy: TaskCapture["policy"] = null;
   let checkPassed = false;
-  let qualificationPassed = false;
-  let qualificationGrade: TaskCapture["qualificationGrade"];
-  let qualificationTracePath: string | undefined;
-  let checkError: string | undefined;
-  if (await exists(workflowDir)) {
+  const skillCheckObserved = approval
+    ? transcriptExecutedCoriCheck(approval)
+    : false;
+  const skillCheckSucceeded = approval
+    ? transcriptSuccessfulCoriCheck(approval)
+    : false;
+  let benchmarkCheckSucceeded = false;
+  const checkTimer = startPhase();
+  let checkError: string | undefined = !skillCheckObserved
+    ? "skill approval turn did not run cori check"
+    : !skillCheckSucceeded
+    ? "skill approval turn attempted cori check but did not complete with `Result: ✓ ready`"
+    : undefined;
+  if (workflowExists) {
     policy = await inspectWorkflowPolicy(
       workflowDir,
       [
@@ -1098,14 +1233,17 @@ async function captureWorkflowAttempt({
       ],
       task.parameters.map((parameter) => parameter.name),
     );
+    await writeJson(
+      artifactPath(runDir, "policy", `${task.id}.json`),
+      policy,
+    );
+    await writeJson(
+      artifactPath(runDir, "workflow-hashes", `${task.id}.json`),
+      { captured: policy.workflowHash },
+    );
     await copyWorkflow(
       workflowDir,
-      artifactPath(
-        runDir,
-        "generated-workflows",
-        "attempts",
-        artifactStem,
-      ),
+      artifactPath(runDir, "generated-workflows", task.id),
     );
     await onProgress(
       "workflow_check",
@@ -1116,132 +1254,72 @@ async function captureWorkflowAttempt({
       artifactPath(runDir, "cori-check", `${artifactStem}.json`),
       checked,
     );
-    checkPassed = checked.code === 0 && policy.ok;
-    checkError = formatWorkflowCheckFailure(checked, policy);
+    benchmarkCheckSucceeded = checked.code === 0 &&
+      isCanonicalCoriReadyOutput(`${checked.stdout}\n${checked.stderr}`);
+    checkPassed = policy.ok && skillCheckSucceeded &&
+      benchmarkCheckSucceeded;
+    checkError = [
+      checkError,
+      formatWorkflowCheckFailure(checked, policy),
+    ].filter(Boolean).join("; ") || undefined;
   } else {
-    checkError = "approved author session did not create captured-workflow";
+    checkError = [
+      checkError,
+      "approved skill session did not create captured-workflow",
+    ].filter(Boolean).join("; ");
   }
+  const checkOutcome = finishPhase(
+    checkTimer,
+    checkPassed ? "succeeded" : "failed",
+    checkError,
+  );
 
-  if (previewDidNotWrite && checkPassed && policy?.ok) {
-    await onProgress(
-      "workflow_qualification",
-      "executing Cori once against an unscored disposable scenario",
-    );
-    const qualificationBase = buildScenario(
-      task.id,
-      seed + 900_000,
-      "replay",
-      `${runId}-qualification`,
-    );
-    const qualification = await provision(
-      driver,
-      qualificationBase,
-      registry,
-      runDir,
-    );
-    const beforeQualification = await driver.snapshot(qualification);
-    await writeJson(
-      artifactPath(runDir, "qualification", `${artifactStem}-before.json`),
-      beforeQualification,
-    );
-    const workflowHash = await hashDirectory(workflowDir);
-    const executed = await runCori([
-      "run",
-      workflowDir,
-      "--json",
-      ...parameterArgs(qualification),
-    ], authorWorkspace);
-    qualificationTracePath = artifactPath(
-      runDir,
-      "qualification",
-      `${artifactStem}-trace.json`,
-    );
-    await writeJson(qualificationTracePath, executed);
-    const afterQualification = await driver.snapshot(
-      qualification,
-      { settleTaggedOutputs: true },
-    );
-    await writeJson(
-      artifactPath(runDir, "qualification", `${artifactStem}-after.json`),
-      afterQualification,
-    );
-    const trace = parseTrace(executed.stdout);
-    const traceOk = executed.code === 0 && traceSucceeded(trace);
-    const traceDiagnostic = traceOk
-      ? undefined
-      : failedTraceDiagnostic(trace, executed);
-    const hashUnchanged = workflowHash === await hashDirectory(workflowDir);
-    qualificationGrade = hardGate(
-      gradeExternalState(
-        qualification,
-        beforeQualification,
-        afterQualification,
-      ),
-      traceOk,
-      hashUnchanged,
-    );
-    qualificationPassed = qualificationGrade.score === 100 &&
-      qualificationGrade.safetyViolations.length === 0;
-    if (!qualificationPassed) {
-      const violations = qualificationGrade.safetyViolations.join("; ");
-      const incomplete = qualificationGrade.items
-        .filter((item) => item.earned < item.max)
-        .map((item) => item.id)
-        .join(", ");
-      checkError = violations
-        ? `qualification safety or replay-integrity failed: ${violations}${
-          traceDiagnostic ? `; Cori diagnostic: ${traceDiagnostic}` : ""
-        }`
-        : `qualification scored ${qualificationGrade.score}/100; Cori workflows must score 100${
-          incomplete ? ` (incomplete: ${incomplete})` : ""
-        }`;
-    }
-  }
+  const errorParts = [captureOutcome.error, checkOutcome.error]
+    .flatMap((value) => value?.split("; ") ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const error = [...new Set(errorParts)].join("; ") || undefined;
 
   return {
     capture: {
       taskId: task.id,
       authorGrade,
+      outcomes: {
+        author: authorOutcome,
+        capture: captureOutcome,
+        check: checkOutcome,
+        replay: skippedOutcome(
+          checkPassed && previewDidNotWrite && previewPresented
+            ? "held-out replay not started"
+            : "capture or check failed",
+        ),
+      },
+      previewPresented,
       previewDidNotWrite,
+      skillCheckObserved,
+      skillCheckSucceeded,
+      benchmarkCheckSucceeded,
       checkPassed,
-      qualificationPassed,
-      ...(qualificationGrade ? { qualificationGrade } : {}),
-      ...(qualificationTracePath ? { qualificationTracePath } : {}),
       policy,
-      workflowPath: await exists(workflowDir) ? workflowDir : null,
-      ...(!previewDidNotWrite
-        ? {
-          error:
-            "preview gate detected workflow writes or a Cori run before approval",
-        }
-        : checkError
-        ? { error: checkError }
-        : {}),
+      workflowHash: policy?.workflowHash ?? null,
+      workflowPath: workflowExists ? workflowDir : null,
+      ...(error ? { error } : {}),
     },
-    workflowDir: checkPassed ? workflowDir : null,
+    workflowDir: checkPassed && previewPresented && previewDidNotWrite
+      ? workflowDir
+      : null,
     authorWorkspace,
   };
 }
 
 export function captureReady(capture: TaskCapture): boolean {
   return capture.authorGrade.safetyViolations.length === 0 &&
-    capture.previewDidNotWrite && capture.checkPassed &&
-    capture.policy?.ok === true && capture.qualificationPassed === true &&
-    capture.qualificationGrade?.score === 100 &&
-    capture.qualificationGrade.safetyViolations.length === 0;
-}
-
-export function retryableCaptureFailure(capture: TaskCapture): boolean {
-  if (capture.authorGrade.safetyViolations.length > 0) return false;
-  if (!capture.previewDidNotWrite) return false;
-  const qualificationViolations =
-    capture.qualificationGrade?.safetyViolations ?? [];
-  if (
-    qualificationViolations.some((violation) =>
-      !retryableReplayIntegrityFailures.has(violation)
-    )
-  ) return false;
-  return true;
+    capture.previewPresented && capture.previewDidNotWrite &&
+    capture.skillCheckObserved && capture.skillCheckSucceeded &&
+    capture.benchmarkCheckSucceeded && capture.checkPassed &&
+    capture.outcomes.capture.status === "succeeded" &&
+    capture.outcomes.check.status === "succeeded" &&
+    capture.policy?.ok === true && capture.workflowHash !== null;
 }
 
 export function formatWorkflowCheckFailure(
@@ -1254,6 +1332,12 @@ export function formatWorkflowCheckFailure(
       compactDiagnostic(checked.stdout) ||
       "no diagnostic output";
     failures.push(`cori check exited ${checked.code}: ${diagnostic}`);
+  } else if (
+    !isCanonicalCoriReadyOutput(`${checked.stdout}\n${checked.stderr}`)
+  ) {
+    failures.push(
+      "benchmark absolute-binary cori check did not report `Result: ✓ ready`",
+    );
   }
   if (!policy.ok) {
     const diagnostic = compactDiagnostic(
@@ -1270,7 +1354,7 @@ function compactDiagnostic(value: string): string {
 
 export function aggregateCaptures(
   tasks: readonly TaskCapture[],
-): BenchmarkResultV1["capture"] {
+): BenchmarkResultV2["capture"] {
   return {
     previewDidNotWrite: tasks.length > 0 &&
       tasks.every((capture) => capture.previewDidNotWrite),
@@ -1297,14 +1381,7 @@ export async function prepareDirectWorkspace(
 
 export async function prepareCaptureWorkspace(
   workspace: string,
-  taskId: string,
-  model: string,
 ): Promise<void> {
-  await writeFile(
-    join(workspace, "CORI_AUTHORING.md"),
-    authoringReference(model, taskById(taskId).runtimeTrack, taskId),
-    "utf8",
-  );
   await cp(
     join(repoRoot, "skills", "cori_save_workflow"),
     join(workspace, ".agents", "skills", "cori_save_workflow"),
@@ -1331,6 +1408,8 @@ export function renderedTaskPrompt(
     "",
     "Use only the resources listed below. Tag every newly created Workspace resource and draft body with the exact run tag. Put the exact run tag in both the name/title and content of every newly created Drive file. Create drafts only; never send mail. All Calendar writes must pass sendUpdates=none.",
     "",
+    "The registered resources are freshly provisioned for this scenario and its run tag is unique. Do not add stale-state cleanup or cross-run already-exists guards unless this task explicitly requires one.",
+    "",
     `Run tag: ${scenario.runTag}`,
     "Parameters:",
     ...Object.entries(scenario.parameters).map(([name, value]) =>
@@ -1345,54 +1424,38 @@ export function renderedTaskPrompt(
   ].join("\n");
 }
 
-function previewPrompt(): string {
-  return "The direct task attempt is complete. Read and follow the benchmark-local skill at .agents/skills/cori_save_workflow/SKILL.md. Capture the procedure demonstrated in this conversation as a reusable Cori workflow, including corrections needed to satisfy the original task contract. Show only its directory tree and complete manifest.md. Do not create, edit, or run any workflow files yet.";
+export function captureRequestPrompt(): string {
+  return "Save this as a Cori workflow under ./captured-workflow.";
 }
 
-export function approvalPrompt(
-  task: TaskSpec,
-  priorCaptureError?: string,
-): string {
-  const parameterNames = task.parameters.map((parameter) => parameter.name)
-    .join(", ");
-  const retryContext = priorCaptureError
-    ? ` This is a fresh retry after a previous independent capture failed. Correct this concrete failure and check for the same defect throughout the new workflow: ${compactDiagnostic(priorCaptureError)}`
-    : "";
-  return `Approved. First read ./CORI_AUTHORING.md from the current workspace again.${retryContext} Write the workflow to ./captured-workflow, then run \`"$CORI_BENCH_CORI" check ./captured-workflow\`. This variable names the exact Cori development executable selected by the benchmark. Do not substitute another cori from PATH and do not run cori run. Before finishing, inspect every CLI parse callback: its second argument may contain only stderr and exitCode, never workflow parameters or earlier outputs; derive parse outputs from stdout or return a fixed acknowledgement. The manifest must declare exactly these parameters and no others: ${parameterNames}. Fixed values from TASK.md must be constants in the workflow, not extra parameters. The reusable manifest and step files must not contain the current run tag or any registered resource ID as a default or hard-coded value; derive dynamic IDs from the declared task parameters or earlier step outputs. Captured values may appear only under tests/fixtures.`;
+export function approvalPrompt(): string {
+  return "yes";
 }
 
-export function authoringReference(
-  model: string,
-  runtimeTrack: ReturnType<typeof taskById>["runtimeTrack"],
-  taskId: string,
-): string {
-  return [
-    "# Cori authoring constraints",
-    "- Workflows are folders with manifest.md and numbered TypeScript files in steps/.",
-    "- Every step imports `step` exactly from `@cori-do/sdk`; `@cori/sdk` is invalid.",
-    "- Every GWS CLI step must use a literal argv[0] of gws and manifest tools_required: [gws].",
-    "- GWS 0.22.5 accepts only documented flags such as --params, --json, --format, --output, --page-all, and --dry-run. Never invent convenience flags such as --allow-already-exists.",
-    "- Google Sheets CellData.userEnteredValue must be an ExtendedValue object, never null. If a task truly requires clearing cells, use spreadsheets values clear; fresh benchmark fixtures should not be cleared defensively.",
-    "- Use gws batch APIs for variable-size Sheets, Docs, and Slides writes; do not use v1 builtins.",
-    "- CLI steps use argv arrays, never shell dispatchers; code steps are pure and cannot perform I/O.",
-    "- A CLI parse function is `parse(stdout, { stderr, exitCode })`; it never receives workflow input. Derive output fields from the GWS JSON response (for example totalUpdatedRows) or use a fixed success value; never read `input.*` in parse.",
-    "- Step expressions run in Deno: use web globals such as btoa, never Node globals such as Buffer.",
-    "- Create Gmail drafts only. Calendar steps must use sendUpdates: none.",
-    "- Reusability is mandatory: never hard-code or default the current run tag or registered Workspace resource IDs in manifest.md or steps. Derive dynamic IDs from declared task parameters or previous step outputs; real captured values belong only in tests/fixtures.",
-    "- The manifest parameter names must exactly match the Parameters list in TASK.md. Do not invent extra required inputs; fixed task values belong in the workflow implementation.",
-    "- Cori execution state begins with manifest parameters as top-level keys. Every required step input key must exactly match a parameter or a top-level key emitted by an earlier step.",
-    "- Successful object outputs are shallow-merged into one flat state object; outputs are not nested by step name, and a duplicate top-level key overwrites the earlier value.",
-    "- Keep multiple records and side-effect IDs in arrays or unique wrapper keys. Never reuse generic output keys such as message, id, or label_id when later steps need each value.",
-    "- cori check statically parses and type-checks every workflow module without executing callbacks. It does not perform cross-step dataflow analysis; runtime Zod validation catches malformed consumption before the consuming side effect.",
-    taskId === "support_inbox_triage"
-      ? "- The support fixture always has three query results. Return their IDs in one message_ids array, keep all three fetched messages uniquely addressable (for example in a messages array or unique message wrappers), and keep every created category/priority label ID uniquely addressable by message and label purpose. Never reuse a shared message or label_id output key, and do not add fixture-specific message-ID parameters."
-      : "",
-    runtimeTrack === "deterministic"
-      ? "- This task is deterministic: do not use step.llm; encode its rules in code steps."
-      : model
-      ? `- For hybrid extraction/classification use typed llm steps with model: ${model}.`
-      : "- The benchmark runner will provide a required model for hybrid tasks.",
-  ].join("\n");
+export async function captureConversationTurns(
+  adapter: HarnessAdapter,
+  authorSessionId: string,
+  cwd: string,
+  options: {
+    preview?: HarnessExecutionOptions;
+    approval?: HarnessExecutionOptions;
+    afterPreview?: (preview: HarnessSession) => void | Promise<void>;
+  } = {},
+): Promise<{ preview: HarnessSession; approval: HarnessSession }> {
+  const preview = await adapter.resume(
+    authorSessionId,
+    captureRequestPrompt(),
+    cwd,
+    options.preview,
+  );
+  await options.afterPreview?.(preview);
+  const approval = await adapter.resume(
+    preview.sessionId ?? authorSessionId,
+    approvalPrompt(),
+    cwd,
+    options.approval,
+  );
+  return { preview, approval };
 }
 
 function gwsReference(): string {
@@ -1410,12 +1473,8 @@ function parameterArgs(scenario: Scenario): readonly string[] {
   );
 }
 
-function profileShape(
-  profile: BenchmarkProfile,
-): { trials: number; heldoutPairs: number } {
-  if (profile === "smoke") return { trials: 1, heldoutPairs: 1 };
-  if (profile === "full") return { trials: 1, heldoutPairs: 3 };
-  return { trials: 3, heldoutPairs: 3 };
+export function profilePairs(profile: BenchmarkProfile): number {
+  return profile === "publication" ? 3 : 1;
 }
 
 export function selectTasks(options: RunOptions) {
@@ -1459,13 +1518,14 @@ export function workspaceCoriBinary(): string {
 }
 
 function coriBinary(): string {
-  return process.env.CORI_BENCH_CORI ?? workspaceCoriBinary();
+  return resolve(process.env.CORI_BENCH_CORI ?? workspaceCoriBinary());
 }
 
 async function prepareCoriWorkflowCli(): Promise<void> {
   coriPreparation ??= (async () => {
     const override = process.env.CORI_BENCH_CORI?.trim();
     if (override) {
+      process.env.CORI_BENCH_CORI = resolve(override);
       coriBinarySource = "override";
     } else {
       const build = await runProcess(
@@ -1491,10 +1551,20 @@ async function prepareCoriWorkflowCli(): Promise<void> {
     }
 
     const binary = coriBinary();
-    if (await exists(binary)) {
-      coriBinarySha256 = await sha256(await readFile(binary));
-      pinExecutableDirectoryOnPath(binary);
+    if (!(await exists(binary))) {
+      throw new Error(`selected Cori executable does not exist: ${binary}`);
     }
+    const versionResult = await runProcess(binary, ["--version"]);
+    if (versionResult.code !== 0 || !versionResult.stdout.trim()) {
+      throw new Error(
+        `${binary} --version failed: ${
+          versionResult.stderr || versionResult.stdout || "no output"
+        }`,
+      );
+    }
+    coriBinaryVersion = versionResult.stdout.trim();
+    coriBinarySha256 = await sha256(await readFile(binary));
+    pinExecutableDirectoryOnPath(binary);
   })();
   await coriPreparation;
 }
@@ -1508,9 +1578,137 @@ function pinExecutableDirectoryOnPath(binary: string): void {
     .join(delimiter);
 }
 
+export async function createBenchmarkHarnessEnvironment(
+  runDir: string,
+  binary: string,
+  source: NodeJS.ProcessEnv = process.env,
+): Promise<NodeJS.ProcessEnv> {
+  const selected = resolve(binary);
+  const zdotdir = join(runDir, "harness-environment", "zdotdir");
+  await mkdir(zdotdir, { recursive: true });
+  await writeFile(
+    join(zdotdir, ".zprofile"),
+    [
+      "# Benchmark-owned login-shell PATH pin.",
+      'export PATH="${CORI_BENCH_CORI:h}:$PATH"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const environment: NodeJS.ProcessEnv = {
+    ...source,
+    CORI_BENCH_CORI: selected,
+    ZDOTDIR: zdotdir,
+  };
+  const directory = dirname(selected);
+  const entries = (source.PATH ?? "").split(delimiter).filter(Boolean);
+  environment.PATH = [
+    directory,
+    ...entries.filter((entry) => resolve(entry) !== directory),
+  ].join(delimiter);
+  return environment;
+}
+
 export function isCoriWorkflowCliHelp(value: string): boolean {
   return /<PATH>/u.test(value) && /--update\b/u.test(value) &&
     /--yes\b/u.test(value);
+}
+
+export function isCanonicalCoriReadyOutput(value: string): boolean {
+  return /(?:^|\n)Result:\s*✓ ready(?:\n|$)/u.test(value);
+}
+
+export function validateCoriLoginShellProbe(
+  selected: CoriIdentity,
+  probe: CoriLoginShellProbe,
+): void {
+  if (resolve(probe.path) !== resolve(selected.path)) {
+    throw new Error(
+      `author login-shell Cori path mismatch: expected ${selected.path}, found ${probe.path}`,
+    );
+  }
+  if (!isCoriWorkflowCliHelp(probe.help)) {
+    throw new Error(
+      "author login-shell Cori help mismatch: `cori check --help` is not the expected workflow CLI surface",
+    );
+  }
+  if (probe.version !== selected.version) {
+    throw new Error(
+      `author login-shell Cori version mismatch: expected ${selected.version}, found ${probe.version}`,
+    );
+  }
+  if (probe.sha256 !== selected.sha256) {
+    throw new Error(
+      `author login-shell Cori digest mismatch: expected ${selected.sha256}, found ${probe.sha256}`,
+    );
+  }
+}
+
+export async function probeHarnessCoriEnvironment(
+  environment: NodeJS.ProcessEnv,
+  selected: CoriIdentity,
+  runner: ProcessRunner = runProcess,
+): Promise<CoriIdentity> {
+  const shell = environment.CORI_BENCH_ZSH ?? "zsh";
+  const pathResult = await runner(
+    shell,
+    ["-lc", "command -v cori"],
+    repoRoot,
+    environment,
+  );
+  const observedPath = successfulProbeOutput("command -v cori", pathResult);
+  const helpResult = await runner(
+    shell,
+    ["-lc", "cori check --help"],
+    repoRoot,
+    environment,
+  );
+  const help = successfulProbeOutput("cori check --help", helpResult, false);
+  const versionResult = await runner(
+    shell,
+    ["-lc", "cori --version"],
+    repoRoot,
+    environment,
+  );
+  const observed: CoriLoginShellProbe = {
+    path: resolve(observedPath),
+    help,
+    version: successfulProbeOutput("cori --version", versionResult),
+    sha256: await sha256(await readFile(resolve(observedPath))),
+  };
+  validateCoriLoginShellProbe(selected, observed);
+  return {
+    path: observed.path,
+    version: observed.version,
+    sha256: observed.sha256,
+  };
+}
+
+function successfulProbeOutput(
+  command: string,
+  result: ProcessResult,
+  trim = true,
+): string {
+  const output = `${result.stdout}${result.stderr}`;
+  if (result.code !== 0 || !output.trim()) {
+    throw new Error(
+      `author login-shell probe \`${command}\` failed (${result.code}): ${
+        compactDiagnostic(output) || "no output"
+      }`,
+    );
+  }
+  return trim ? output.trim() : output;
+}
+
+function selectedCoriIdentity(): CoriIdentity {
+  if (!coriBinaryVersion || !coriBinarySha256) {
+    throw new Error("selected Cori executable identity was not prepared");
+  }
+  return {
+    path: coriBinary(),
+    version: coriBinaryVersion,
+    sha256: coriBinarySha256,
+  };
 }
 
 async function ensureCoriWorkflowCli(): Promise<void> {
@@ -1584,12 +1782,168 @@ async function copyWorkflow(
   await cp(source, destination, { recursive: true });
 }
 
-function tokenSum(session: TrialResult["harness"]): number | null {
-  if (
-    !session || session.usage.inputTokens === null ||
-    session.usage.outputTokens === null
-  ) return null;
-  return session.usage.inputTokens + session.usage.outputTokens;
+interface PhaseTimer {
+  startedAt: string;
+  startedMs: number;
+}
+
+function startPhase(): PhaseTimer {
+  return { startedAt: new Date().toISOString(), startedMs: performance.now() };
+}
+
+function finishPhase(
+  timer: PhaseTimer,
+  status: PhaseOutcome["status"],
+  error?: string,
+  details: Partial<PhaseOutcome> = {},
+): PhaseOutcome {
+  const finishedAt = new Date().toISOString();
+  return {
+    status,
+    startedAt: timer.startedAt,
+    finishedAt,
+    wallTimeMs: Math.round(performance.now() - timer.startedMs),
+    ...details,
+    ...(error ? { error } : {}),
+  };
+}
+
+function skippedOutcome(error: string): PhaseOutcome {
+  const now = new Date().toISOString();
+  return {
+    status: "skipped",
+    startedAt: now,
+    finishedAt: now,
+    wallTimeMs: 0,
+    error,
+  };
+}
+
+function sessionUsage(session: HarnessSession): Partial<PhaseOutcome> {
+  return {
+    inputTokens: session.usage.inputTokens,
+    outputTokens: session.usage.outputTokens,
+    toolCalls: session.usage.toolCalls,
+  };
+}
+
+function combinedSessionUsage(
+  sessions: readonly (HarnessSession | undefined)[],
+): Partial<PhaseOutcome> {
+  const present = sessions.filter((session): session is HarnessSession =>
+    session !== undefined
+  );
+  return {
+    inputTokens: sumNullable(present.map((session) =>
+      session.usage.inputTokens
+    )),
+    outputTokens: sumNullable(present.map((session) =>
+      session.usage.outputTokens
+    )),
+    toolCalls: sumNullable(present.map((session) => session.usage.toolCalls)),
+  };
+}
+
+function harnessEvidenceOptions(
+  path: string,
+  phase: string,
+  detail: string,
+  onProgress: (phase: string, detail: string) => Promise<void>,
+  timeoutMs: number,
+): HarnessExecutionOptions {
+  let lastProgressDetail: string | undefined;
+  return {
+    timeoutMs,
+    onProgress: async (partial) => {
+      await writeJson(path, partial);
+      const progressDetail =
+        `${detail} (${formatElapsed(partial.wallTimeMs)} elapsed)`;
+      if (progressDetail !== lastProgressDetail) {
+        lastProgressDetail = progressDetail;
+        await onProgress(phase, progressDetail);
+      }
+    },
+  };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1_000);
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+export function phaseTimeoutMs(phase: string): number {
+  const key = `CORI_BENCH_${phase.toUpperCase()}_TIMEOUT_MS`;
+  const defaults: Record<string, number> = {
+    author: 15 * 60_000,
+    direct: 15 * 60_000,
+    capture_preview: 15 * 60_000,
+    capture_approval: 20 * 60_000,
+  };
+  const fallback = defaults[phase] ?? 10 * 60_000;
+  const configured = Number(process.env[key] ?? fallback);
+  if (!Number.isSafeInteger(configured) || configured <= 0) {
+    throw new Error(`${key} must be a positive integer`);
+  }
+  return configured;
+}
+
+function sumPhaseTime(
+  tasks: readonly TaskCapture[],
+  phase: keyof TaskCapture["outcomes"],
+): number {
+  return tasks.reduce((sum, task) => sum + task.outcomes[phase].wallTimeMs, 0);
+}
+
+function failedTaskWorkflow(
+  task: TaskSpec,
+  error: string,
+  agentRoot: string,
+): CapturedTaskWorkflow {
+  const author = finishPhase(startPhase(), "failed", error);
+  return {
+    capture: {
+      taskId: task.id,
+      authorGrade: emptyGrade(task, error),
+      outcomes: {
+        author,
+        capture: skippedOutcome("author phase failed"),
+        check: skippedOutcome("author phase failed"),
+        replay: skippedOutcome("author phase failed"),
+      },
+      previewPresented: false,
+      previewDidNotWrite: false,
+      skillCheckObserved: false,
+      skillCheckSucceeded: false,
+      benchmarkCheckSucceeded: false,
+      checkPassed: false,
+      policy: null,
+      workflowHash: null,
+      workflowPath: null,
+      error,
+    },
+    workflowDir: null,
+    authorWorkspace: join(agentRoot, "authors", task.id),
+  };
+}
+
+function emptyGrade(task: TaskSpec, note: string): Grade {
+  return {
+    score: 0,
+    passed: false,
+    safetyViolations: [],
+    items: task.rubric.map((item) => ({
+      id: item.id,
+      earned: 0,
+      max: item.points,
+      note,
+    })),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sumNullable(values: readonly (number | null)[]): number | null {
@@ -1602,20 +1956,102 @@ function sumNullable(values: readonly (number | null)[]): number | null {
 export function transcriptExecutedCoriRun(
   session: { transcript: readonly unknown[] },
 ): boolean {
-  return session.transcript.some((event) => hasCoriRunCommand(event));
+  return session.transcript.some((event) => hasCoriCommand(event, "run"));
 }
 
-function hasCoriRunCommand(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(hasCoriRunCommand);
+export function transcriptExecutedCoriCheck(
+  session: { transcript: readonly unknown[] },
+): boolean {
+  return session.transcript.some((event) => hasCoriCommand(event, "check"));
+}
+
+export function transcriptSuccessfulCoriCheck(
+  session: { transcript: readonly unknown[] },
+): boolean {
+  return session.transcript.some((event) =>
+    hasSuccessfulCompletedCoriCheck(event)
+  );
+}
+
+function hasSuccessfulCompletedCoriCheck(
+  value: unknown,
+  completed = false,
+): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) =>
+      hasSuccessfulCompletedCoriCheck(entry, completed)
+    );
+  }
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const isCompleted = completed || record.type === "item.completed" ||
+    record.status === "completed";
+  if (
+    isCompleted && record.type === "command_execution" &&
+    typeof record.command === "string" &&
+    hasCoriCommand(record, "check")
+  ) {
+    const exitCode = record.exit_code ?? record.exitCode;
+    const output = [
+      record.aggregated_output,
+      record.stdout,
+      record.stderr,
+      record.output,
+    ].filter((entry): entry is string => typeof entry === "string").join("\n");
+    if (
+      (exitCode === undefined || exitCode === 0) &&
+      isCanonicalCoriReadyOutput(output)
+    ) return true;
+  }
+  return Object.values(record).some((nested) =>
+    typeof nested !== "string" &&
+    hasSuccessfulCompletedCoriCheck(nested, isCompleted)
+  );
+}
+
+function hasCoriCommand(value: unknown, verb: "run" | "check"): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasCoriCommand(entry, verb));
+  }
   if (!value || typeof value !== "object") return false;
   for (const [key, nested] of Object.entries(value)) {
     if (
       key === "command" && typeof nested === "string" &&
-      /\bcori\s+run\b/iu.test(nested)
+      new RegExp(`(?:^|[\\s\"'])[^\\s\"']*cori[\"']?\\s+${verb}\\b`, "iu")
+        .test(nested)
     ) return true;
-    if (typeof nested !== "string" && hasCoriRunCommand(nested)) return true;
+    if (typeof nested !== "string" && hasCoriCommand(nested, verb)) return true;
   }
   return false;
+}
+
+export function transcriptHasWorkflowPreview(
+  session: { transcript: readonly unknown[] },
+): boolean {
+  const text = session.transcript.map((event) => assistantText(event)).join("\n");
+  return /captured-workflow\/?/iu.test(text) &&
+    /manifest\.md/iu.test(text) &&
+    /---[\s\S]*\bid\s*:/iu.test(text) &&
+    /\n#\s+[^\n]+/u.test(text) &&
+    /\n##\s+(?:Goal|Steps|Verification)/iu.test(text);
+}
+
+function assistantText(value: unknown, assistant = false): string {
+  if (typeof value === "string") return assistant ? value : "";
+  if (Array.isArray(value)) {
+    return value.map((entry) => assistantText(entry, assistant)).join("\n");
+  }
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const marker = [record.role, record.type, record.kind]
+    .filter((entry): entry is string => typeof entry === "string")
+    .join(" ");
+  const nestedAssistant = assistant ||
+    /(?:^|[_\s.-])(?:assistant|agent_message)(?:$|[_\s.-])/iu.test(marker);
+  return Object.entries(record)
+    .filter(([key]) => !["role", "type", "kind"].includes(key))
+    .map(([, nested]) => assistantText(nested, nestedAssistant))
+    .join("\n");
 }
 
 async function containsWorkflowManifest(directory: string): Promise<boolean> {
@@ -1630,7 +2066,15 @@ async function containsWorkflowManifest(directory: string): Promise<boolean> {
   return false;
 }
 
-function hardGate(
+async function containsFiles(directory: string): Promise<boolean> {
+  try {
+    return (await readdir(directory)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function hardGate(
   grade: TrialResult["grade"],
   traceOk: boolean,
   hashUnchanged: boolean,
@@ -1647,17 +2091,6 @@ function hardGate(
     : { ...grade, score: 0, passed: false, safetyViolations };
 }
 
-function recoverableLegacyScoreError(result: BenchmarkResultV1): boolean {
-  return result.status === "failed" &&
-    /^\d+ benchmark trial\(s\) failed external-state or execution grading$/u
-      .test(result.error ?? "") &&
-    result.trials.every((trial) =>
-      trial.grade.safetyViolations.length === 0
-    ) && result.trials
-      .filter((trial) => trial.lane === "replay")
-      .every((trial) => trial.grade.score === 100);
-}
-
 export function trialIntegrityError(
   trials: readonly TrialResult[],
 ): string | undefined {
@@ -1665,23 +2098,11 @@ export function trialIntegrityError(
     const safetyFailures = trial.grade.safetyViolations.map((violation) =>
       `${trial.taskId} seed ${trial.seed} ${trial.lane}: ${violation}`
     );
-    if (
-      trial.lane !== "replay" || trial.grade.score === 100 ||
-      safetyFailures.length > 0
-    ) return safetyFailures;
-    const incomplete = trial.grade.items
-      .filter((item) => item.earned < item.max)
-      .map((item) => item.id)
-      .join(", ");
-    return [
-      `${trial.taskId} seed ${trial.seed} replay: scored ${trial.grade.score}/100; expected 100${
-        incomplete ? ` (incomplete: ${incomplete})` : ""
-      }`,
-    ];
+    return safetyFailures;
   });
   return failures.length === 0
     ? undefined
-    : `${failures.length} benchmark Cori replay, safety, or replay-integrity failure(s):\n${
+    : `${failures.length} benchmark safety or replay-integrity failure(s):\n${
       failures.join("\n")
     }`;
 }

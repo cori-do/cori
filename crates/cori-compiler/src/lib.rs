@@ -36,6 +36,28 @@ use thiserror::Error;
 
 pub use step_parser::ParsedStep;
 
+/// Re-parse one CLI step at the activity boundary and return its statically
+/// declared argv[0]. Activities use this immediately before evaluating the
+/// command builder so a data-dependent runtime branch cannot switch binaries.
+pub fn cli_binary_from_source(source: &str) -> Result<String, String> {
+    let parsed = step_parser::parse(source).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| error.reason)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    if parsed.kind != StepKind::Cli {
+        return Err("step is not a `cli` activity".to_string());
+    }
+    parsed
+        .metadata
+        .get("binary")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "could not statically determine CLI argv[0]".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -344,6 +366,38 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         }
     }
 
+    // Capability declarations are the execution boundary, not documentation.
+    // Reject extras so an interpreter wrapper cannot declare the hidden child
+    // process (for example `tools_required: [deno, gws]` with argv[0] `deno`)
+    // and thereby make planner/auth checks appear to cover a binary the broker
+    // never dispatches directly.
+    for declared in &manifest.tools_required {
+        if !required_cli.contains(declared) {
+            errors.push(
+                CompileError::new(
+                    "manifest.md",
+                    format!(
+                        "CLI binary `{declared}` is declared in `tools_required` but no `cli` step invokes it directly as argv[0]"
+                    ),
+                )
+                .with_field("tools_required"),
+            );
+        }
+    }
+    for declared in &manifest.mcp_servers {
+        if !required_mcp.contains(declared) {
+            errors.push(
+                CompileError::new(
+                    "manifest.md",
+                    format!(
+                        "MCP server `{declared}` is declared in `mcp_servers` but no `mcp_tool` step uses it"
+                    ),
+                )
+                .with_field("mcp_servers"),
+            );
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -576,6 +630,27 @@ mod tests {
     }
 
     #[test]
+    fn unused_cli_declaration_is_rejected() {
+        let manifest = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\ntools_required: [deno, gws]\n---\n# body\n";
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            manifest,
+            &[(
+                "01_a.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"a\", command: () => [\"deno\", \"eval\", \"new Deno.Command('gws')\"] });\n",
+            )],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(errs.iter().any(|e| {
+            e.file == "manifest.md"
+                && e.field.as_deref() == Some("tools_required")
+                && e.reason.contains("gws")
+                && e.reason.contains("directly as argv[0]")
+        }));
+    }
+
+    #[test]
     fn mcp_server_must_be_declared() {
         let manifest = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\nmcp_servers: [github]\n---\n# body\n";
         let tmp = tempdir();
@@ -589,6 +664,26 @@ mod tests {
         );
         let errs = compile(tmp.path()).unwrap_err();
         assert!(errs.iter().any(|e| e.reason.contains("slack")));
+    }
+
+    #[test]
+    fn unused_mcp_declaration_is_rejected() {
+        let manifest = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\nmcp_servers: [slack]\n---\n# body\n";
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            manifest,
+            &[(
+                "01_a.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"a\", run: (x) => x });\n",
+            )],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(errs.iter().any(|e| {
+            e.file == "manifest.md"
+                && e.field.as_deref() == Some("mcp_servers")
+                && e.reason.contains("slack")
+        }));
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { BenchmarkResultV1 } from "./types.js";
+import type { BenchmarkResultV2 } from "./types.js";
 
 /** Benchmark pricing in USD per one million tokens. */
 export const INPUT_TOKEN_PRICE_PER_MILLION_USD = 2.5;
@@ -23,25 +23,29 @@ export async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-export function scorecard(result: BenchmarkResultV1): string {
+export function scorecard(result: BenchmarkResultV2): string {
   const direct = result.trials.filter((trial) => trial.lane === "direct");
   const replay = result.trials.filter((trial) => trial.lane === "replay");
   const directStats = laneStats(direct);
   const replayStats = laneStats(replay);
   const safetyViolations = result.trials.reduce((sum, trial) => sum + trial.grade.safetyViolations.length, 0);
   const taskCaptures = result.capture.tasks ?? [];
-  const capturePassed = taskCaptures.filter((capture) => capture.previewDidNotWrite && capture.checkPassed && capture.policy?.ok).length;
-  const qualified = taskCaptures.filter((capture) =>
-    capture.qualificationPassed === true
+  const capturePassed = taskCaptures.filter((capture) =>
+    capture.previewPresented && capture.previewDidNotWrite &&
+    capture.skillCheckObserved && capture.skillCheckSucceeded &&
+    capture.benchmarkCheckSucceeded && capture.checkPassed &&
+    capture.policy?.ok
   ).length;
-  const captureAttempts = taskCaptures.reduce(
-    (sum, capture) => sum + (capture.attempts?.length ?? 1),
-    0,
-  );
-  const retriedCaptures = taskCaptures.filter((capture) =>
-    (capture.attempts?.length ?? 1) > 1
+  const attemptedChecks = taskCaptures.filter((capture) =>
+    capture.skillCheckObserved
   ).length;
-  const captureRows = captureAttemptRows(taskCaptures);
+  const successfulAuthorChecks = taskCaptures.filter((capture) =>
+    capture.skillCheckSucceeded
+  ).length;
+  const successfulBenchmarkChecks = taskCaptures.filter((capture) =>
+    capture.benchmarkCheckSucceeded
+  ).length;
+  const captureRows = captureOutcomeRows(taskCaptures);
   const pairedRows = pairedTrialRows(result);
   const directSpread = scoreSpread(directStats);
   const replaySpread = scoreSpread(replayStats);
@@ -56,12 +60,14 @@ export function scorecard(result: BenchmarkResultV1): string {
       replayStats.count > 1 &&
       replaySpread < directSpread
     ? "In this run, direct agent execution was more variable than replaying the captured Cori workflow."
-    : "Direct-agent variability is comparative; every unchanged Cori replay is required to score 100.";
+    : "Direct-agent and safe replay quality remain comparative measurements; safety and workflow integrity are hard gates.";
   return [
     `# Cori workflow-capture benchmark: ${result.runId}`,
     "",
     `Run status: **${result.status === "succeeded" ? "completed" : "failed"}**`,
-    result.error ? `Run failure: ${result.error}` : "Cori replays scored 100; direct-agent scores remain comparative measurements.",
+    result.error
+      ? `Run failure: ${result.error}`
+      : "Capture completed; direct-agent and safe replay scores remain comparative measurements.",
     "",
     "## Executive summary",
     "",
@@ -73,7 +79,7 @@ export function scorecard(result: BenchmarkResultV1): string {
     comparisonRow(
       "Direct agent",
       directStats,
-      result.metrics.designTokens,
+      laneTokens(direct),
       lanePriceUsd(direct),
     ),
     comparisonRow(
@@ -91,13 +97,13 @@ export function scorecard(result: BenchmarkResultV1): string {
       ? pairedRows
       : ["| _No paired trials_ |  |  |  |  |  |  |"]),
     "",
-    "## Design-time capture attempts",
+    "## Per-task phase outcomes",
     "",
-    "| Task | Attempts | Selected | Author scores | Attempt outcomes |",
-    "| --- | ---: | ---: | --- | --- |",
+    "| Task | Author | Capture | Check | Replay | Author score |",
+    "| --- | --- | --- | --- | --- | ---: |",
     ...(captureRows.length > 0
       ? captureRows
-      : ["| _No capture attempts_ |  |  |  |  |"]),
+      : ["| _No task phases_ |  |  |  |  |  |"]),
     "",
     "## Capture, safety, and reuse",
     "",
@@ -105,9 +111,16 @@ export function scorecard(result: BenchmarkResultV1): string {
     "| --- | --- |",
     `| Capture preview gate | ${result.capture.previewDidNotWrite ? "pass" : "fail"} |`,
     `| Capture/check | ${result.capture.checkPassed ? "pass" : "fail"} |`,
+    `| Author checks attempted | ${attemptedChecks}/${taskCaptures.length} |`,
+    `| Author checks reporting ready | ${successfulAuthorChecks}/${taskCaptures.length} |`,
+    `| Independent absolute-binary checks reporting ready | ${successfulBenchmarkChecks}/${taskCaptures.length} |`,
     `| Task captures validated | ${capturePassed}/${taskCaptures.length} |`,
-    `| Functional qualifications | ${qualified}/${taskCaptures.length} |`,
-    `| Capture attempts | ${captureAttempts} across ${taskCaptures.length} task(s); ${retriedCaptures} retried |`,
+    `| One-shot captures | ${taskCaptures.length}; automatic retries 0 |`,
+    `| Design-time tokens | ${formatTokens(result.metrics.designTokens)} |`,
+    `| Author time | ${formatDuration(result.phaseTimingsMs.author)} |`,
+    `| Capture time | ${formatDuration(result.phaseTimingsMs.capture)} |`,
+    `| Check time | ${formatDuration(result.phaseTimingsMs.check)} |`,
+    `| Paired direct/replay time | ${formatDuration(result.phaseTimingsMs.replay)} |`,
     `| Safety/replay-integrity violations | ${safetyViolations} |`,
     `| Replay − direct 95% CI | ${
       result.summary.pairedDifferenceCi95?.map(formatScore).join(" to ") ??
@@ -125,7 +138,7 @@ export function scorecard(result: BenchmarkResultV1): string {
     "## How to read this",
     "",
     "- Direct-agent score variation is expected and remains a comparative measurement.",
-    "- Every unchanged Cori replay must score 100; a sub-100 replay fails the run.",
+    "- A safe replay below 100 is a measurement and does not stop remaining pairs.",
     "- Benchmark infrastructure, capture gates, safety, and replay integrity remain hard requirements.",
     `- Token prices use $${INPUT_TOKEN_PRICE_PER_MILLION_USD.toFixed(2)} per 1M input tokens and $${OUTPUT_TOKEN_PRICE_PER_MILLION_USD.toFixed(2)} per 1M output tokens.`,
     "",
@@ -143,7 +156,7 @@ interface LaneStats {
   meanWallTimeMs: number | null;
 }
 
-function laneStats(trials: BenchmarkResultV1["trials"]): LaneStats {
+function laneStats(trials: BenchmarkResultV2["trials"]): LaneStats {
   const scores = trials.map((trial) => trial.grade.score);
   const wallTimes = trials.flatMap((trial) => {
     const value = trial.harness?.wallTimeMs ?? trial.runtime?.wallTimeMs;
@@ -174,7 +187,7 @@ function comparisonRow(
 }
 
 function lanePriceUsd(
-  trials: readonly BenchmarkResultV1["trials"][number][],
+  trials: readonly BenchmarkResultV2["trials"][number][],
 ): number | null {
   if (trials.length === 0) return null;
   const prices = trials.map(trialPriceUsd);
@@ -183,8 +196,24 @@ function lanePriceUsd(
     : null;
 }
 
+function laneTokens(
+  trials: readonly BenchmarkResultV2["trials"][number][],
+): number | null {
+  if (trials.length === 0) return null;
+  const totals = trials.map((trial) => {
+    const usage = trial.lane === "direct" ? trial.harness?.usage : trial.runtime;
+    return usage?.inputTokens !== null && usage?.inputTokens !== undefined &&
+        usage.outputTokens !== null && usage.outputTokens !== undefined
+      ? usage.inputTokens + usage.outputTokens
+      : null;
+  });
+  return totals.every((total): total is number => total !== null)
+    ? totals.reduce((sum, total) => sum + total, 0)
+    : null;
+}
+
 export function trialPriceUsd(
-  trial: BenchmarkResultV1["trials"][number],
+  trial: BenchmarkResultV2["trials"][number],
 ): number | null {
   const usage = trial.lane === "direct"
     ? trial.harness?.usage
@@ -197,7 +226,7 @@ export function trialPriceUsd(
     outputTokens * OUTPUT_TOKEN_PRICE_PER_MILLION_USD / 1_000_000;
 }
 
-function pairedTrialRows(result: BenchmarkResultV1): string[] {
+function pairedTrialRows(result: BenchmarkResultV2): string[] {
   const replayByPair = new Map(
     result.trials
       .filter((trial) => trial.lane === "replay")
@@ -220,7 +249,7 @@ function pairedTrialRows(result: BenchmarkResultV1): string[] {
     });
 }
 
-function trialFindings(trial: BenchmarkResultV1["trials"][number]): string {
+function trialFindings(trial: BenchmarkResultV2["trials"][number]): string {
   const findings = trial.grade.items
     .filter((item) => item.earned < item.max)
     .map((item) => item.id);
@@ -230,37 +259,22 @@ function trialFindings(trial: BenchmarkResultV1["trials"][number]): string {
   return [...findings, ...safety].join(", ") || "none";
 }
 
-function captureAttemptRows(
-  captures: BenchmarkResultV1["capture"]["tasks"],
+function captureOutcomeRows(
+  captures: BenchmarkResultV2["capture"]["tasks"],
 ): string[] {
   return captures.map((capture) => {
-    const attempts = capture.attempts ?? [{
-      attempt: 1,
-      seed: 0,
-      authorGrade: capture.authorGrade,
-      ready: capture.checkPassed &&
-        capture.policy?.ok === true &&
-        capture.qualificationPassed !== false,
-      ...(capture.error ? { error: capture.error } : {}),
-    }];
-    const scores = attempts.map((attempt) =>
-      `#${attempt.attempt}: ${formatScore(attempt.authorGrade.score)}`
-    ).join("; ");
-    const outcomes = attempts.map((attempt) => {
-      if (attempt.ready) return `#${attempt.attempt}: ready`;
-      const incomplete = attempt.authorGrade.items
-        .filter((item) => item.earned < item.max)
-        .map((item) => item.id);
-      const detail = incomplete.join(", ") ||
-        attempt.error?.replaceAll("\n", " ").slice(0, 120) ||
-        "not replayable";
-      return `#${attempt.attempt}: ${detail}`;
-    }).join("; ");
-    const selected = capture.selectedAttempt ??
-      (attempts.length === 1 && attempts[0]!.ready ? 1 : "none");
-    return `| ${escapeCell(capture.taskId)} | ${attempts.length} | ${
-      selected
-    } | ${escapeCell(scores)} | ${escapeCell(outcomes)} |`;
+    const phase = (name: keyof typeof capture.outcomes) => {
+      const outcome = capture.outcomes[name];
+      const pairs = outcome.plannedPairs === undefined
+        ? ""
+        : ` ${outcome.completedPairs ?? 0}/${outcome.plannedPairs}`;
+      return `${outcome.status}${pairs} (${formatDuration(outcome.wallTimeMs)})`;
+    };
+    return `| ${escapeCell(capture.taskId)} | ${phase("author")} | ${
+      phase("capture")
+    } | ${phase("check")} | ${phase("replay")} | ${
+      formatScore(capture.authorGrade.score)
+    } |`;
   });
 }
 
@@ -305,7 +319,7 @@ function escapeCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
-export function normalizedCsv(result: BenchmarkResultV1): string {
+export function normalizedCsv(result: BenchmarkResultV2): string {
   const header = "task_id,seed,lane,score,passed,safety_violations,wall_time_ms,tool_calls,input_tokens,output_tokens,runtime_input_tokens,runtime_output_tokens,runtime_cost_eur,price_usd";
   const rows = result.trials.map((trial) => [
     trial.taskId,

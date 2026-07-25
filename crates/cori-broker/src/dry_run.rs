@@ -19,13 +19,29 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::dispatch::{self, RunnerMode};
 use crate::runtime::Runtime;
-use crate::{ActivityOutcome, ActivityStatus, Result};
+use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
 
 /// Mock a `cli` step: evaluate the user's `command(input)` builder so the
 /// trace shows the actual argv that would have run, but never spawn the
 /// binary.
-pub fn cli(runtime: &Runtime, step_file_path: &Path, input: &JsonValue) -> Result<ActivityOutcome> {
+pub fn cli(
+    runtime: &Runtime,
+    step_file_path: &Path,
+    input: &JsonValue,
+    expected_binary: Option<&str>,
+) -> Result<ActivityOutcome> {
     let call = dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::CliCommand, input)?;
+    let binary = call
+        .output
+        .get("command")
+        .and_then(JsonValue::as_array)
+        .and_then(|argv| argv.first())
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| BrokerError::StepFailed {
+            message: "cli step produced an empty command".to_string(),
+            stack: None,
+        })?;
+    crate::cli::validate_binary_boundary(expected_binary, binary)?;
     Ok(ActivityOutcome {
         status: ActivityStatus::Skipped,
         output: json!({

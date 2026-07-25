@@ -183,14 +183,26 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
     let outcome: Result<ActivityOutcome, BrokerError> =
         tokio::task::spawn_blocking(move || match (kind, dry_run) {
             (BrokerKind::Code, _) => code::run(&ctx.runtime, &absolute_path, &step_input),
-            (BrokerKind::Cli, false) => cli_broker::run(
-                &ctx.runtime,
-                &ctx.caps,
-                &absolute_path,
-                &step_input,
-                &user_id,
-            ),
-            (BrokerKind::Cli, true) => dry_run::cli(&ctx.runtime, &absolute_path, &step_input),
+            (BrokerKind::Cli, false) => {
+                let expected_binary = expected_cli_binary(&absolute_path)?;
+                cli_broker::run(
+                    &ctx.runtime,
+                    &ctx.caps,
+                    &absolute_path,
+                    &step_input,
+                    &user_id,
+                    Some(&expected_binary),
+                )
+            }
+            (BrokerKind::Cli, true) => {
+                let expected_binary = expected_cli_binary(&absolute_path)?;
+                dry_run::cli(
+                    &ctx.runtime,
+                    &absolute_path,
+                    &step_input,
+                    Some(&expected_binary),
+                )
+            }
             (BrokerKind::Mcp, false) => mcp::run(
                 &ctx.runtime,
                 &ctx.caps,
@@ -218,6 +230,17 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
         Ok(o) => Ok(map_outcome(o, dry_run, started_at)),
         Err(err) => Err(broker_error_to_activity_error(err)),
     }
+}
+
+fn expected_cli_binary(step_path: &std::path::Path) -> Result<String, BrokerError> {
+    let source = std::fs::read_to_string(step_path).map_err(BrokerError::Io)?;
+    cori_compiler::cli_binary_from_source(&source).map_err(|message| BrokerError::StepFailed {
+        message: format!(
+            "could not revalidate CLI capability boundary for `{}`: {message}",
+            step_path.display()
+        ),
+        stack: None,
+    })
 }
 
 fn map_outcome(o: ActivityOutcome, dry_run: bool, started_at: DateTime<Utc>) -> ActivityOutput {

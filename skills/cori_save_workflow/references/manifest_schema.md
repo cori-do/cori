@@ -36,7 +36,7 @@ parameters:
   - name: target_env             # snake_case, used in step files as {target_env}
     type: enum                   # string | number | boolean | enum | path
     values: [dev, staging, prod] # required for enum
-    default: staging             # optional but encouraged
+    default: staging             # optional; only for stable, reusable values
     description: Which environment to deploy to
     required: true               # default true; set false for genuinely optional
 ```
@@ -53,8 +53,18 @@ parameters:
 
 ### Conventions
 
+- Preserve an explicit source-procedure input contract exactly. If the
+  conversation names its parameters, inputs, or run arguments, add, remove, or
+  rename one only after the user approves that contract change.
+- Make a value a parameter only when the caller is meant to choose it for a
+  run. Do not promote fixed recipients, output names, statuses, policy rules,
+  thresholds, or safety requirements into parameters merely because they could
+  have defaults.
 - One parameter per concept. If you find yourself adding `start_date` and `end_date_optional`, you have two parameters, not one weird one.
-- Defaults derived from the original run. If the user ran with `target_env=staging` once, that becomes the default.
+- When no explicit input contract exists, use defaults only for genuine caller
+  preferences intentionally stable across runs, such as
+  `target_env=staging`, a locale, or a `dry_run` choice.
+- Omit defaults for opaque or run-scoped external values unless the user explicitly designates them as stable: resource/record IDs, run tags, tag-scoped queries, generated names, and evaluation timestamps.
 - `required: false` means the step files must handle the parameter being undefined. Wire this through the step's input schema (`z.string().optional()`).
 - Don't over-parametrize. Three good parameters beat ten clever ones.
 
@@ -70,7 +80,6 @@ version: 1
 parameters:
   - name: spreadsheet_id
     type: string
-    default: 1_i5iOB7t0cW6-OSyQtdOWSiAUrO3bwxjF-tSwjFQRSA
     description: Target Google Sheets spreadsheet ID
   - name: source_tab
     type: string
