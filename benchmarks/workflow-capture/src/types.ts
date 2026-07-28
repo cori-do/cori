@@ -36,7 +36,7 @@ export interface ResourceBlueprint {
 export interface TaskSpec {
   id: string;
   name: string;
-  domain: "support" | "sales" | "hr" | "management" | "finance";
+  domain: "support" | "sales" | "hr" | "management" | "finance" | "legal" | "engineering";
   runtimeTrack: RuntimeTrack;
   parameters: readonly ParameterSpec[];
   requiredServices: readonly WorkspaceService[];
@@ -44,6 +44,29 @@ export interface TaskSpec {
   prompt: string;
   rubric: readonly RubricItem[];
   allowedSideEffects: AllowedSideEffects;
+  /**
+   * The task's source data changes shape every run and the correct output
+   * cannot be derived by matching literals. `hybrid` tasks must therefore
+   * execute at least one `llm` activity on replay; the runner enforces it.
+   */
+  requiresRuntimeModel?: boolean;
+  /**
+   * The fixture deliberately contains state from a simulated previous run, so
+   * the workflow must be safe to execute repeatedly. Tasks that declare this
+   * do not receive the "fixtures are always fresh" prompt clause.
+   */
+  rerunContract?: boolean;
+}
+
+/**
+ * One record the grader expects to find in the agent's output, keyed by a
+ * stable identifier the agent can also see. Field values are the hidden answer:
+ * they are never written into the fixture surface text, so a workflow can only
+ * produce them by understanding the source, not by copying it.
+ */
+export interface GroundTruthRecord {
+  key: string;
+  fields: Readonly<Record<string, string>>;
 }
 
 export interface ScenarioFixture {
@@ -53,7 +76,10 @@ export interface ScenarioFixture {
   table?: string[][];
   text?: string;
   events?: Json[];
+  /** Gmail fixtures provision one live message per entry, in order. */
   messages?: Json[];
+  /** Docs fixtures provision one live document per entry, in order. */
+  documents?: readonly { title: string; text: string }[];
 }
 
 export interface RegisteredResource {
@@ -62,6 +88,8 @@ export interface RegisteredResource {
   service: WorkspaceService;
   parentId?: string;
   createdByBenchmark: boolean;
+  /** Index into `Scenario.fixtures` that produced this resource. */
+  fixtureIndex?: number;
 }
 
 export interface Scenario {
@@ -75,6 +103,10 @@ export interface Scenario {
   expected: {
     facts: readonly string[];
     rubric: readonly RubricItem[];
+    /** Hidden per-record answers the grader checks the Workspace against. */
+    groundTruth: readonly GroundTruthRecord[];
+    /** Derived aggregates (counts, totals) the grader checks documents against. */
+    aggregates: Readonly<Record<string, string>>;
   };
   resources: readonly RegisteredResource[];
 }

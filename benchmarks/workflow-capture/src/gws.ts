@@ -202,18 +202,30 @@ export class WorkspaceScenarioDriver {
     const parameters = { ...scenario.parameters };
     const resources: RegisteredResource[] = [];
     try {
-      for (let index = 0; index < task.resources.length; index += 1) {
-        const blueprint = task.resources[index]!;
+      for (let index = 0; index < scenario.fixtures.length; index += 1) {
+        const blueprint = task.resources[index];
         const fixture = scenario.fixtures[index]!;
-        const created = await this.createFixture(fixture, scenario.runTag);
-        resources.push({ ...created, role: blueprint.role });
-        if (blueprint.parameter) parameters[blueprint.parameter] = created.id;
+        // One fixture can provision several live resources: an inbox holds a
+        // day's messages, an invoice folder holds a week's documents.
+        const created = await this.createFixtures(fixture, scenario.runTag);
+        for (const resource of created) {
+          resources.push({ ...resource, role: blueprint?.role ?? fixture.role, fixtureIndex: index });
+        }
+        if (blueprint?.parameter && created[0]) {
+          parameters[blueprint.parameter] = created[0].id;
+        }
       }
-      const gmailIds = resources.filter((resource) =>
-        resource.service === "gmail"
-      ).map((resource) => resource.id);
-      if (gmailIds.length > 0) {
-        await this.waitForUnreadMessages(gmailIds, scenario.runTag);
+      const unreadIds = scenario.fixtures.flatMap((fixture, index) => {
+        if (fixture.service !== "gmail") return [];
+        const provisioned = resources.filter((resource) => resource.fixtureIndex === index);
+        return (fixture.messages ?? []).flatMap((message, ordinal) =>
+          messageIsUnread(message) && provisioned[ordinal]
+            ? [provisioned[ordinal]!.id]
+            : []
+        );
+      });
+      if (unreadIds.length > 0) {
+        await this.waitForUnreadMessages(unreadIds, scenario.runTag);
       }
     } catch (error) {
       await this.cleanup(resources).catch(() => undefined);
@@ -298,7 +310,7 @@ export class WorkspaceScenarioDriver {
       q: `label:SENT "${scenario.runTag}"`,
       fields: "messages(id,threadId)",
     });
-    if (scenario.taskId === "support_inbox_triage") {
+    if (task.requiredServices.includes("gmail")) {
       resources[`__labels_${scenario.id}`] = await this.gws.call(["gmail", "users", "labels", "list"], {
         userId: "me",
         fields: "labels(id,name,type)",
@@ -347,19 +359,33 @@ export class WorkspaceScenarioDriver {
   baselineSnapshot(scenario: Scenario): WorkspaceSnapshot {
     const resources: Record<string, Json> = {};
     const calendarEvents: Json[] = [];
+    const task = taskById(scenario.taskId);
+    const ordinals = new Map<number, number>();
     scenario.resources.forEach((resource, index) => {
-      const fixture = scenario.fixtures[index];
+      const fixtureIndex = resource.fixtureIndex ?? index;
+      const fixture = scenario.fixtures[fixtureIndex];
       if (!fixture) return;
+      const ordinal = ordinals.get(fixtureIndex) ?? 0;
+      ordinals.set(fixtureIndex, ordinal + 1);
       if (resource.service === "sheets") {
         resources[resource.id] = gridFixture(fixture.table ?? []);
       } else if (resource.service === "gmail") {
-        resources[resource.id] = { id: resource.id, labelIds: ["INBOX", "UNREAD"] };
+        const message = fixture.messages?.[ordinal] ?? null;
+        resources[resource.id] = {
+          id: resource.id,
+          labelIds: messageIsUnread(message) ? ["INBOX", "UNREAD"] : ["INBOX"],
+        };
       } else if (resource.service === "calendar") {
         const events = { items: fixture.events ?? [] };
         resources[resource.id] = events;
         calendarEvents.push(events);
       } else if (resource.service === "docs") {
-        resources[resource.id] = { documentId: resource.id, title: fixture.title, text: fixture.text ?? "" };
+        const document = fixture.documents?.[ordinal];
+        resources[resource.id] = {
+          documentId: resource.id,
+          title: document?.title ?? fixture.title,
+          text: document?.text ?? fixture.text ?? "",
+        };
       } else if (resource.service === "slides") {
         resources[resource.id] = { presentationId: resource.id, title: fixture.title, slides: [] };
       } else {
@@ -369,7 +395,7 @@ export class WorkspaceScenarioDriver {
     resources[`__drafts_${scenario.id}`] = {};
     resources[`__sent_${scenario.id}`] = {};
     resources[`__drive_${scenario.id}`] = { files: [] };
-    if (scenario.taskId === "support_inbox_triage") {
+    if (task.requiredServices.includes("gmail")) {
       resources[`__labels_${scenario.id}`] = { labels: [] };
     }
     return {
@@ -459,7 +485,110 @@ export class WorkspaceScenarioDriver {
     if (failures.length > 0) throw new Error(`tag cleanup failed:\n${failures.join("\n")}`);
   }
 
-  private async createFixture(fixture: ScenarioFixture, runTag: string): Promise<RegisteredResource> {
+  private async createFixtures(fixture: ScenarioFixture, runTag: string): Promise<RegisteredResource[]> {
+    if (fixture.service === "docs") {
+      const documents = fixture.documents ??
+        [{ title: fixture.title, text: fixture.text ?? "" }];
+      const created: RegisteredResource[] = [];
+      for (const document of documents) {
+        const response = await this.gws.call(["docs", "documents", "create"], undefined, {
+          title: document.title,
+        });
+        const id = stringField(response, "documentId");
+        if (document.text) {
+          await this.gws.call(["docs", "documents", "batchUpdate"], { documentId: id }, {
+            requests: [{
+              insertText: { location: { index: 1 }, text: `${document.text}\nTag: ${runTag}\n` },
+            }],
+          });
+        }
+        created.push({ id, role: fixture.role, service: fixture.service, createdByBenchmark: true });
+      }
+      return created;
+    }
+    if (fixture.service === "gmail") {
+      const messages = fixture.messages ??
+        [{ subject: `[${runTag}] benchmark message`, body: "synthetic" }];
+      const created: RegisteredResource[] = [];
+      let triagedLabelId: string | undefined;
+      for (const message of messages) {
+        const unread = messageIsUnread(message);
+        const id = await this.insertMessage(message, runTag, unread);
+        if (!unread) {
+          // State left by a simulated previous run. The workflow must leave
+          // these alone, so they carry the completion label a prior run applied.
+          triagedLabelId ??= await this.ensureLabel(`${runTag}/triaged`);
+          await this.gws.call(["gmail", "users", "messages", "modify"], { userId: "me", id }, {
+            addLabelIds: [triagedLabelId],
+            removeLabelIds: ["UNREAD"],
+          });
+        }
+        created.push({ id, role: fixture.role, service: fixture.service, createdByBenchmark: true });
+      }
+      return created;
+    }
+    return [await this.createSingleFixture(fixture, runTag)];
+  }
+
+  private async insertMessage(
+    message: Json,
+    runTag: string,
+    unread: boolean,
+  ): Promise<string> {
+    const subject = objectString(message, "subject");
+    const body = objectString(message, "body");
+    const from = objectString(message, "from") || "benchmark@example.test";
+    const date = objectString(message, "date");
+    const parsed = date ? Date.parse(date) : Number.NaN;
+    const header = Number.isFinite(parsed)
+      ? new Date(parsed).toUTCString()
+      : "Mon, 13 Jul 2026 08:00:00 GMT";
+    const raw = base64Url([
+      `From: ${from}`,
+      "To: benchmark@example.test",
+      `Date: ${header}`,
+      `Subject: ${subject}`,
+      "",
+      body,
+      runTag,
+    ].join("\r\n"));
+    const inserted = await this.gws.call(["gmail", "users", "messages", "insert"], {
+      userId: "me",
+      internalDateSource: "dateHeader",
+    }, {
+      raw,
+      labelIds: unread ? ["INBOX", "UNREAD"] : ["INBOX"],
+    });
+    const id = stringField(inserted, "id");
+    try {
+      await this.gws.call(["gmail", "users", "messages", "modify"], { userId: "me", id }, {
+        addLabelIds: unread ? ["INBOX", "UNREAD"] : ["INBOX"],
+      });
+    } catch (error) {
+      await this.gws.call(["gmail", "users", "messages", "trash"], { userId: "me", id })
+        .catch(() => undefined);
+      throw error;
+    }
+    return id;
+  }
+
+  private async ensureLabel(name: string): Promise<string> {
+    const existing = await this.gws.call(["gmail", "users", "labels", "list"], {
+      userId: "me",
+      fields: "labels(id,name)",
+    });
+    for (const label of objectsFrom(existing, "labels")) {
+      if (label.name === name && typeof label.id === "string") return label.id;
+    }
+    const created = await this.gws.call(["gmail", "users", "labels", "create"], { userId: "me" }, {
+      name,
+      labelListVisibility: "labelShow",
+      messageListVisibility: "show",
+    });
+    return stringField(created, "id");
+  }
+
+  private async createSingleFixture(fixture: ScenarioFixture, runTag: string): Promise<RegisteredResource> {
     if (fixture.service === "sheets") {
       const created = await this.gws.call(["sheets", "spreadsheets", "create"], undefined, {
         properties: { title: fixture.title },
@@ -484,16 +613,6 @@ export class WorkspaceScenarioDriver {
       }
       return { id, role: fixture.role, service: fixture.service, createdByBenchmark: true };
     }
-    if (fixture.service === "docs") {
-      const created = await this.gws.call(["docs", "documents", "create"], undefined, { title: fixture.title });
-      const id = stringField(created, "documentId");
-      if (fixture.text) {
-        await this.gws.call(["docs", "documents", "batchUpdate"], { documentId: id }, {
-          requests: [{ insertText: { location: { index: 1 }, text: `${fixture.text}\nTag: ${runTag}\n` } }],
-        });
-      }
-      return { id, role: fixture.role, service: fixture.service, createdByBenchmark: true };
-    }
     if (fixture.service === "slides") {
       const created = await this.gws.call(["slides", "presentations", "create"], undefined, { title: fixture.title });
       return { id: stringField(created, "presentationId"), role: fixture.role, service: fixture.service, createdByBenchmark: true };
@@ -504,37 +623,6 @@ export class WorkspaceScenarioDriver {
         await this.gws.call(["calendar", "events", "insert"], { calendarId: id, sendUpdates: "none" }, event);
       }
       return { id, role: fixture.role, service: fixture.service, createdByBenchmark: false };
-    }
-    if (fixture.service === "gmail") {
-      const message = fixture.messages?.[0] ?? { subject: `[${runTag}] benchmark message`, body: "synthetic" };
-      const subject = objectString(message, "subject");
-      const body = objectString(message, "body");
-      const raw = base64Url([
-        "From: benchmark@example.test",
-        "To: benchmark@example.test",
-        "Date: Mon, 13 Jul 2026 08:00:00 +0000",
-        `Subject: ${subject}`,
-        "",
-        body,
-        runTag,
-      ].join("\r\n"));
-      const inserted = await this.gws.call(["gmail", "users", "messages", "insert"], {
-        userId: "me",
-        internalDateSource: "dateHeader",
-      }, {
-        raw,
-        labelIds: ["INBOX", "UNREAD"],
-      });
-      const id = stringField(inserted, "id");
-      try {
-        await this.gws.call(["gmail", "users", "messages", "modify"], { userId: "me", id }, {
-          addLabelIds: ["INBOX", "UNREAD"],
-        });
-      } catch (error) {
-        await this.gws.call(["gmail", "users", "messages", "trash"], { userId: "me", id }).catch(() => undefined);
-        throw error;
-      }
-      return { id, role: fixture.role, service: fixture.service, createdByBenchmark: true };
     }
     throw new Error(`unsupported fixture service: ${fixture.service}`);
   }
@@ -615,6 +703,13 @@ function driveTagQuery(runTag: string): string {
 
 function isDriveBackedResource(resource: RegisteredResource): boolean {
   return resource.service !== "calendar" && resource.service !== "gmail";
+}
+
+/** Messages left by a simulated previous run are provisioned already read. */
+export function messageIsUnread(message: Json): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return true;
+  if (typeof message.unread === "boolean") return message.unread;
+  return message.pretriaged !== true;
 }
 
 export function gmailFixtureReady(message: Json, listed: Json, id: string): boolean {

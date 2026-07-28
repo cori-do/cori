@@ -2,7 +2,7 @@ import { step } from "@cori-do/sdk";
 import { z } from "zod";
 
 const Input = z.object({
-  queue_spreadsheet_id: z.string(),
+  lead_spreadsheet_id: z.string(),
   run_tag: z.string(),
   as_of: z.string(),
   rows: z.array(z.array(z.string())),
@@ -10,18 +10,18 @@ const Input = z.object({
 const Output = z.object({ updated: z.number() });
 
 export default step.cli({
-  description: "Batch-write the sorted triage queue",
+  description: "Batch-write the ranked qualified leads",
   input: Input,
   output: Output,
-  command: ({ queue_spreadsheet_id, run_tag, as_of, rows }) => [
+  command: ({ lead_spreadsheet_id, run_tag, as_of, rows }) => [
     "gws", "sheets", "spreadsheets", "values", "batchUpdate",
-    "--params", JSON.stringify({ spreadsheetId: queue_spreadsheet_id }),
+    "--params", JSON.stringify({ spreadsheetId: lead_spreadsheet_id }),
     "--json", JSON.stringify({
       valueInputOption: "RAW",
       data: [{
-        range: "'Triage Queue'!A1",
+        range: "'Qualified Leads'!A1",
         values: [
-          ["message_id", "received_at", "sender", "subject", "category", "priority", "status", "run_tag", "as_of"],
+          ["message_id", "sender", "company", "seat_count", "timeline_days", "security_review", "score", "band", "run_tag", "as_of"],
           ...rows.map((row) => [...row, run_tag, as_of]),
         ],
       }],

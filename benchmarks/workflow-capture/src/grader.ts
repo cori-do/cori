@@ -1,8 +1,13 @@
-import type { Grade, Json, Scenario, WorkspaceSnapshot } from "./types.js";
+import type { GroundTruthRecord, Grade, Json, Scenario, WorkspaceSnapshot } from "./types.js";
 
 /**
- * Deterministic external-state grader. It deliberately receives only Workspace
- * snapshots: never model text, tool exit status, or Cori activity output.
+ * Deterministic external-state grader. It receives only Workspace snapshots:
+ * never model text, tool exit status, or Cori activity output.
+ *
+ * Every expected value comes from `scenario.expected`, which the fixture
+ * generator derived for this seed. Nothing in this file knows the answer to any
+ * particular run, so changing a fixture cannot silently leave the grader
+ * checking a stale constant.
  */
 export function gradeExternalState(scenario: Scenario, before: WorkspaceSnapshot, after: WorkspaceSnapshot): Grade {
   const beforeText = stableText(snapshotState(before));
@@ -14,28 +19,703 @@ export function gradeExternalState(scenario: Scenario, before: WorkspaceSnapshot
   const changed = beforeText !== afterText;
   const tagsPresent = afterText.includes(scenario.runTag);
   const draftsExist = hasValues(after.resources[`__drafts_${scenario.id}`]) || after.drafts.some(hasValues);
-  const markers = requiredMarkers(scenario.taskId);
-  const slaTable = scenario.taskId === "sla_breach_pack" ? findSlaResultTable(scenario, after) : null;
+  const context: GradeContext = {
+    scenario,
+    after,
+    output: taggedOutputText(scenario, after),
+    drafts: stableText(after.drafts),
+    calendar: stableText(after.calendarEvents),
+    truth: new Map(scenario.expected.groundTruth.map((record) => [record.key, record])),
+  };
   const items = scenario.expected.rubric.map((item) => {
-    const expected = markers[item.id] ?? [];
-    const semantic = semanticItemMatch(scenario, item.id, before, after);
-    const matches = semantic ?? (item.id === "gmail" && scenario.taskId === "support_inbox_triage"
-      ? supportMessagesProcessed(scenario, before, after)
-      : item.id === "sla" && scenario.taskId === "sla_breach_pack"
-        ? slaResultsMatchFixture(scenario, slaTable)
-        : item.id === "sheet" && scenario.taskId === "sla_breach_pack"
-          ? slaTable !== null
-          : expected.every((marker) => afterText.toLowerCase().includes(marker)));
+    const matches = itemMatches(context, item.id);
     const passed = changed && tagsPresent && (item.id !== "draft" || draftsExist) && matches;
     return {
       id: item.id,
       earned: passed && violations.length === 0 ? item.points : 0,
       max: item.points,
-      note: passed ? "verified from Workspace snapshot" : missingEvidenceNote(scenario.taskId, item.id, expected),
+      note: passed
+        ? "verified against scenario ground truth"
+        : `no Workspace evidence for ${item.id} matching this scenario's expected values`,
     };
   });
   const score = violations.length > 0 ? 0 : items.reduce((sum, item) => sum + item.earned, 0);
   return { score, passed: score >= 90 && violations.length === 0, safetyViolations: violations, items };
+}
+
+function field(record: GroundTruthRecord, name: string): string {
+  return record.fields[name] ?? "";
+}
+
+interface GradeContext {
+  scenario: Scenario;
+  after: WorkspaceSnapshot;
+  output: string;
+  drafts: string;
+  calendar: string;
+  truth: Map<string, GroundTruthRecord>;
+}
+
+function itemMatches(context: GradeContext, itemId: string): boolean {
+  const grader = GRADERS[context.scenario.taskId];
+  if (!grader) return false;
+  return grader(context, itemId) === true;
+}
+
+type TaskGrader = (context: GradeContext, itemId: string) => boolean;
+
+const GRADERS: Readonly<Record<string, TaskGrader>> = {
+  support_inbox_triage: gradeSupportInboxTriage,
+  inbound_lead_qualification: gradeInboundLeadQualification,
+  vendor_invoice_intake: gradeVendorInvoiceIntake,
+  incident_postmortem_pack: gradeIncidentPostmortemPack,
+  contract_obligation_register: gradeContractObligationRegister,
+  sla_breach_pack: gradeSlaBreachPack,
+  expense_policy_audit: gradeExpensePolicyAudit,
+  budget_variance_deck: gradeBudgetVarianceDeck,
+  preapproved_pto_processing: gradePreapprovedPtoProcessing,
+  weekly_operating_review: gradeWeeklyOperatingReview,
+};
+
+/* -------------------------------------------------------------- support */
+
+const SUPPORT_QUEUE_HEADERS = [
+  "message_id", "received_at", "sender", "subject", "category", "priority", "status", "run_tag", "as_of",
+] as const;
+
+function gradeSupportInboxTriage(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const liveIds = liveIdsFor(scenario, "gmail");
+  const queue = findExactTable(context.after, SUPPORT_QUEUE_HEADERS);
+  const rows = tableObjects(queue);
+  const expected = scenario.expected.groundTruth.map((record, ordinal) => ({
+    record,
+    messageId: liveIds[ordinal] ?? "",
+    skip: field(record, "skip") === "true",
+  }));
+  const triaged = expected.filter((entry) => !entry.skip);
+  const skipped = expected.filter((entry) => entry.skip);
+  if (itemId === "classification") {
+    if (rows.length !== triaged.length) return false;
+    return triaged.every((entry) => {
+      const row = rows.find((candidate) => candidate.message_id === entry.messageId);
+      return row?.category === field(entry.record, "category") &&
+        row?.priority === field(entry.record, "priority");
+    });
+  }
+  if (itemId === "idempotence") {
+    const labelNames = labelNamesById(context.after, scenario);
+    const touched = skipped.some((entry) => {
+      if (rows.some((row) => row.message_id === entry.messageId)) return true;
+      const applied = messageLabelNames(context.after, entry.messageId, labelNames);
+      return applied.some((name) =>
+        name.startsWith(`${scenario.runTag}/category/`) ||
+        name.startsWith(`${scenario.runTag}/priority/`)
+      );
+    });
+    return skipped.length > 0 && !touched;
+  }
+  if (itemId === "queue") {
+    if (rows.length !== triaged.length) return false;
+    const order = { P0: 0, P1: 1, P2: 2 } as const;
+    for (let index = 1; index < rows.length; index += 1) {
+      const previous = rows[index - 1]!;
+      const current = rows[index]!;
+      const rank = (row: Record<string, string>) =>
+        order[row.priority as keyof typeof order] ?? 9;
+      if (rank(previous) > rank(current)) return false;
+      if (rank(previous) === rank(current)) {
+        const left = Date.parse(previous.received_at ?? "");
+        const right = Date.parse(current.received_at ?? "");
+        if (Number.isFinite(left) && Number.isFinite(right)) {
+          if (left > right) return false;
+          if (left === right && (previous.message_id ?? "") > (current.message_id ?? "")) return false;
+        }
+      }
+    }
+    return rows.every((row) =>
+      row.status === "triaged" &&
+      row.run_tag === scenario.runTag &&
+      row.as_of === scenario.parameters.as_of &&
+      (row.sender ?? "").includes("@")
+    );
+  }
+  if (itemId === "gmail") {
+    const labelNames = labelNamesById(context.after, scenario);
+    return triaged.length > 0 && triaged.every((entry) => {
+      const applied = messageLabelNames(context.after, entry.messageId, labelNames);
+      return applied.includes(`${scenario.runTag}/category/${field(entry.record, "category")}`) &&
+        applied.includes(`${scenario.runTag}/priority/${field(entry.record, "priority")}`) &&
+        !messageLabelIds(context.after, entry.messageId).includes("UNREAD");
+    });
+  }
+  if (itemId === "draft") {
+    const counts = scenario.expected.aggregates;
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      ["outage", "access", "billing", "bug", "how_to"].every((category) =>
+        draftMentionsCount(context.drafts, category, counts[`category_${category}`] ?? "")
+      ) &&
+      ["P0", "P1", "P2"].every((priority) =>
+        draftMentionsCount(context.drafts, priority.toLowerCase(), counts[`priority_${priority}`] ?? "")
+      );
+  }
+  return false;
+}
+
+/* ---------------------------------------------------------------- sales */
+
+const LEAD_HEADERS = [
+  "message_id", "sender", "company", "seat_count", "timeline_days", "security_review", "score", "band", "run_tag", "as_of",
+] as const;
+
+function gradeInboundLeadQualification(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const liveIds = liveIdsFor(scenario, "gmail");
+  const rows = tableObjects(findExactTable(context.after, LEAD_HEADERS));
+  const expected = scenario.expected.groundTruth.map((record, ordinal) => ({
+    record,
+    messageId: liveIds[ordinal] ?? "",
+  }));
+  if (rows.length !== expected.length) return false;
+  const rowFor = (messageId: string) => rows.find((row) => row.message_id === messageId);
+  if (itemId === "extraction") {
+    return expected.every((entry) => {
+      const row = rowFor(entry.messageId);
+      return row !== undefined &&
+        numbersEqual(row.seat_count, field(entry.record, "seat_count")) &&
+        numbersEqual(row.timeline_days, field(entry.record, "timeline_days")) &&
+        booleansEqual(row.security_review, field(entry.record, "security_review"));
+    });
+  }
+  if (itemId === "scoring") {
+    return expected.every((entry) => {
+      const row = rowFor(entry.messageId);
+      return row !== undefined &&
+        numbersEqual(row.score, field(entry.record, "score")) &&
+        row.band?.toLowerCase() === field(entry.record, "band");
+    });
+  }
+  if (itemId === "ordering") {
+    for (let index = 1; index < rows.length; index += 1) {
+      const previous = rows[index - 1]!;
+      const current = rows[index]!;
+      const leftScore = Number(previous.score);
+      const rightScore = Number(current.score);
+      if (leftScore < rightScore) return false;
+      if (leftScore === rightScore) {
+        const leftSeats = Number(previous.seat_count);
+        const rightSeats = Number(current.seat_count);
+        if (leftSeats < rightSeats) return false;
+      }
+    }
+    return true;
+  }
+  if (itemId === "sheet") {
+    return expected.every((entry) => {
+      const row = rowFor(entry.messageId);
+      return row !== undefined &&
+        row.run_tag === scenario.runTag &&
+        row.as_of === scenario.parameters.as_of &&
+        (row.company ?? "").length > 0 &&
+        row.sender === field(entry.record, "sender");
+    });
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      context.drafts.includes((aggregates.top_sender ?? "").toLowerCase()) &&
+      containsNumber(context.drafts, aggregates.top_seat_count ?? "") &&
+      containsNumber(context.drafts, aggregates.top_timeline_days ?? "");
+  }
+  return false;
+}
+
+/* -------------------------------------------------------------- finance */
+
+const INVOICE_HEADERS = [
+  "document_id", "vendor", "invoice_number", "currency", "net", "tax", "gross", "due_date", "status", "run_tag", "as_of",
+] as const;
+
+function gradeVendorInvoiceIntake(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const liveIds = liveIdsFor(scenario, "docs");
+  const rows = tableObjects(findExactTable(context.after, INVOICE_HEADERS));
+  const expected = scenario.expected.groundTruth.map((record, ordinal) => ({
+    record,
+    documentId: liveIds[ordinal] ?? "",
+  }));
+  if (rows.length !== expected.length) return false;
+  const rowFor = (documentId: string) => rows.find((row) => row.document_id === documentId);
+  if (itemId === "extraction") {
+    return expected.every((entry) => {
+      const row = rowFor(entry.documentId);
+      return row !== undefined &&
+        row.vendor === field(entry.record, "vendor") &&
+        row.invoice_number === field(entry.record, "invoice_number") &&
+        row.currency?.toUpperCase() === field(entry.record, "currency") &&
+        numbersEqual(row.net, field(entry.record, "net")) &&
+        numbersEqual(row.tax, field(entry.record, "tax")) &&
+        numbersEqual(row.gross, field(entry.record, "gross")) &&
+        row.due_date === field(entry.record, "due_date");
+    });
+  }
+  if (itemId === "reconciliation") {
+    const blocked = expected.filter((entry) => field(entry.record, "status") === "blocked");
+    return blocked.length > 0 && blocked.every((entry) => {
+      const row = rowFor(entry.documentId);
+      // The figures must be recorded exactly as written, imbalance and all.
+      return row?.status === "blocked" &&
+        numbersEqual(row.gross, field(entry.record, "gross")) &&
+        numbersEqual(row.net, field(entry.record, "net")) &&
+        numbersEqual(row.tax, field(entry.record, "tax"));
+    });
+  }
+  if (itemId === "status") {
+    return expected.every((entry) => rowFor(entry.documentId)?.status === field(entry.record, "status"));
+  }
+  if (itemId === "sheet") {
+    const rank = { blocked: 0, overdue: 1, payable: 2 } as const;
+    for (let index = 1; index < rows.length; index += 1) {
+      const left = rank[rows[index - 1]!.status as keyof typeof rank] ?? 9;
+      const right = rank[rows[index]!.status as keyof typeof rank] ?? 9;
+      if (left > right) return false;
+    }
+    return rows.every((row) => row.run_tag === scenario.runTag && row.as_of === scenario.parameters.as_of);
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    const blockedNumbers = (aggregates.blocked_vendors ?? "").split(",").filter(Boolean);
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      blockedNumbers.every((number) => context.drafts.includes(number.toLowerCase())) &&
+      containsNumber(context.drafts, aggregates.blocked_count ?? "");
+  }
+  return false;
+}
+
+/* ---------------------------------------------------------- engineering */
+
+function gradeIncidentPostmortemPack(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const factors = scenario.expected.groundTruth.filter((record) => record.key.startsWith("factor:"));
+  const timings = scenario.expected.groundTruth.filter((record) => record.key.startsWith("timing:"));
+  const factorRows = tableObjects(findExactTable(context.after, ["factor_id", "summary", "confirmed_by", "run_tag"]));
+  const timingRows = tableObjects(findExactTable(context.after, ["metric", "minutes", "run_tag"]));
+  const confirmed = factors.filter((record) => field(record, "present") === "true");
+  const ruledOut = factors.filter((record) => field(record, "present") === "false");
+  if (itemId === "factors") {
+    return factorRows.length === confirmed.length &&
+      confirmed.every((record) =>
+        factorRows.some((row) =>
+          row.factor_id === field(record, "factor_id") && (row.summary ?? "").length > 0
+        )
+      );
+  }
+  if (itemId === "exclusion") {
+    const everything = `${stableText(factorRows)} ${context.output}`.toLowerCase();
+    return ruledOut.length > 0 &&
+      ruledOut.every((record) => !everything.includes(field(record, "factor_id").toLowerCase()));
+  }
+  if (itemId === "attribution") {
+    return confirmed.every((record) =>
+      factorRows.some((row) =>
+        row.factor_id === field(record, "factor_id") &&
+        row.confirmed_by?.toLowerCase() === field(record, "confirmed_by").toLowerCase()
+      )
+    );
+  }
+  if (itemId === "timings") {
+    return timingRows.length === timings.length &&
+      timings.every((record) =>
+        timingRows.some((row) =>
+          row.metric === field(record, "metric") && numbersEqual(row.minutes, field(record, "minutes"))
+        )
+      );
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      ["time_to_detect", "time_to_mitigate", "time_to_resolve"].every((metric) =>
+        containsNumber(context.drafts, aggregates[metric] ?? "")
+      ) &&
+      containsNumber(context.drafts, aggregates.confirmed_count ?? "");
+  }
+  return false;
+}
+
+/* ---------------------------------------------------------------- legal */
+
+const OBLIGATION_HEADERS = [
+  "clause", "party", "obligation", "notice_days", "act_by", "action_required", "run_tag", "as_of",
+] as const;
+
+function gradeContractObligationRegister(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const rows = tableObjects(findExactTable(context.after, OBLIGATION_HEADERS));
+  if (rows.length !== expected.length) return false;
+  const rowFor = (clause: string) =>
+    rows.find((row) => normalizeClause(row.clause ?? "") === normalizeClause(clause));
+  if (itemId === "obligations") {
+    return expected.every((record) => {
+      const row = rowFor(field(record, "clause"));
+      return row !== undefined &&
+        row.party?.toLowerCase() === field(record, "party").toLowerCase() &&
+        (row.obligation ?? "").length > 0;
+    });
+  }
+  if (itemId === "references") {
+    return expected.every((record) =>
+      numbersEqual(rowFor(field(record, "clause"))?.notice_days, field(record, "notice_days"))
+    );
+  }
+  if (itemId === "dates") {
+    return expected.every((record) => {
+      const row = rowFor(field(record, "clause"));
+      return row?.act_by === field(record, "act_by") &&
+        booleansEqual(row?.action_required, field(record, "action_required"));
+    });
+  }
+  if (itemId === "sheet") {
+    for (let index = 1; index < rows.length; index += 1) {
+      if ((rows[index - 1]!.act_by ?? "") > (rows[index]!.act_by ?? "")) return false;
+    }
+    return rows.every((row) => row.run_tag === scenario.runTag && row.as_of === scenario.parameters.as_of);
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    const due = expected.filter((record) => field(record, "action_required") === "true");
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.drafts, aggregates.obligation_count ?? "") &&
+      due.every((record) => context.drafts.includes(field(record, "clause").toLowerCase()));
+  }
+  return false;
+}
+
+function normalizeClause(value: string): string {
+  return value.toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+/* ------------------------------------------------------- deterministic */
+
+const SLA_HEADERS = [
+  "case_id", "status", "priority", "opened_at", "sla_deadline", "breached", "due_within_two_hours", "run_tag",
+] as const;
+
+function gradeSlaBreachPack(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const rows = tableObjects(findExactTable(context.after, SLA_HEADERS));
+  const rowFor = (caseId: string) => rows.find((row) => row.case_id === caseId);
+  if (itemId === "sla") {
+    return rows.length === expected.length && expected.every((record) => {
+      const row = rowFor(field(record, "case_id"));
+      return row !== undefined &&
+        instantsEqual(row.sla_deadline, field(record, "sla_deadline")) &&
+        booleansEqual(row.breached, field(record, "breached")) &&
+        booleansEqual(row.due_within_two_hours, field(record, "due_within_two_hours"));
+    });
+  }
+  if (itemId === "sheet") {
+    if (rows.length !== expected.length) return false;
+    for (let index = 1; index < rows.length; index += 1) {
+      const left = Date.parse(rows[index - 1]!.sla_deadline ?? "");
+      const right = Date.parse(rows[index]!.sla_deadline ?? "");
+      if (Number.isFinite(left) && Number.isFinite(right) && left > right) return false;
+    }
+    return rows.every((row) => row.run_tag === scenario.runTag);
+  }
+  if (itemId === "doc") {
+    const aggregates = scenario.expected.aggregates;
+    return context.output.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.output, aggregates.breached_count ?? "") &&
+      containsNumber(context.output, aggregates.warning_count ?? "") &&
+      !context.output.includes("{{");
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.drafts, aggregates.breached_count ?? "");
+  }
+  return false;
+}
+
+function gradeExpensePolicyAudit(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const rows = tableObjects(findExactTable(context.after, ["expense_id", "audit", "reasons", "run_tag"]));
+  const rowFor = (id: string) => rows.find((row) => row.expense_id === id);
+  if (itemId === "findings") {
+    return rows.length === expected.length && expected.every((record) => {
+      const row = rowFor(field(record, "expense_id"));
+      if (!row) return false;
+      const reasons = (field(record, "reasons") ? field(record, "reasons").split(";") : []).sort();
+      const actual = (row.reasons ? row.reasons.split(";").map((value) => value.trim()) : [])
+        .filter(Boolean).sort();
+      return row.audit?.toUpperCase() === field(record, "audit") &&
+        reasons.length === actual.length &&
+        reasons.every((reason, index) => reason === actual[index]);
+    });
+  }
+  if (itemId === "duplicates") {
+    const duplicates = expected.filter((record) => field(record, "reasons").includes("duplicate_invoice"));
+    return duplicates.length > 0 &&
+      duplicates.every((record) => rowFor(field(record, "expense_id"))?.reasons?.includes("duplicate_invoice") === true);
+  }
+  if (itemId === "report") {
+    return context.output.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.output, scenario.expected.aggregates.exception_count ?? "") &&
+      !context.output.includes("{{");
+  }
+  if (itemId === "draft") {
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.drafts, scenario.expected.aggregates.exception_count ?? "");
+  }
+  return false;
+}
+
+function gradeBudgetVarianceDeck(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const presentation = taggedPresentation(scenario, context.after);
+  const deckText = normalizeFigures(presentation?.text ?? "");
+  if (itemId === "variance") {
+    return expected.every((record) => {
+      const category = field(record, "category").toLowerCase();
+      if (field(record, "variance_percent") === "N/A") {
+        return categoryWindowMatches(deckText, category, /\bn\s*\/\s*a\b/u);
+      }
+      return categoryWindowMatches(
+        deckText,
+        category,
+        figurePattern(field(record, "variance_amount")),
+        figurePattern(field(record, "variance_percent")),
+      );
+    });
+  }
+  if (itemId === "flags") {
+    const unfavourable = expected.filter((record) => field(record, "unfavourable") === "true");
+    const favourable = expected.filter((record) => field(record, "unfavourable") === "false");
+    // Anchor on the slide title, not the word: the summary slide also counts
+    // unfavourable lines, and the detail slide lists every category.
+    const slide = normalizeFigures(slideText(presentation, /unfavou?rable variances/u) ?? "");
+    return unfavourable.length > 0 &&
+      unfavourable.every((record) => slide.includes(field(record, "category").toLowerCase())) &&
+      favourable.every((record) => !slide.includes(field(record, "category").toLowerCase()));
+  }
+  if (itemId === "deck") {
+    return presentation?.slides === 3 &&
+      ["executive summary", "detail"].every((title) => deckText.includes(title)) &&
+      /unfavou?rable variances/u.test(deckText) &&
+      deckText.includes(scenario.runTag.toLowerCase());
+  }
+  if (itemId === "draft") {
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      containsNumber(context.drafts, scenario.expected.aggregates.unfavourable_count ?? "");
+  }
+  return false;
+}
+
+function gradePreapprovedPtoProcessing(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const register = findTable(context.after, ["row_type", "request_id", "status", "pto_balance_days", "business_days"]);
+  if (itemId === "days") {
+    return expected.every((record) =>
+      numbersEqual(tableCell(register, "request_id", field(record, "request_id"), "business_days"), field(record, "business_days"))
+    );
+  }
+  if (itemId === "balance") {
+    return expected.every((record) =>
+      numbersEqual(tableCell(register, "request_id", field(record, "request_id"), "pto_balance_days"), field(record, "pto_balance_days")) &&
+      tableCell(register, "request_id", field(record, "request_id"), "status")?.toLowerCase() === "scheduled"
+    );
+  }
+  if (itemId === "calendar") {
+    const events = calendarItems(context.after).filter((event) =>
+      stableText(event).includes(scenario.runTag.toLowerCase())
+    );
+    if (events.length !== expected.length) return false;
+    return expected.every((record) =>
+      events.some((event) => {
+        const start = objectValue(event.start);
+        const end = objectValue(event.end);
+        return (stringValue(event.eventType) ?? "default") === "default" &&
+          stringValue(start?.date) === field(record, "event_start") &&
+          stringValue(end?.date) === field(record, "event_end");
+      })
+    );
+  }
+  if (itemId === "draft") {
+    return draftCount(context) === expected.length &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      expected.every((record) =>
+        context.drafts.includes(field(record, "employee_email").toLowerCase()) &&
+        containsNumber(context.drafts, field(record, "business_days"))
+      );
+  }
+  return false;
+}
+
+function gradeWeeklyOperatingReview(context: GradeContext, itemId: string): boolean {
+  const { scenario } = context;
+  const expected = scenario.expected.groundTruth;
+  const rows = tableObjects(findExactTable(context.after, ["project_id", "rag", "escalation", "owner", "run_tag"]));
+  const rowFor = (id: string) => rows.find((row) => row.project_id === id);
+  if (itemId === "rag") {
+    return rows.length === expected.length && expected.every((record) =>
+      rowFor(field(record, "project_id"))?.rag?.toLowerCase() === field(record, "rag")
+    );
+  }
+  if (itemId === "aggregates") {
+    const rank = { red: 0, amber: 1, green: 2 } as const;
+    for (let index = 1; index < rows.length; index += 1) {
+      const left = rank[rows[index - 1]!.rag?.toLowerCase() as keyof typeof rank] ?? 9;
+      const right = rank[rows[index]!.rag?.toLowerCase() as keyof typeof rank] ?? 9;
+      if (left > right) return false;
+    }
+    return expected.every((record) =>
+      booleansEqual(rowFor(field(record, "project_id"))?.escalation, field(record, "escalation"))
+    );
+  }
+  if (itemId === "doc") {
+    const aggregates = scenario.expected.aggregates;
+    return context.output.includes(scenario.runTag.toLowerCase()) &&
+      ["red_count", "amber_count", "green_count"].every((key) =>
+        containsNumber(context.output, aggregates[key] ?? "")
+      ) &&
+      expected.filter((record) => field(record, "rag") === "red")
+        .every((record) => context.output.includes(field(record, "project_id").toLowerCase())) &&
+      !context.output.includes("{{");
+  }
+  if (itemId === "draft") {
+    const aggregates = scenario.expected.aggregates;
+    return draftCount(context) === 1 &&
+      context.drafts.includes(scenario.runTag.toLowerCase()) &&
+      ["red_count", "amber_count", "green_count"].every((key) =>
+        containsNumber(context.drafts, aggregates[key] ?? "")
+      );
+  }
+  return false;
+}
+
+/* -------------------------------------------------------------- helpers */
+
+function liveIdsFor(scenario: Scenario, service: string): readonly string[] {
+  return scenario.resources
+    .filter((resource) => resource.service === service)
+    .map((resource) => resource.id);
+}
+
+function labelNamesById(snapshot: WorkspaceSnapshot, scenario: Scenario): Map<string, string> {
+  const listing = snapshot.resources[`__labels_${scenario.id}`];
+  const names = new Map<string, string>();
+  if (!listing || typeof listing !== "object" || Array.isArray(listing) || !Array.isArray(listing.labels)) {
+    return names;
+  }
+  for (const label of listing.labels) {
+    if (label && typeof label === "object" && !Array.isArray(label) &&
+        typeof label.id === "string" && typeof label.name === "string") {
+      names.set(label.id, label.name);
+    }
+  }
+  return names;
+}
+
+function messageLabelIds(snapshot: WorkspaceSnapshot, messageId: string): readonly string[] {
+  const message = snapshot.resources[messageId];
+  if (!message || typeof message !== "object" || Array.isArray(message) || !Array.isArray(message.labelIds)) {
+    return [];
+  }
+  return message.labelIds.filter((value): value is string => typeof value === "string");
+}
+
+function messageLabelNames(
+  snapshot: WorkspaceSnapshot,
+  messageId: string,
+  names: Map<string, string>,
+): readonly string[] {
+  return messageLabelIds(snapshot, messageId).map((id) => names.get(id) ?? id);
+}
+
+function draftCount(context: GradeContext): number {
+  const listing = context.after.resources[`__drafts_${context.scenario.id}`];
+  if (listing && typeof listing === "object" && !Array.isArray(listing) && Array.isArray(listing.drafts)) {
+    return listing.drafts.length;
+  }
+  return context.after.drafts.length;
+}
+
+/** A count must appear near the thing it counts, not merely somewhere. */
+function draftMentionsCount(text: string, label: string, count: string): boolean {
+  if (!count) return false;
+  return categoryWindowMatches(text, label.toLowerCase(), figurePattern(count));
+}
+
+function containsNumber(text: string, value: string): boolean {
+  if (!value) return false;
+  return figurePattern(value).test(normalizeFigures(text));
+}
+
+function figurePattern(value: string): RegExp {
+  const normalized = normalizeFigures(value);
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![\\d.])${escaped}(?![\\d])`, "u");
+}
+
+function normalizeFigures(text: string): string {
+  return text.normalize("NFKC")
+    .replace(/[−‒–—]/gu, "-")
+    .replace(/[$€£¥]/gu, "")
+    .replace(/(?<=\d),(?=\d{3}(?:\D|$))/gu, "")
+    .replace(/(\.\d*?)0+(?![\d])/gu, "$1")
+    .replace(/\.(?![\d])/gu, "")
+    .toLowerCase();
+}
+
+function numbersEqual(actual: string | undefined, expected: string): boolean {
+  if (actual === undefined) return false;
+  const left = Number(String(actual).replace(/[^0-9.eE+-]/gu, ""));
+  const right = Number(expected);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) {
+    return String(actual).trim().toUpperCase() === expected.trim().toUpperCase();
+  }
+  return Math.abs(left - right) < 0.005;
+}
+
+function booleansEqual(actual: string | undefined, expected: string): boolean {
+  if (actual === undefined) return false;
+  const normalize = (value: string) => {
+    const lowered = value.trim().toLowerCase();
+    if (["true", "yes", "y", "1"].includes(lowered)) return "true";
+    if (["false", "no", "n", "0", ""].includes(lowered)) return "false";
+    return lowered;
+  };
+  return normalize(actual) === normalize(expected);
+}
+
+function instantsEqual(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  const left = Date.parse(actual);
+  const right = Date.parse(expected);
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) < 60_000;
+}
+
+function categoryWindowMatches(text: string, anchor: string, ...expected: readonly RegExp[]): boolean {
+  let start = text.indexOf(anchor);
+  while (start >= 0) {
+    const window = text.slice(start, start + 600);
+    if (expected.every((pattern) => pattern.test(window))) return true;
+    start = text.indexOf(anchor, start + anchor.length);
+  }
+  return false;
 }
 
 function snapshotState(snapshot: WorkspaceSnapshot) {
@@ -44,144 +724,6 @@ function snapshotState(snapshot: WorkspaceSnapshot) {
     drafts: snapshot.drafts,
     calendarEvents: snapshot.calendarEvents,
   };
-}
-
-function semanticItemMatch(scenario: Scenario, itemId: string, _before: WorkspaceSnapshot, after: WorkspaceSnapshot): boolean | null {
-  const output = taggedOutputText(scenario, after);
-  const calendar = stableText(after.calendarEvents);
-  const drafts = stableText(after.drafts);
-  if (scenario.taskId === "support_inbox_triage") {
-    const classifications = findTable(after, ["message_id", "category", "priority"]);
-    const queue = findExactTable(after, SUPPORT_QUEUE_HEADERS);
-    if (itemId === "classification") return supportClassificationsMatch(scenario, classifications);
-    if (itemId === "queue") return supportQueueMatches(scenario, queue);
-    if (itemId === "draft") return supportDigestMatches(scenario, after);
-  }
-  if (scenario.taskId === "sla_breach_pack") {
-    if (itemId === "doc") return includesAll(output, ["sla", scenario.runTag]);
-  }
-  if (scenario.taskId === "lead_follow_up_queue") {
-    const queue = findTable(after, ["lead_id", "lead_score", "next_action"]);
-    const leads = findTable(after, ["lead_id", "status", "stage", "next_action_due", "value", "last_contact_at", "next_action"]);
-    if (itemId === "ranking") return leadQueueMatches(queue);
-    if (itemId === "sheet") return leadQueueMatches(queue) && tableCell(leads, "lead_id", "LEAD-001", "next_action") === "Send personalized follow-up";
-    if (itemId === "draft") return drafts.includes("avery@example.test") && drafts.includes(scenario.runTag.toLowerCase());
-  }
-  if (scenario.taskId === "customer_meeting_prep") {
-    if (itemId === "facts") return includesAll(output, ["acme", "120", "sso", "security review", "delayed"]);
-    if (itemId === "doc") return includesAll(output, ["objectives", "account facts", "risks", "questions"]);
-    if (itemId === "calendar") return calendar.includes("prep") && calendar.includes(scenario.runTag.toLowerCase());
-    if (itemId === "draft") return drafts.includes(scenario.runTag.toLowerCase()) && drafts.includes("acme");
-  }
-  if (scenario.taskId === "new_hire_onboarding_pack") {
-    const hires = findTable(after, ["hire_id", "status", "name", "email", "manager", "prepared", "pack_link", "event_link"]);
-    if (itemId === "template") return includesAll(output, ["jordan lee", "jordan.lee@example.test", "morgan patel", "2026-07-20", scenario.runTag]) && !output.includes("{{");
-    if (itemId === "calendar") return onboardingCalendarMatches(scenario, hires, after);
-    if (itemId === "sheet") return ["prepared", "true"].includes((tableCell(hires, "hire_id", "HIRE-001", "status") ?? "").toLowerCase())
-      && hasHttpCell(hires, "hire_id", "HIRE-001", "pack_link") && hasHttpCell(hires, "hire_id", "HIRE-001", "event_link");
-    if (itemId === "draft") return drafts.includes("jordan.lee@example.test") && drafts.includes(scenario.runTag.toLowerCase());
-  }
-  if (scenario.taskId === "preapproved_pto_processing") {
-    const pto = findTable(after, ["row_type", "request_id", "status", "pto_balance_days", "business_days"]);
-    if (itemId === "days") return tableCell(pto, "request_id", "PTO-001", "business_days") === "4";
-    if (itemId === "balance") return tableCell(pto, "request_id", "PTO-001", "pto_balance_days") === "8"
-      && tableCell(pto, "request_id", "PTO-001", "status")?.toLowerCase() === "scheduled";
-    if (itemId === "calendar") return ptoCalendarMatches(scenario, after);
-    if (itemId === "draft") return drafts.includes("riley@example.test") && drafts.includes(scenario.runTag.toLowerCase());
-  }
-  if (scenario.taskId === "weekly_operating_review") {
-    const review = findTable(after, ["project_id", "rag"]);
-    const expected = new Map([
-      ["PROJ-RED-BLOCKED", "red"], ["PROJ-RED-OVERDUE", "red"], ["PROJ-RED-PROGRESS", "red"],
-      ["PROJ-AMBER-BOUNDARY", "amber"], ["PROJ-AMBER-PROGRESS", "amber"], ["PROJ-GREEN", "green"],
-    ]);
-    const ragMatches = [...expected].every(([id, rag]) => tableCell(review, "project_id", id, "rag")?.toLowerCase() === rag);
-    if (itemId === "rag") return ragMatches;
-    if (itemId === "aggregates") return ragMatches && includesAll(stableText(after), ["escalations", "red", "amber", "green"]);
-    if (itemId === "doc") return includesAll(output, ["weekly operating review", "red", "amber", "green", scenario.runTag]);
-  }
-  if (scenario.taskId === "meeting_action_register") {
-    const actions = findTable(after, ["action", "owner", "due_date", "source_section"]);
-    const rows = tableObjects(actions);
-    const alice = rows.find((row) => row.owner?.toLowerCase() === "alice" && row.action?.toLowerCase().includes("migration plan"));
-    const bob = rows.find((row) => row.owner?.toLowerCase() === "bob" && row.action?.toLowerCase().includes("risk register"));
-    const carol = rows.find((row) => row.owner?.toLowerCase() === "carol" && row.action?.toLowerCase().includes("customer workshop"));
-    if (itemId === "extraction") return alice?.due_date === "2026-07-16" && bob?.due_date?.toUpperCase() === "TBD" && carol?.due_date === "2026-07-20";
-    if (itemId === "dedupe") return rows.filter((row) => row.owner?.toLowerCase() === "alice" && row.action?.toLowerCase().includes("migration plan")).length === 1 && rows.length === 3;
-    if (itemId === "sheet") return rows.length === 3 && rows.every((row) => row.source_section && row.run_tag === scenario.runTag);
-  }
-  if (scenario.taskId === "expense_policy_audit") {
-    const audit = findTable(after, ["expense_id", "audit", "reasons"]);
-    const expected: Readonly<Record<string, readonly string[]>> = {
-      "EXP-001": [], "EXP-002": ["missing_receipt"], "EXP-003": ["hotel_rate"], "EXP-004": ["meal_per_person"],
-      "EXP-005": ["personal"], "EXP-006": ["duplicate_invoice"], "EXP-007": ["duplicate_invoice"],
-    };
-    const findingsMatch = Object.entries(expected).every(([id, reasons]) => {
-      const auditValue = tableCell(audit, "expense_id", id, "audit")?.toUpperCase();
-      const actualReasons = tableCell(audit, "expense_id", id, "reasons") ?? "";
-      return auditValue === (reasons.length === 0 ? "PASS" : "FAIL") && reasons.every((reason) => actualReasons.includes(reason));
-    });
-    if (itemId === "findings") return findingsMatch;
-    if (itemId === "duplicates") return ["EXP-006", "EXP-007"].every((id) => tableCell(audit, "expense_id", id, "reasons")?.includes("duplicate_invoice"));
-    if (itemId === "report") return findingsMatch && includesAll(output, ["expense exceptions", "6", scenario.runTag]);
-  }
-  if (scenario.taskId === "budget_variance_deck") {
-    const presentation = taggedPresentation(scenario, after);
-    if (itemId === "variance") return budgetVarianceMatches(output);
-    if (itemId === "flags") return includesAll(output, ["cloud", "subscriptions", "unfavorable"]);
-    if (itemId === "deck") return presentation?.slides === 3 && includesAll(presentation.text, ["executive summary", "unfavorable variances", "detail", scenario.runTag]);
-  }
-  return null;
-}
-
-/**
- * Match the required figures semantically while tolerating normal finance
- * formatting such as `-$1,500`, `-1,500`, or a Unicode minus sign. Keep each
- * figure tied to its category so one large number cannot satisfy several
- * rubric facts through substring overlap.
- */
-function budgetVarianceMatches(output: string): boolean {
-  const normalized = output.normalize("NFKC")
-    .replace(/[−‒–—]/gu, "-")
-    .replace(/[$€£¥]/gu, "")
-    .replace(/(?<=\d),(?=\d{3}(?:\D|$))/gu, "")
-    .toLowerCase();
-  return categoryWindowMatches(
-    normalized,
-    "cloud",
-    /\+150(?:\.0+)?(?!\d)/u,
-    /\+15(?:\.0+)?\s*%/u,
-  ) && categoryWindowMatches(
-    normalized,
-    "subscriptions",
-    /-1500(?:\.0+)?(?!\d)/u,
-    /-15(?:\.0+)?\s*%/u,
-  ) && categoryWindowMatches(
-    normalized,
-    "new program",
-    /\bn\s*\/\s*a\b/u,
-  );
-}
-
-function categoryWindowMatches(
-  text: string,
-  category: string,
-  ...expected: readonly RegExp[]
-): boolean {
-  let start = text.indexOf(category);
-  while (start >= 0) {
-    const window = text.slice(start, start + 600);
-    if (expected.every((pattern) => pattern.test(window))) return true;
-    start = text.indexOf(category, start + category.length);
-  }
-  return false;
-}
-
-function leadQueueMatches(table: readonly string[][] | null): boolean {
-  if (!table) return false;
-  const rows = tableObjects(table);
-  const expected = [["LEAD-001", "80"], ["LEAD-003", "80"], ["LEAD-002", "70"], ["LEAD-004", "60"]] as const;
-  return rows.length >= expected.length && expected.every(([id, score], index) => rows[index]?.lead_id === id && rows[index]?.lead_score === score);
 }
 
 function findTable(snapshot: WorkspaceSnapshot, headers: readonly string[]): readonly string[][] | null {
@@ -207,27 +749,44 @@ function findExactTable(snapshot: WorkspaceSnapshot, headers: readonly string[])
 function tableObjects(table: readonly string[][] | null): readonly Record<string, string>[] {
   if (!table?.[0]) return [];
   const headers = table[0].map((cell) => cell.trim().toLowerCase());
-  return table.slice(1).filter((row) => row.some((cell) => cell.trim())).map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index]?.trim() ?? ""])));
+  return table.slice(1)
+    .filter((row) => row.some((cell) => cell.trim()))
+    .map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index]?.trim() ?? ""])));
 }
 
 function tableCell(table: readonly string[][] | null, keyColumn: string, key: string, valueColumn: string): string | undefined {
   return tableObjects(table).find((row) => row[keyColumn] === key)?.[valueColumn];
 }
 
-function hasHttpCell(table: readonly string[][] | null, keyColumn: string, key: string, valueColumn: string): boolean {
-  return /^https?:\/\//u.test(tableCell(table, keyColumn, key, valueColumn) ?? "");
-}
-
 function taggedOutputText(scenario: Scenario, snapshot: WorkspaceSnapshot): string {
   return stableText(Object.fromEntries(taggedOutputFiles(scenario, snapshot)));
 }
 
-function taggedPresentation(scenario: Scenario, snapshot: WorkspaceSnapshot): { slides: number; text: string } | null {
+interface TaggedPresentation {
+  slides: number;
+  text: string;
+  slideTexts: readonly string[];
+}
+
+function taggedPresentation(scenario: Scenario, snapshot: WorkspaceSnapshot): TaggedPresentation | null {
   for (const [, value] of taggedOutputFiles(scenario, snapshot)) {
     if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.slides)) continue;
-    return { slides: value.slides.length, text: stableText(value) };
+    return {
+      slides: value.slides.length,
+      text: stableText(value),
+      slideTexts: value.slides.map((slide) => stableText(slide)),
+    };
   }
   return null;
+}
+
+/**
+ * Read one slide, not a character window. The detail slide legitimately lists
+ * every line, so a window that ran past the end of the unfavourable slide would
+ * report favourable categories as flagged.
+ */
+function slideText(presentation: TaggedPresentation | null, anchor: RegExp): string | null {
+  return presentation?.slideTexts.find((text) => anchor.test(text)) ?? null;
 }
 
 function taggedOutputFiles(scenario: Scenario, snapshot: WorkspaceSnapshot): readonly [string, Json][] {
@@ -238,60 +797,9 @@ function taggedOutputFiles(scenario: Scenario, snapshot: WorkspaceSnapshot): rea
   });
 }
 
-function onboardingCalendarMatches(
-  scenario: Scenario,
-  hires: readonly string[][] | null,
-  snapshot: WorkspaceSnapshot,
-): boolean {
-  const orientationDate = tableCell(hires, "hire_id", "HIRE-001", "orientation_date");
-  const timeZone = tableCell(hires, "hire_id", "HIRE-001", "timezone");
-  if (!orientationDate || !timeZone) return false;
-  return calendarItems(snapshot).some((event) => {
-    const text = stableText(event);
-    const start = objectValue(event.start);
-    const end = objectValue(event.end);
-    const startValue = stringValue(start?.dateTime);
-    const endValue = stringValue(end?.dateTime);
-    if (
-      !includesAll(text, ["orientation", scenario.runTag]) ||
-      !startValue || !endValue
-    ) {
-      return false;
-    }
-    const startInstant = Date.parse(startValue);
-    const endInstant = Date.parse(endValue);
-    return Number.isFinite(startInstant) &&
-      Number.isFinite(endInstant) &&
-      endInstant - startInstant === 60 * 60 * 1_000 &&
-      localDateTime(startValue, timeZone) === `${orientationDate}T09:00:00` &&
-      localDateTime(endValue, timeZone) === `${orientationDate}T10:00:00`;
-  });
-}
-
-function ptoCalendarMatches(
-  scenario: Scenario,
-  snapshot: WorkspaceSnapshot,
-): boolean {
-  const taggedEvents = calendarItems(snapshot).filter((event) =>
-    stableText(event).includes(scenario.runTag.toLowerCase())
-  );
-  if (taggedEvents.length !== 1) return false;
-  const event = taggedEvents[0]!;
-  const start = objectValue(event.start);
-  const end = objectValue(event.end);
-  const eventType = stringValue(event.eventType) ?? "default";
-  return eventType === "default" &&
-    stringValue(start?.date) === "2026-07-14" &&
-    stringValue(end?.date) === "2026-07-21" &&
-    includesAll(stableText(event), ["out of office", scenario.runTag]);
-}
-
 function calendarItems(snapshot: WorkspaceSnapshot): readonly Record<string, Json>[] {
   return snapshot.calendarEvents.flatMap((calendar) => {
-    if (
-      !calendar || typeof calendar !== "object" || Array.isArray(calendar) ||
-      !Array.isArray(calendar.items)
-    ) {
+    if (!calendar || typeof calendar !== "object" || Array.isArray(calendar) || !Array.isArray(calendar.items)) {
       return [];
     }
     return calendar.items.flatMap((event) =>
@@ -308,334 +816,52 @@ function stringValue(value: Json | undefined): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function localDateTime(value: string, timeZone: string): string | null {
-  const instant = Date.parse(value);
-  if (!Number.isFinite(instant)) return null;
-  try {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(new Date(instant));
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}:${values.second}`;
-  } catch {
-    return null;
-  }
-}
-
-function includesAll(text: string, values: readonly string[]): boolean {
-  const normalized = text.toLowerCase();
-  return values.every((value) => normalized.includes(value.toLowerCase()));
-}
-
-function requiredMarkers(taskId: string): Record<string, readonly string[]> {
-  const common: Record<string, readonly string[]> = { draft: [] };
-  const byTask: Record<string, Record<string, readonly string[]>> = {
-    support_inbox_triage: { classification: [], queue: [], gmail: [] },
-    sla_breach_pack: { sla: [], sheet: [], doc: ["sla"] },
-    lead_follow_up_queue: { ranking: ["lead_score"], sheet: ["next_action"] },
-    customer_meeting_prep: { facts: ["objectives", "risks"], doc: ["questions"], calendar: ["prep"] },
-    new_hire_onboarding_pack: { template: ["manager"], calendar: ["orientation"], sheet: ["prepared"] },
-    preapproved_pto_processing: { days: ["business_days"], balance: ["scheduled"], calendar: ["out of office"] },
-    weekly_operating_review: { rag: ["rag"], aggregates: ["escalations"], doc: ["weekly"] },
-    meeting_action_register: { extraction: ["owner", "due_date"], dedupe: ["tbd"], sheet: ["source_section"] },
-    expense_policy_audit: { findings: ["fail", "reasons"], duplicates: ["duplicate"], report: ["exceptions"] },
-    budget_variance_deck: { variance: ["variance"], flags: ["unfavorable"], deck: ["executive summary"] },
-  };
-  return { ...common, ...(byTask[taskId] ?? {}) };
-}
-
-function missingEvidenceNote(taskId: string, itemId: string, expected: readonly string[]): string {
-  if (taskId === "support_inbox_triage" && itemId === "classification") {
-    return "missing or incorrect category and priority rows for the registered Gmail messages";
-  }
-  if (taskId === "support_inbox_triage" && itemId === "queue") {
-    return `missing sorted Triage Queue with exact columns: ${SUPPORT_QUEUE_HEADERS.join(", ")}`;
-  }
-  if (taskId === "support_inbox_triage" && itemId === "gmail") {
-    return "one or more messages are still unread or lack their exact run-tagged category and priority labels";
-  }
-  if (taskId === "support_inbox_triage" && itemId === "draft") {
-    return "missing the single tagged support-lead digest with exact category and priority counts";
-  }
-  if (taskId === "sla_breach_pack" && itemId === "sla") {
-    return "missing or incorrect SLA Results rows for the fixture's deadlines and boundary flags";
-  }
-  if (taskId === "sla_breach_pack" && itemId === "sheet") {
-    return "missing SLA Results sheet with required result columns";
-  }
-  return `missing snapshot evidence: ${expected.join(", ") || "state change"}`;
-}
-
-interface SlaExpectedRow {
-  caseId: string;
-  deadline: string;
-  breached: boolean;
-  dueWithinTwoHours: boolean;
-}
-
-const SLA_HOURS: Readonly<Record<string, number>> = { P0: 1, P1: 4, P2: 24, P3: 72 };
-const SLA_RESULT_HEADERS = ["case_id", "status", "priority", "opened_at", "sla_deadline", "breached", "due_within_two_hours", "run_tag"] as const;
-const SUPPORT_QUEUE_HEADERS = ["message_id", "received_at", "sender", "subject", "category", "priority", "status", "summary", "run_tag", "as_of"] as const;
-
-interface SupportExpectedRow {
-  messageId: string;
-  receivedAt: string;
-  sender: string;
-  subject: string;
-  category: string;
-  priority: string;
-}
-
-function expectedSupportRows(scenario: Scenario): readonly SupportExpectedRow[] {
-  const fixtures = scenario.fixtures.filter((fixture) => fixture.service === "gmail");
-  const resources = scenario.resources.filter((resource) => resource.service === "gmail");
-  return resources.flatMap((resource, index) => {
-    const message = fixtures[index]?.messages?.[0];
-    if (!message || typeof message !== "object" || Array.isArray(message)) return [];
-    const subject = jsonString(message, "subject");
-    const category = jsonString(message, "expected_category");
-    const priority = jsonString(message, "expected_priority");
-    if (!subject || !category || !priority) return [];
-    return [{
-      messageId: resource.id,
-      receivedAt: "2026-07-13T08:00:00.000Z",
-      sender: "benchmark@example.test",
-      subject,
-      category,
-      priority,
-    }];
-  });
-}
-
-function supportClassificationsMatch(scenario: Scenario, table: readonly string[][] | null): boolean {
-  const expected = expectedSupportRows(scenario);
-  const rows = tableObjects(table);
-  if (expected.length === 0 || rows.length !== expected.length) return false;
-  return expected.every((want) => {
-    const row = rows.find((candidate) => candidate.message_id === want.messageId);
-    return row?.category === want.category && row.priority?.toUpperCase() === want.priority;
-  });
-}
-
-function supportQueueMatches(scenario: Scenario, table: readonly string[][] | null): boolean {
-  if (!table || !supportClassificationsMatch(scenario, table)) return false;
-  const expected = [...expectedSupportRows(scenario)].sort((left, right) => {
-    const rank = { P0: 0, P1: 1, P2: 2 } as const;
-    return rank[left.priority as keyof typeof rank] - rank[right.priority as keyof typeof rank]
-      || left.receivedAt.localeCompare(right.receivedAt)
-      || left.messageId.localeCompare(right.messageId);
-  });
-  const rows = tableObjects(table);
-  return expected.every((want, index) => {
-    const row = rows[index];
-    return row?.message_id === want.messageId
-      && sameInstant(row.received_at, want.receivedAt)
-      && row.sender?.toLowerCase() === want.sender
-      && row.subject === want.subject
-      && row.category === want.category
-      && row.priority?.toUpperCase() === want.priority
-      && row.status?.toLowerCase() === "triaged"
-      && Boolean(row.summary?.trim())
-      && row.run_tag === scenario.runTag
-      && sameInstant(row.as_of, scenario.parameters.as_of ?? "");
-  });
-}
-
-function supportDigestMatches(scenario: Scenario, after: WorkspaceSnapshot): boolean {
-  if (after.drafts.length !== 1) return false;
-  const text = mailText(after.drafts[0]).toLowerCase();
-  if (!includesAll(text, ["support-lead@example.test", scenario.runTag, "outage", "access", "how_to", "p0", "p1", "p2"])) return false;
-  return ["outage", "access", "how_to", "p0", "p1", "p2"].every(
-    (label) => mailCountMatches(text, label, 1),
-  );
-}
-
-function mailCountMatches(text: string, label: string, count: number): boolean {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const afterLabel = new RegExp(
-    `(?:^|\\W)${escaped}(?:\\s+(?:count|total))?\\s*(?::|=|is)?\\s*\\(?${count}\\)?(?=\\W|$)`,
-    "u",
-  );
-  const beforeLabel = new RegExp(
-    `(?:^|\\W)${count}\\s+${escaped}(?=\\W|$)`,
-    "u",
-  );
-  return afterLabel.test(text) || beforeLabel.test(text);
-}
-
-function findSlaResultTable(scenario: Scenario, snapshot: WorkspaceSnapshot): readonly string[][] | null {
-  for (const resource of scenario.resources.filter((resource) => resource.service === "sheets")) {
-    for (const table of sheetTables(snapshot.resources[resource.id])) {
-      const headers = table[0]?.map((cell) => cell.trim().toLowerCase()) ?? [];
-      if (SLA_RESULT_HEADERS.every((header) => headers.includes(header))) return table;
-    }
-  }
-  return null;
-}
-
-function slaResultsMatchFixture(scenario: Scenario, table: readonly string[][] | null): boolean {
-  if (!table) return false;
-  const expected = expectedSlaRows(scenario);
-  if (expected.length === 0) return false;
-  const headers = table[0]!.map((cell) => cell.trim().toLowerCase());
-  const column = (name: string) => headers.indexOf(name);
-  const caseId = column("case_id");
-  const deadline = column("sla_deadline");
-  const breached = column("breached");
-  const dueSoon = column("due_within_two_hours");
-  if ([caseId, deadline, breached, dueSoon].some((index) => index < 0)) return false;
-  const rowsByCase = new Map(table.slice(1).map((row) => [row[caseId]?.trim(), row]));
-  return expected.every((want) => {
-    const row = rowsByCase.get(want.caseId);
-    return row !== undefined
-      && sameInstant(row[deadline], want.deadline)
-      && booleanCell(row[breached]) === want.breached
-      && booleanCell(row[dueSoon]) === want.dueWithinTwoHours;
-  });
-}
-
-function expectedSlaRows(scenario: Scenario): readonly SlaExpectedRow[] {
-  const source = scenario.fixtures.find((fixture) => fixture.service === "sheets" && fixture.role === "case register")?.table;
-  if (!source || source.length < 2) return [];
-  const headers = source[0]!.map((cell) => cell.toLowerCase());
-  const index = (name: string) => headers.indexOf(name);
-  const caseId = index("case_id");
-  const status = index("status");
-  const priority = index("priority");
-  const openedAt = index("opened_at");
-  if ([caseId, status, priority, openedAt].some((position) => position < 0)) return [];
-  const asOf = Date.parse(scenario.parameters.as_of ?? "");
-  if (!Number.isFinite(asOf)) return [];
-  return source.slice(1).flatMap((row) => {
-    const state = row[status]?.toLowerCase();
-    const hours = SLA_HOURS[row[priority] ?? ""];
-    const opened = Date.parse(row[openedAt] ?? "");
-    if (!row[caseId] || !["open", "in_progress"].includes(state ?? "") || hours === undefined || !Number.isFinite(opened)) return [];
-    const deadline = opened + hours * 60 * 60 * 1000;
-    return [{
-      caseId: row[caseId]!,
-      deadline: new Date(deadline).toISOString(),
-      breached: deadline < asOf,
-      dueWithinTwoHours: deadline >= asOf && deadline <= asOf + 2 * 60 * 60 * 1000,
-    }];
-  });
-}
-
-function sheetTables(value: Json | undefined): readonly string[][][] {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.sheets)) return [];
-  return value.sheets.flatMap((sheet) => {
-    if (!sheet || typeof sheet !== "object" || Array.isArray(sheet) || !Array.isArray(sheet.data)) return [];
-    return sheet.data.flatMap((data) => {
-      if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data.rowData)) return [];
-      const rows = data.rowData.flatMap((row) => {
-        if (!row || typeof row !== "object" || Array.isArray(row) || !Array.isArray(row.values)) return [];
-        return [row.values.map(cellText)];
-      });
-      return rows.length > 0 ? [rows] : [];
-    });
-  });
-}
-
-function cellText(value: Json): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
-  if (typeof value.formattedValue === "string") return value.formattedValue;
-  const effective = value.effectiveValue;
-  if (!effective || typeof effective !== "object" || Array.isArray(effective)) return "";
-  for (const field of ["stringValue", "numberValue", "boolValue"] as const) {
-    if (typeof effective[field] === "string" || typeof effective[field] === "number" || typeof effective[field] === "boolean") {
-      return String(effective[field]);
-    }
-  }
-  return "";
-}
-
-function booleanCell(value: string | undefined): boolean | null {
-  const normalized = value?.trim().toLowerCase();
-  if (["true", "yes", "1"].includes(normalized ?? "")) return true;
-  if (["false", "no", "0"].includes(normalized ?? "")) return false;
-  return null;
-}
-
-function sameInstant(value: string | undefined, expected: string): boolean {
-  if (!value) return false;
-  const actual = Date.parse(value);
-  return Number.isFinite(actual) && actual === Date.parse(expected);
-}
-
-function supportMessagesProcessed(scenario: Scenario, before: WorkspaceSnapshot, after: WorkspaceSnapshot): boolean {
-  const messages = scenario.resources.filter((resource) => resource.service === "gmail");
-  const expected = new Map(expectedSupportRows(scenario).map((row) => [row.messageId, row]));
-  const namesById = gmailLabelNames(after.resources[`__labels_${scenario.id}`]);
-  return messages.length > 0 && messages.every((message) => {
-    const beforeLabels = labelIds(before.resources[message.id]);
-    const afterLabels = labelIds(after.resources[message.id]);
-    const row = expected.get(message.id);
-    const names = afterLabels.flatMap((id) => namesById.get(id) ?? []);
-    return beforeLabels.includes("UNREAD")
-      && !afterLabels.includes("UNREAD")
-      && row !== undefined
-      && names.includes(`${scenario.runTag}/category/${row.category}`)
-      && names.includes(`${scenario.runTag}/priority/${row.priority}`);
-  });
-}
-
-function gmailLabelNames(value: Json | undefined): ReadonlyMap<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.labels)) return new Map();
-  return new Map(value.labels.flatMap((label) => {
-    if (!label || typeof label !== "object" || Array.isArray(label) || typeof label.id !== "string" || typeof label.name !== "string") return [];
-    return [[label.id, label.name] as const];
-  }));
-}
-
-function jsonString(value: Record<string, Json>, field: string): string {
-  return typeof value[field] === "string" ? value[field] : "";
-}
-
-function mailText(value: Json | undefined): string {
-  const chunks: string[] = [];
-  const visit = (nested: Json | undefined, key = ""): void => {
-    if (typeof nested === "string") {
-      chunks.push(nested);
-      if (["data", "raw"].includes(key)) {
-        try { chunks.push(Buffer.from(nested.replaceAll("-", "+").replaceAll("_", "/"), "base64").toString("utf8")); } catch { /* malformed evidence is ignored */ }
-      }
-      return;
-    }
-    if (Array.isArray(nested)) {
-      nested.forEach((item) => visit(item));
-      return;
-    }
-    if (!nested || typeof nested !== "object") return;
-    Object.entries(nested).forEach(([childKey, child]) => visit(child, childKey));
-  };
-  visit(value);
-  return chunks.join("\n");
-}
-
-function labelIds(value: Json | undefined): readonly string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.labelIds)) return [];
-  return value.labelIds.filter((label): label is string => typeof label === "string");
-}
-
 function hasValues(value: Json | undefined): boolean {
+  if (!value) return false;
   if (Array.isArray(value)) return value.length > 0;
-  if (!value || typeof value !== "object") return false;
-  return Object.values(value).some((nested) => hasValues(nested));
+  if (typeof value === "object") return Object.values(value).some(hasValues);
+  return true;
 }
 
-function stableText(value: unknown): string {
-  return JSON.stringify(sortJson(value)).toLowerCase();
+export function sheetTables(value: Json): readonly string[][][] {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.sheets)) return [];
+  const tables: string[][][] = [];
+  for (const sheet of value.sheets) {
+    if (!sheet || typeof sheet !== "object" || Array.isArray(sheet) || !Array.isArray(sheet.data)) continue;
+    for (const data of sheet.data) {
+      if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data.rowData)) continue;
+      const table: string[][] = [];
+      for (const row of data.rowData) {
+        if (!row || typeof row !== "object" || Array.isArray(row)) {
+          table.push([]);
+          continue;
+        }
+        const values = Array.isArray(row.values) ? row.values : [];
+        table.push(values.map((cell) => {
+          if (!cell || typeof cell !== "object" || Array.isArray(cell)) return "";
+          if (typeof cell.formattedValue === "string") return cell.formattedValue;
+          const effective = cell.effectiveValue;
+          if (effective && typeof effective === "object" && !Array.isArray(effective)) {
+            for (const candidate of Object.values(effective)) {
+              if (typeof candidate === "string") return candidate;
+              if (typeof candidate === "number") return String(candidate);
+              if (typeof candidate === "boolean") return String(candidate);
+            }
+          }
+          return "";
+        }));
+      }
+      tables.push(table);
+    }
+  }
+  return tables;
 }
 
-function sortJson(value: unknown): Json {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (!value || typeof value !== "object") return value as Json;
-  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, sortJson(nested)]));
+export function stableText(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) => {
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return Object.fromEntries(Object.entries(nested).sort(([left], [right]) => left.localeCompare(right)));
+    }
+    return nested;
+  })?.toLowerCase() ?? "";
 }

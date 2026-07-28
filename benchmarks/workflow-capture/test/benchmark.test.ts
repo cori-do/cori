@@ -22,6 +22,7 @@ import {
   fixtureWriteRange,
   gmailFixtureReady,
   GwsClient,
+  messageIsUnread,
   requireBenchmarkCalendarId,
   WorkspaceScenarioDriver,
 } from "../src/gws.js";
@@ -47,6 +48,7 @@ import {
   hardGate,
   isCanonicalCoriReadyOutput,
   isCoriWorkflowCliHelp,
+  missingRuntimeModelFailure,
   parseBatch,
   profilePairs,
   prepareCaptureWorkspace,
@@ -56,6 +58,7 @@ import {
   report,
   runBenchmark,
   selectTasks,
+  traceRanRuntimeModel,
   traceUsage,
   trialIntegrityError,
   transcriptExecutedCoriRun,
@@ -66,6 +69,9 @@ import {
   workspaceCoriBinary,
 } from "../src/runner.js";
 import {
+  assertHybridBanksAreRegexResistant,
+  assertRegexResistant,
+  assertSeedsProduceDistinctFixtures,
   assertTwinEquivalent,
   buildScenario,
   validateScenarioFixtures,
@@ -89,12 +95,39 @@ test("task catalog contains ten 100-point tasks", () => {
   assert.equal(TASKS.length, 10);
   assert.equal(
     TASKS.filter((task) => task.runtimeTrack === "deterministic").length,
-    7,
+    5,
   );
   assert.equal(
     TASKS.filter((task) => task.runtimeTrack === "hybrid").length,
-    3,
+    5,
   );
+  // The hybrid track is a claim about the data, so it has to be enforceable.
+  for (const task of TASKS) {
+    assert.equal(
+      task.requiresRuntimeModel === true,
+      task.runtimeTrack === "hybrid",
+      `${task.id} must declare requiresRuntimeModel exactly on the hybrid track`,
+    );
+  }
+});
+
+test("no task prompt states the answer for its own fixture", () => {
+  for (const task of TASKS.filter((candidate) => candidate.requiresRuntimeModel)) {
+    const scenario = buildScenario(task.id, 42, "author", "prompt-leak");
+    const prompt = task.prompt.toLowerCase();
+    for (const record of scenario.expected.groundTruth) {
+      for (const [name, value] of Object.entries(record.fields)) {
+        // Enum answers legitimately name their own vocabulary in the policy;
+        // free values must never appear, or the prompt is the answer key.
+        if (value.length < 4 || /^(true|false|p0|p1|p2)$/u.test(value)) continue;
+        if (["category", "priority", "band", "status", "party", "metric"].includes(name)) continue;
+        assert.ok(
+          !prompt.includes(value.toLowerCase()),
+          `${task.id} prompt contains the expected ${name} value "${value}"`,
+        );
+      }
+    }
+  }
 });
 
 test("the staged real skill owns the workflow dataflow contract", async () => {
@@ -166,18 +199,25 @@ test("capture uses the natural skill request and literal approval", () => {
     /Complete the live Workspace task now and verify the requested external state/u,
   );
   assert.match(direct, /read \.\/GWS\.md/u);
-  assert.match(
-    direct,
-    /resources are freshly provisioned[\s\S]*run tag is unique/u,
-  );
-  assert.match(
+  // This task declares a re-run contract, so it must not be told its fixtures
+  // are always fresh; being safe to run twice is part of what it is scored on.
+  assert.match(direct, /honour the re-run rules stated above/u);
+  assert.doesNotMatch(
     direct,
     /Do not add stale-state cleanup or cross-run already-exists guards/u,
   );
+  assert.match(direct, /The source content differs every time this job runs/u);
   assert.match(
     direct,
     /do not create a Cori workflow, manifest\.md, steps\/, or tests\//u,
   );
+  const fresh = renderedTaskPrompt(
+    "sla_breach_pack",
+    buildScenario("sla_breach_pack", 42, "author", "prompt-contract"),
+    "direct",
+  );
+  assert.match(fresh, /resources are freshly provisioned[\s\S]*run tag is unique/u);
+  assert.doesNotMatch(fresh, /The source content differs every time this job runs/u);
   assert.doesNotMatch(direct, /read \.\/CORI_AUTHORING\.md/u);
   assert.doesNotMatch(direct, /cori_save_workflow/u);
   assert.equal(
@@ -288,26 +328,8 @@ test("every task builds valid author and held-out fixture contracts", () => {
       );
     }
   }
-  const leads = buildScenario(
-    "lead_follow_up_queue",
-    42,
-    "author",
-    "lead-schema",
-  );
-  assert.deepEqual(leads.fixtures[0]?.table?.[0], [
-    "lead_id",
-    "status",
-    "stage",
-    "next_action_due",
-    "value",
-    "last_contact_at",
-    "contact_name",
-    "contact_email",
-    "next_action",
-    "benchmark_tag",
-  ]);
   assert.ok(
-    buildScenario("new_hire_onboarding_pack", 42, "author", "calendar-param")
+    buildScenario("preapproved_pto_processing", 42, "author", "calendar-param")
       .parameters.calendar_id,
   );
   const support = buildScenario(
@@ -316,9 +338,14 @@ test("every task builds valid author and held-out fixture contracts", () => {
     "author",
     "support-contract",
   );
-  assert.equal(
-    support.resources.filter((resource) => resource.service === "gmail").length,
-    3,
+  // The daily volume is not a constant, and one fixture provisions the whole
+  // inbox rather than one message per blueprint entry.
+  const inbox = support.resources.filter((resource) => resource.service === "gmail");
+  assert.ok(inbox.length >= 9, `expected a realistic inbox, got ${inbox.length}`);
+  assert.equal(inbox.length, support.expected.groundTruth.length);
+  assert.ok(
+    support.expected.groundTruth.some((record) => record.fields.skip === "true"),
+    "a re-run task must provision state left by a previous run",
   );
   assert.deepEqual(support.fixtures[0]?.table, [
     ["benchmark_tag"],
@@ -327,15 +354,32 @@ test("every task builds valid author and held-out fixture contracts", () => {
   assert.equal(fixtureWriteRange(support.fixtures[0]!.table!), "Source!A1:A2");
   assert.match(
     TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
-    /gmail_query contract is exactly three unread messages per run/u,
+    /The daily volume varies and is not fixed/u,
   );
   assert.match(
     TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
-    /abort before any writes unless the search returns exactly three/u,
+    /message_id, received_at, sender, subject, category, priority, status, run_tag, as_of/u,
   );
-  assert.match(
-    TASKS.find((task) => task.id === "support_inbox_triage")!.prompt,
-    /message_id, received_at, sender, subject, category, priority, status, summary, run_tag, as_of/u,
+});
+
+test("held-out seeds pose different problems, not the same one relabelled", () => {
+  for (const task of TASKS) {
+    assertSeedsProduceDistinctFixtures(task.id, [88, 89, 90, 91]);
+  }
+});
+
+test("hybrid fixture banks cannot be separated by a single literal", () => {
+  assertHybridBanksAreRegexResistant();
+  // The check must reject the kind of fixture that let a keyword matcher score
+  // this benchmark before: one member per class, each with a unique giveaway.
+  assert.throws(
+    () =>
+      assertRegexResistant([
+        { text: "Checkout unavailable for all customers, HTTP 503 at checkout.", label: "outage" },
+        { text: "Administrator cannot sign in and needs account access restored.", label: "access" },
+        { text: "Please share the steps to export the monthly report as CSV.", label: "how_to" },
+      ], "separable bank"),
+    /separates class/u,
   );
 });
 
@@ -766,6 +810,7 @@ test("calendar fixtures reuse the configured calendar and cleanup never deletes 
     role: "PTO calendar",
     service: "calendar",
     createdByBenchmark: false,
+    fixtureIndex: 1,
   });
   assert.equal(provisioned.parameters.calendar_id, "shared-calendar-1");
 
@@ -836,7 +881,7 @@ test("tag cleanup removes events from the configured calendar without deleting i
 
 test("settled snapshots wait for tagged Drive output discovery", async () => {
   const base = buildScenario(
-    "customer_meeting_prep",
+    "sla_breach_pack",
     42,
     "author",
     "drive-settle",
@@ -845,34 +890,26 @@ test("settled snapshots wait for tagged Drive output discovery", async () => {
     ...base,
     parameters: {
       ...base.parameters,
-      calendar_id: "calendar-1",
-      account_brief_id: "brief-1",
-      source_message_id: "message-1",
+      case_spreadsheet_id: "sheet-1",
+      report_template_id: "brief-1",
     },
     resources: [
       {
-        id: "calendar-1",
-        role: "customer calendar",
-        service: "calendar",
+        id: "sheet-1",
+        role: "case register",
+        service: "sheets",
         createdByBenchmark: true,
       },
       {
         id: "brief-1",
-        role: "account brief",
+        role: "report template",
         service: "docs",
-        createdByBenchmark: true,
-      },
-      {
-        id: "message-1",
-        role: "customer message",
-        service: "gmail",
         createdByBenchmark: true,
       },
     ],
   };
   let driveLists = 0;
   let driveQuery = "";
-  let calendarQuery = "";
   const gws = new GwsClient(async (_file, args) => {
     const paramsAt = args.indexOf("--params");
     const params = paramsAt >= 0
@@ -880,34 +917,25 @@ test("settled snapshots wait for tagged Drive output discovery", async () => {
       : {};
     const operation = args.slice(0, paramsAt >= 0 ? paramsAt : 4).join(" ");
     let body: Json;
-    if (operation === "calendar events list") {
-      calendarQuery = params.q ?? "";
-      body = {
-        items: [{
-          summary: `Acme renewal ${scenario.runTag}`,
-          description: "Prep Doc",
-        }],
-      };
+    if (operation === "sheets spreadsheets get") {
+      body = { sheets: [] };
     } else if (operation === "docs documents get") {
       body = params.documentId === "output-doc"
         ? {
-          title: `Prep ${scenario.runTag}`,
+          title: `SLA pack ${scenario.runTag}`,
           body: {
             content: [{
               paragraph: {
                 elements: [{
-                  textRun: {
-                    content:
-                      `Objectives Account Facts Acme 120 SSO Risks security review delayed Questions ${scenario.runTag}`,
-                  },
+                  textRun: { content: `SLA Breach Pack ${scenario.runTag}` },
                 }],
               },
             }],
           },
         }
-        : { title: "Account brief", body: { content: [] } };
-    } else if (operation === "gmail users messages get") {
-      body = { id: "message-1", payload: { body: { data: "" } } };
+        : { title: "Report template", body: { content: [] } };
+    } else if (operation === "gmail users labels list") {
+      body = { labels: [] };
     } else if (operation === "gmail users drafts list") {
       body = { drafts: [{ id: "draft-1" }] };
     } else if (operation === "gmail users drafts get") {
@@ -922,14 +950,20 @@ test("settled snapshots wait for tagged Drive output discovery", async () => {
         : {
           files: [
             {
+              id: "sheet-1",
+              name: `Case register ${scenario.runTag}`,
+              mimeType: "application/vnd.google-apps.spreadsheet",
+              trashed: false,
+            },
+            {
               id: "brief-1",
-              name: `Account brief ${scenario.runTag}`,
+              name: `Report template ${scenario.runTag}`,
               mimeType: "application/vnd.google-apps.document",
               trashed: false,
             },
             {
               id: "output-doc",
-              name: `Prep ${scenario.runTag}`,
+              name: `SLA pack ${scenario.runTag}`,
               mimeType: "application/vnd.google-apps.document",
               trashed: false,
             },
@@ -947,7 +981,6 @@ test("settled snapshots wait for tagged Drive output discovery", async () => {
   );
   assert.equal(driveLists, 2);
   assert.match(driveQuery, /name contains/u);
-  assert.equal(calendarQuery, scenario.runTag);
   assert.ok(snapshot.resources["__drive_file_output-doc"]);
 });
 
@@ -981,37 +1014,54 @@ test("Gmail fixture readiness requires the exact query-visible unread message", 
 test("support provisioning stabilizes all Gmail fixtures with one scenario check", async () => {
   let inserts = 0;
   let readinessLists = 0;
-  const messageIds = ["message-1", "message-2", "message-3"];
+  const labelled: string[] = [];
+  const planned = buildScenario(
+    "support_inbox_triage",
+    42,
+    "author",
+    "scenario-readiness",
+  );
+  const messages = planned.fixtures.find((fixture) => fixture.service === "gmail")!.messages!;
+  const unreadCount = messages.filter((message) => messageIsUnread(message)).length;
   const gws = new GwsClient(async (_file, args) => {
     const flagAt = args.findIndex((arg) => arg.startsWith("--"));
     const operation = args.slice(0, flagAt).join(" ");
+    const paramsAt = args.indexOf("--params");
+    const jsonAt = args.indexOf("--json");
     let body: Json = {};
     if (operation === "sheets spreadsheets create") {
       body = { spreadsheetId: "sheet-1" };
     } else if (operation === "gmail users messages insert") {
-      body = { id: messageIds[inserts++]! };
+      body = { id: `message-${inserts++}` };
+    } else if (operation === "gmail users labels list") {
+      body = { labels: [] };
+    } else if (operation === "gmail users labels create") {
+      body = { id: "label-triaged" };
     } else if (operation === "gmail users messages list") {
       readinessLists += 1;
-      body = { messages: messageIds.map((id) => ({ id })) };
+      body = { messages: Array.from({ length: inserts }, (_, index) => ({ id: `message-${index}` })) };
+    } else if (operation === "gmail users messages modify") {
+      const params = JSON.parse(args[paramsAt + 1]!) as { id: string };
+      const payload = JSON.parse(args[jsonAt + 1]!) as { addLabelIds?: string[] };
+      if (payload.addLabelIds?.includes("label-triaged")) labelled.push(params.id);
+      body = { id: params.id };
     } else if (operation === "gmail users messages get") {
-      const paramsAt = args.indexOf("--params");
       const params = JSON.parse(args[paramsAt + 1]!) as { id: string };
       body = { id: params.id, labelIds: ["INBOX", "UNREAD"] };
     }
     return { code: 0, stdout: JSON.stringify(body), stderr: "" };
   });
   const driver = new WorkspaceScenarioDriver(gws, async () => undefined);
-  const scenario = await driver.provision(buildScenario(
-    "support_inbox_triage",
-    42,
-    "author",
-    "scenario-readiness",
-  ));
+  const scenario = await driver.provision(planned);
   assert.equal(
     scenario.resources.filter((resource) => resource.service === "gmail").length,
-    3,
+    messages.length,
   );
   assert.equal(readinessLists, 3, "three stable scenario checks, not three checks per fixture");
+  // State from a simulated previous run arrives already completed, so the
+  // workflow has something it is required to leave alone.
+  assert.equal(labelled.length, messages.length - unreadCount);
+  assert.ok(labelled.length > 0);
 });
 
 test("Codex harness is isolated from user plugins and can reach Workspace", () => {
@@ -1057,250 +1107,6 @@ test("workflow check diagnostics surface policy failures after a successful Cori
   );
 });
 
-test("support grading verifies queue rows and Gmail label transitions semantically", () => {
-  const scenario = buildScenario(
-    "support_inbox_triage",
-    42,
-    "author",
-    "semantic-grade",
-  );
-  const sheetId =
-    scenario.resources.find((resource) => resource.service === "sheets")!.id;
-  const messages = scenario.resources.filter((resource) =>
-    resource.service === "gmail"
-  );
-  const fixtures = scenario.fixtures.filter((fixture) =>
-    fixture.service === "gmail"
-  );
-  const rows = messages.map((message, index) => {
-    const fixture = fixtures[index]!.messages![0] as Record<string, string>;
-    return [
-      message.id,
-      "2026-07-13T08:00:00.000Z",
-      "benchmark@example.test",
-      fixture.subject!,
-      fixture.expected_category!,
-      fixture.expected_priority!,
-      "triaged",
-      "Factual summary",
-      scenario.runTag,
-      scenario.parameters.as_of!,
-    ];
-  });
-  const labels = messages.flatMap((message, index) => {
-    const fixture = fixtures[index]!.messages![0] as Record<string, string>;
-    return [
-      {
-        id: `category-${index}`,
-        name: `${scenario.runTag}/category/${fixture.expected_category}`,
-      },
-      {
-        id: `priority-${index}`,
-        name: `${scenario.runTag}/priority/${fixture.expected_priority}`,
-      },
-    ];
-  });
-  const capturedAt = "2026-07-13T09:00:00Z";
-  const before: WorkspaceSnapshot = {
-    capturedAt,
-    resources: {
-      [sheetId]: grid([["benchmark_tag"], [scenario.runTag]]),
-      ...Object.fromEntries(
-        messages.map((
-          message,
-        ) => [message.id, { labelIds: ["UNREAD", "INBOX"] }]),
-      ),
-      [`__drafts_${scenario.id}`]: {},
-      [`__sent_${scenario.id}`]: {},
-    },
-    drafts: [],
-    calendarEvents: [],
-  };
-  const after: WorkspaceSnapshot = {
-    capturedAt,
-    resources: {
-      [sheetId]: grid([[
-        "message_id",
-        "received_at",
-        "sender",
-        "subject",
-        "category",
-        "priority",
-        "status",
-        "summary",
-        "run_tag",
-        "as_of",
-      ], ...rows]),
-      ...Object.fromEntries(
-        messages.map((
-          message,
-          index,
-        ) => [message.id, {
-          labelIds: ["INBOX", `category-${index}`, `priority-${index}`],
-        }]),
-      ),
-      [`__labels_${scenario.id}`]: { labels },
-      [`__drafts_${scenario.id}`]: { drafts: [{ id: "draft-1" }] },
-      [`__sent_${scenario.id}`]: {},
-    },
-    drafts: [{
-      id: "draft-1",
-      to: "support-lead@example.test",
-      body:
-        `${scenario.runTag} outage: 1 access: 1 how_to: 1 P0: 1 P1: 1 P2: 1`,
-    }],
-    calendarEvents: [],
-  };
-  const grade = gradeExternalState(scenario, before, after);
-  assert.equal(grade.score, 100);
-  assert.equal(grade.passed, true);
-
-  const naturalCountProse = structuredClone(after);
-  (naturalCountProse.drafts[0] as Record<string, Json>).body =
-    `${scenario.runTag} Category counts: outage 1, access 1, how_to 1. Priority counts: P0 1, P1 1, P2 1.`;
-  const naturalCountGrade = gradeExternalState(
-    scenario,
-    before,
-    naturalCountProse,
-  );
-  assert.equal(
-    naturalCountGrade.items.find((item) => item.id === "draft")?.earned,
-    15,
-  );
-
-  const wrongHeader = structuredClone(after);
-  const queue = wrongHeader.resources[sheetId] as {
-    sheets: {
-      data: { rowData: { values: { formattedValue: string }[] }[] }[];
-    }[];
-  };
-  queue.sheets[0]!.data[0]!.rowData[0]!.values[8]!.formattedValue =
-    "benchmark_tag";
-  const wrongGrade = gradeExternalState(scenario, before, wrongHeader);
-  assert.equal(
-    wrongGrade.items.find((item) => item.id === "classification")?.earned,
-    40,
-  );
-  assert.equal(wrongGrade.items.find((item) => item.id === "queue")?.earned, 0);
-});
-
-test("SLA grading verifies deadline and boundary flags from result rows", () => {
-  const scenario = buildScenario(
-    "sla_breach_pack",
-    42,
-    "author",
-    "semantic-sla",
-  );
-  const sheetId =
-    scenario.resources.find((resource) => resource.service === "sheets")!.id;
-  const docId =
-    scenario.resources.find((resource) => resource.service === "docs")!.id;
-  const tag = scenario.runTag;
-  const rows = [
-    [
-      "case_id",
-      "status",
-      "priority",
-      "opened_at",
-      "sla_deadline",
-      "breached",
-      "due_within_two_hours",
-      "run_tag",
-    ],
-    [
-      "CASE-P0-BREACHED",
-      "open",
-      "P0",
-      "2026-07-13T07:30:00Z",
-      "2026-07-13T08:30:00.000Z",
-      "true",
-      "false",
-      tag,
-    ],
-    [
-      "CASE-P1-WARNING",
-      "in_progress",
-      "P1",
-      "2026-07-13T05:30:00Z",
-      "2026-07-13T09:30:00.000Z",
-      "false",
-      "true",
-      tag,
-    ],
-    [
-      "CASE-P2-WARNING",
-      "open",
-      "P2",
-      "2026-07-12T10:30:00Z",
-      "2026-07-13T10:30:00.000Z",
-      "false",
-      "true",
-      tag,
-    ],
-    [
-      "CASE-P3-BREACHED",
-      "in_progress",
-      "P3",
-      "2026-07-10T08:59:00Z",
-      "2026-07-13T08:59:00.000Z",
-      "true",
-      "false",
-      tag,
-    ],
-    [
-      "CASE-P1-HEALTHY",
-      "open",
-      "P1",
-      "2026-07-13T08:00:00Z",
-      "2026-07-13T12:00:00.000Z",
-      "false",
-      "false",
-      tag,
-    ],
-  ];
-  const table = {
-    sheets: [{
-      data: [{
-        rowData: rows.map((row) => ({
-          values: row.map((formattedValue) => ({ formattedValue })),
-        })),
-      }],
-    }],
-  };
-  const before: WorkspaceSnapshot = {
-    capturedAt: "2026-07-13T09:00:00Z",
-    resources: {
-      [sheetId]: { sheets: [] },
-      [docId]: { text: `SLA report template ${tag}` },
-      [`__drive_file_${docId}`]: {
-        text: `SLA report template ${tag}`,
-      },
-      [`__drafts_${scenario.id}`]: {},
-      [`__sent_${scenario.id}`]: {},
-    },
-    drafts: [],
-    calendarEvents: [],
-  };
-  const after: WorkspaceSnapshot = {
-    capturedAt: "2026-07-13T09:00:00Z",
-    resources: {
-      [sheetId]: table,
-      [docId]: { text: `SLA report template ${tag}` },
-      [`__drive_file_${docId}`]: {
-        text: `SLA report template ${tag}`,
-      },
-      __drive_file_report: { text: `SLA report ${tag}` },
-      [`__drafts_${scenario.id}`]: { drafts: [{ id: "draft-1" }] },
-      [`__sent_${scenario.id}`]: {},
-    },
-    drafts: [{ id: "draft-1" }],
-    calendarEvents: [],
-  };
-  const grade = gradeExternalState(scenario, before, after);
-  assert.equal(grade.score, 100);
-  assert.equal(grade.passed, true);
-});
-
 test("external-state grading ignores snapshot capture timestamps", () => {
   const scenario = buildScenario(
     "sla_breach_pack",
@@ -1334,249 +1140,477 @@ test("external-state grading ignores snapshot capture timestamps", () => {
   assert.ok(grade.items.every((item) => item.earned === 0));
 });
 
-test("task-specific semantic graders accept exact boundary outputs", () => {
-  const lead = buildScenario(
-    "lead_follow_up_queue",
-    42,
-    "author",
-    "semantic-lead",
+/**
+ * Grader tests are written the other way round from the rest of the suite: they
+ * build the correct answer *from* the scenario's ground truth, so they cannot
+ * drift out of step with a fixture change, and they prove two things a
+ * benchmark lives or dies on — a correct solution scores 100, and a single
+ * wrong value costs exactly the rubric item that covers it.
+ */
+
+const PRIORITY_RANK: Readonly<Record<string, number>> = { P0: 0, P1: 1, P2: 2 };
+
+interface SupportAnswer {
+  resources: Record<string, Json>;
+  drafts: Json[];
+}
+
+function supportAnswer(scenario: Scenario): SupportAnswer {
+  const inbox = scenario.fixtures.find((fixture) => fixture.service === "gmail")!
+    .messages! as Record<string, string>[];
+  const gmailIds = scenario.resources
+    .filter((resource) => resource.service === "gmail")
+    .map((resource) => resource.id);
+  const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+  const entries = scenario.expected.groundTruth.map((record, index) => ({
+    record,
+    id: gmailIds[index]!,
+    message: inbox[index]!,
+  }));
+  const triaged = entries
+    .filter((entry) => entry.record.fields.skip === "false")
+    .sort((left, right) =>
+      PRIORITY_RANK[left.record.fields.priority!]! - PRIORITY_RANK[right.record.fields.priority!]! ||
+      Date.parse(left.message.date!) - Date.parse(right.message.date!) ||
+      left.id.localeCompare(right.id)
+    );
+  const labelIds = new Map<string, string>();
+  const labelName = (name: string) => {
+    if (!labelIds.has(name)) labelIds.set(name, `label-${labelIds.size}`);
+    return labelIds.get(name)!;
+  };
+  const triagedLabel = labelName(`${scenario.runTag}/triaged`);
+  const resources: Record<string, Json> = {
+    [sheetId]: grid([
+      ["message_id", "received_at", "sender", "subject", "category", "priority", "status", "run_tag", "as_of"],
+      ...triaged.map((entry) => [
+        entry.id,
+        entry.message.date!,
+        entry.message.from!,
+        entry.message.subject!,
+        entry.record.fields.category!,
+        entry.record.fields.priority!,
+        "triaged",
+        scenario.runTag,
+        scenario.parameters.as_of!,
+      ]),
+    ]),
+  };
+  for (const entry of entries) {
+    resources[entry.id] = entry.record.fields.skip === "true"
+      // Untouched: exactly the labels the previous run left behind.
+      ? { labelIds: ["INBOX", triagedLabel] }
+      : {
+        labelIds: [
+          "INBOX",
+          triagedLabel,
+          labelName(`${scenario.runTag}/category/${entry.record.fields.category}`),
+          labelName(`${scenario.runTag}/priority/${entry.record.fields.priority}`),
+        ],
+      };
+  }
+  resources[`__labels_${scenario.id}`] = {
+    labels: [...labelIds].map(([name, id]) => ({ id, name })),
+  };
+  const counts = scenario.expected.aggregates;
+  const digest = [
+    scenario.runTag,
+    ...["outage", "access", "billing", "bug", "how_to"].map((category) =>
+      `${category}: ${counts[`category_${category}`]}`
+    ),
+    ...["P0", "P1", "P2"].map((priority) => `${priority}: ${counts[`priority_${priority}`]}`),
+  ].join(" | ");
+  return { resources, drafts: [{ id: "draft-1", to: "support-lead@example.test", body: digest }] };
+}
+
+test("support grading verifies classification, re-run safety, and labels from ground truth", () => {
+  const scenario = buildScenario("support_inbox_triage", 42, "author", "semantic-grade");
+  const answer = supportAnswer(scenario);
+  const grade = gradeSynthetic(scenario, answer.resources, answer.drafts);
+  assert.equal(grade.score, 100, JSON.stringify(grade.items));
+  assert.equal(grade.passed, true);
+
+  // One wrong category costs the classification item and nothing else.
+  const misclassified = structuredClone(answer);
+  const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+  const queue = misclassified.resources[sheetId] as {
+    sheets: { data: { rowData: { values: { formattedValue: string }[] }[] }[] }[];
+  };
+  const firstRow = queue.sheets[0]!.data[0]!.rowData[1]!.values;
+  firstRow[4]!.formattedValue = firstRow[4]!.formattedValue === "billing" ? "bug" : "billing";
+  const wrongCategory = gradeSynthetic(scenario, misclassified.resources, misclassified.drafts);
+  assert.equal(wrongCategory.items.find((item) => item.id === "classification")?.earned, 0);
+  assert.equal(wrongCategory.items.find((item) => item.id === "idempotence")?.earned, 20);
+
+  // Re-triaging a message an earlier run finished costs the idempotence item.
+  const reTriaged = structuredClone(answer);
+  const skippedIndex = scenario.expected.groundTruth.findIndex(
+    (record) => record.fields.skip === "true",
   );
-  const leadQueue = [
-    ["lead_id", "lead_score", "next_action", "run_tag"],
-    ["LEAD-001", "80", "Send personalized follow-up", lead.runTag],
-    ["LEAD-003", "80", "Send pricing", lead.runTag],
-    ["LEAD-002", "70", "Confirm legal review", lead.runTag],
-    ["LEAD-004", "60", "Book discovery", lead.runTag],
-  ];
-  const leadSource = lead.fixtures[0]!.table!.map((row) => [...row]);
-  leadSource[1]![8] = "Send personalized follow-up";
+  const skippedId = scenario.resources
+    .filter((resource) => resource.service === "gmail")[skippedIndex]!.id;
+  const labels = (reTriaged.resources[`__labels_${scenario.id}`] as {
+    labels: { id: string; name: string }[];
+  }).labels;
+  const categoryLabel = labels.find((label) =>
+    label.name.startsWith(`${scenario.runTag}/category/`)
+  )!;
+  reTriaged.resources[skippedId] = { labelIds: ["INBOX", categoryLabel.id] };
   assert.equal(
-    gradeSynthetic(lead, { source: grid(leadSource), queue: grid(leadQueue) }, [
-      { to: "avery@example.test", body: lead.runTag },
-    ]).score,
-    100,
-  );
-  const wrongQueue = leadQueue.map((row) => [...row]);
-  wrongQueue[1]![1] = "79";
-  assert.equal(
-    gradeSynthetic(
-      lead,
-      { source: grid(leadSource), queue: grid(wrongQueue) },
-      [{ to: "avery@example.test", body: lead.runTag }],
-    ).items.find((item) => item.id === "ranking")?.earned,
+    gradeSynthetic(scenario, reTriaged.resources, reTriaged.drafts)
+      .items.find((item) => item.id === "idempotence")?.earned,
     0,
   );
+});
 
-  const pto = buildScenario(
-    "preapproved_pto_processing",
-    42,
-    "author",
-    "semantic-pto",
+test("SLA grading verifies deadline and boundary flags from ground truth", () => {
+  const scenario = buildScenario("sla_breach_pack", 42, "author", "semantic-sla");
+  const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+  const truth = [...scenario.expected.groundTruth].sort((left, right) =>
+    Date.parse(left.fields.sla_deadline!) - Date.parse(right.fields.sla_deadline!) ||
+    left.fields.case_id!.localeCompare(right.fields.case_id!)
   );
-  const ptoRows = pto.fixtures[0]!.table!.map((row) => [...row]);
-  ptoRows[1]![2] = "scheduled";
-  ptoRows[1]![8] = "8";
-  ptoRows[1]![10] = "4";
-  const validPtoEvent = {
-    items: [{
-      summary: `PTO - Riley Martin - ${pto.runTag}`,
-      description: `Out of office: Riley Martin\nRun tag: ${pto.runTag}`,
-      eventType: "default",
-      start: { date: "2026-07-14" },
-      end: { date: "2026-07-21" },
-    }],
+  const aggregates = scenario.expected.aggregates;
+  const rows = [
+    ["case_id", "status", "priority", "opened_at", "sla_deadline", "breached", "due_within_two_hours", "run_tag"],
+    ...truth.map((record) => [
+      record.fields.case_id!,
+      record.fields.status!,
+      record.fields.priority!,
+      record.fields.opened_at!,
+      record.fields.sla_deadline!,
+      record.fields.breached!,
+      record.fields.due_within_two_hours!,
+      scenario.runTag,
+    ]),
+  ];
+  const resources: Record<string, Json> = {
+    [sheetId]: grid(rows),
+    __drive_file_report: {
+      text: `SLA Breach Pack ${scenario.runTag} breached ${aggregates.breached_count} due within two hours ${aggregates.warning_count}`,
+    },
   };
+  const drafts: Json[] = [{
+    id: "draft-1",
+    body: `${scenario.runTag} breached ${aggregates.breached_count}`,
+  }];
+  const grade = gradeSynthetic(scenario, resources, drafts);
+  assert.equal(grade.score, 100, JSON.stringify(grade.items));
+
+  // Moving one deadline across the strict breach boundary must be caught.
+  const shifted = structuredClone(resources);
+  const table = shifted[sheetId] as {
+    sheets: { data: { rowData: { values: { formattedValue: string }[] }[] }[] }[];
+  };
+  const cells = table.sheets[0]!.data[0]!.rowData[1]!.values;
+  cells[5]!.formattedValue = cells[5]!.formattedValue === "true" ? "false" : "true";
   assert.equal(
-    gradeSynthetic(pto, { pto: grid(ptoRows) }, [{
-      to: "riley@example.test",
-      body: pto.runTag,
-    }], [validPtoEvent]).score,
-    100,
-  );
-  assert.equal(
-    gradeSynthetic(pto, { pto: grid(ptoRows) }, [{
-      to: "riley@example.test",
-      body: pto.runTag,
-    }], [{
-      ...validPtoEvent,
-      items: [{ ...validPtoEvent.items[0]!, eventType: "outOfOffice" }],
-    }]).items.find((item) => item.id === "calendar")?.earned,
+    gradeSynthetic(scenario, shifted, drafts).items.find((item) => item.id === "sla")?.earned,
     0,
   );
+});
 
-  const weekly = buildScenario(
-    "weekly_operating_review",
-    42,
-    "author",
-    "semantic-weekly",
-  );
-  const review = [
-    ["project_id", "rag", "escalations", "run_tag"],
-    ["PROJ-RED-BLOCKED", "red", "blocked", weekly.runTag],
-    ["PROJ-RED-OVERDUE", "red", "overdue", weekly.runTag],
-    ["PROJ-RED-PROGRESS", "red", "progress", weekly.runTag],
-    ["PROJ-AMBER-BOUNDARY", "amber", "", weekly.runTag],
-    ["PROJ-AMBER-PROGRESS", "amber", "", weekly.runTag],
-    ["PROJ-GREEN", "green", "", weekly.runTag],
-  ];
-  assert.equal(
-    gradeSynthetic(weekly, {
-      review: grid(review),
-      [`__drive_file_doc`]: {
-        text: `Weekly Operating Review red amber green ${weekly.runTag}`,
-      },
-    }, [{ body: weekly.runTag }]).score,
-    100,
-  );
-
-  const actions = buildScenario(
-    "meeting_action_register",
-    42,
-    "author",
-    "semantic-actions",
-  );
-  const actionRows = [
-    ["action", "owner", "due_date", "source_section", "run_tag"],
-    [
-      "Publish the migration plan",
-      "Alice",
-      "2026-07-16",
-      "Decisions",
-      actions.runTag,
-    ],
-    ["Update the risk register", "Bob", "TBD", "Decisions", actions.runTag],
-    [
-      "Schedule the customer workshop",
-      "Carol",
-      "2026-07-20",
-      "Follow-ups",
-      actions.runTag,
-    ],
-  ];
-  assert.equal(
-    gradeSynthetic(actions, { tracker: grid(actionRows) }, [{
-      body: actions.runTag,
-    }]).score,
-    100,
-  );
-
-  const expense = buildScenario(
-    "expense_policy_audit",
-    42,
-    "author",
-    "semantic-expense",
-  );
-  const audit = [
-    ["expense_id", "audit", "reasons", "run_tag"],
-    ["EXP-001", "PASS", "", expense.runTag],
-    ["EXP-002", "FAIL", "missing_receipt", expense.runTag],
-    ["EXP-003", "FAIL", "hotel_rate", expense.runTag],
-    ["EXP-004", "FAIL", "meal_per_person", expense.runTag],
-    ["EXP-005", "FAIL", "personal", expense.runTag],
-    ["EXP-006", "FAIL", "duplicate_invoice", expense.runTag],
-    ["EXP-007", "FAIL", "duplicate_invoice", expense.runTag],
-  ];
-  assert.equal(
-    gradeSynthetic(expense, {
-      audit: grid(audit),
-      [`__drive_file_report`]: {
-        text: `Expense Exceptions 6 ${expense.runTag}`,
-      },
-    }, [{ body: expense.runTag }]).score,
-    100,
-  );
-
-  const budget = buildScenario(
-    "budget_variance_deck",
-    42,
-    "author",
-    "semantic-budget",
-  );
-  const slides = {
-    slides: [
-      {
-        text:
-          `Executive Summary ${budget.runTag}\nCloud variance +$150 (+15.00%)\nSubscriptions variance -$1,500 (-15.00%)\nNew Program variance +$500 (N/A)`,
-      },
-      { text: "Unfavorable Variances Cloud Subscriptions unfavorable" },
-      { text: "Detail" },
-    ],
+test("every task's grader is satisfiable by a correct answer and only by one", () => {
+  const perfect: Record<string, (scenario: Scenario) => { resources: Record<string, Json>; drafts: Json[]; events?: Json[] }> = {
+    support_inbox_triage: (scenario) => supportAnswer(scenario),
+    inbound_lead_qualification: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const gmailIds = scenario.resources
+        .filter((resource) => resource.service === "gmail")
+        .map((resource) => resource.id);
+      const ranked = scenario.expected.groundTruth
+        .map((record, index) => ({ record, id: gmailIds[index]! }))
+        .sort((left, right) =>
+          Number(right.record.fields.score) - Number(left.record.fields.score) ||
+          Number(right.record.fields.seat_count) - Number(left.record.fields.seat_count) ||
+          left.id.localeCompare(right.id)
+        );
+      const aggregates = scenario.expected.aggregates;
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["message_id", "sender", "company", "seat_count", "timeline_days", "security_review", "score", "band", "run_tag", "as_of"],
+            ...ranked.map((entry) => [
+              entry.id,
+              entry.record.fields.sender!,
+              entry.record.fields.company!,
+              entry.record.fields.seat_count!,
+              entry.record.fields.timeline_days!,
+              entry.record.fields.security_review!,
+              entry.record.fields.score!,
+              entry.record.fields.band!,
+              scenario.runTag,
+              scenario.parameters.as_of!,
+            ]),
+          ]),
+        },
+        drafts: [{
+          id: "draft-1",
+          body: `${scenario.runTag} ${aggregates.top_sender} seats ${aggregates.top_seat_count} days ${aggregates.top_timeline_days}`,
+        }],
+      };
+    },
+    vendor_invoice_intake: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const docIds = scenario.resources
+        .filter((resource) => resource.service === "docs")
+        .map((resource) => resource.id);
+      const rank: Record<string, number> = { blocked: 0, overdue: 1, payable: 2 };
+      const ordered = scenario.expected.groundTruth
+        .map((record, index) => ({ record, id: docIds[index]! }))
+        .sort((left, right) =>
+          rank[left.record.fields.status!]! - rank[right.record.fields.status!]! ||
+          left.record.fields.due_date!.localeCompare(right.record.fields.due_date!) ||
+          left.record.fields.invoice_number!.localeCompare(right.record.fields.invoice_number!)
+        );
+      const aggregates = scenario.expected.aggregates;
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["document_id", "vendor", "invoice_number", "currency", "net", "tax", "gross", "due_date", "status", "run_tag", "as_of"],
+            ...ordered.map((entry) => [
+              entry.id,
+              entry.record.fields.vendor!,
+              entry.record.fields.invoice_number!,
+              entry.record.fields.currency!,
+              entry.record.fields.net!,
+              entry.record.fields.tax!,
+              entry.record.fields.gross!,
+              entry.record.fields.due_date!,
+              entry.record.fields.status!,
+              scenario.runTag,
+              scenario.parameters.as_of!,
+            ]),
+          ]),
+        },
+        drafts: [{
+          id: "draft-1",
+          body: `${scenario.runTag} blocked ${aggregates.blocked_count} ${aggregates.blocked_vendors} overdue ${aggregates.overdue_count} payable ${aggregates.payable_count}`,
+        }],
+      };
+    },
+    incident_postmortem_pack: (scenario) => {
+      const sheetId = scenario.resources.filter((resource) => resource.service === "sheets")[1]!.id;
+      const factors = scenario.expected.groundTruth
+        .filter((record) => record.key.startsWith("factor:") && record.fields.present === "true")
+        .sort((left, right) => left.fields.factor_id!.localeCompare(right.fields.factor_id!));
+      const timings = scenario.expected.groundTruth.filter((record) => record.key.startsWith("timing:"));
+      const aggregates = scenario.expected.aggregates;
+      return {
+        resources: {
+          [sheetId]: {
+            sheets: [
+              gridSheet([
+                ["factor_id", "summary", "confirmed_by", "run_tag"],
+                ...factors.map((record) => [
+                  record.fields.factor_id!,
+                  "Confirmed during the response",
+                  record.fields.confirmed_by!,
+                  scenario.runTag,
+                ]),
+              ]),
+              gridSheet([
+                ["metric", "minutes", "run_tag"],
+                ...timings.map((record) => [record.fields.metric!, record.fields.minutes!, scenario.runTag]),
+              ]),
+            ],
+          },
+        },
+        drafts: [{
+          id: "draft-1",
+          body: `${scenario.runTag} detect ${aggregates.time_to_detect} mitigate ${aggregates.time_to_mitigate} resolve ${aggregates.time_to_resolve} factors ${aggregates.confirmed_count}`,
+        }],
+      };
+    },
+    contract_obligation_register: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const ordered = [...scenario.expected.groundTruth].sort((left, right) =>
+        left.fields.act_by!.localeCompare(right.fields.act_by!) ||
+        left.fields.clause!.localeCompare(right.fields.clause!)
+      );
+      const aggregates = scenario.expected.aggregates;
+      const due = ordered.filter((record) => record.fields.action_required === "true");
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["clause", "party", "obligation", "notice_days", "act_by", "action_required", "run_tag", "as_of"],
+            ...ordered.map((record) => [
+              record.fields.clause!,
+              record.fields.party!,
+              "Act before the term ends",
+              record.fields.notice_days!,
+              record.fields.act_by!,
+              record.fields.action_required!,
+              scenario.runTag,
+              scenario.parameters.as_of!,
+            ]),
+          ]),
+        },
+        drafts: [{
+          id: "draft-1",
+          body: `${scenario.runTag} obligations ${aggregates.obligation_count} due ${due.map((record) => record.fields.clause).join(", ")}`,
+        }],
+      };
+    },
+    sla_breach_pack: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const aggregates = scenario.expected.aggregates;
+      const ordered = [...scenario.expected.groundTruth].sort((left, right) =>
+        Date.parse(left.fields.sla_deadline!) - Date.parse(right.fields.sla_deadline!)
+      );
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["case_id", "status", "priority", "opened_at", "sla_deadline", "breached", "due_within_two_hours", "run_tag"],
+            ...ordered.map((record) => [
+              record.fields.case_id!,
+              record.fields.status!,
+              record.fields.priority!,
+              record.fields.opened_at!,
+              record.fields.sla_deadline!,
+              record.fields.breached!,
+              record.fields.due_within_two_hours!,
+              scenario.runTag,
+            ]),
+          ]),
+          __drive_file_report: {
+            text: `SLA Breach Pack ${scenario.runTag} breached ${aggregates.breached_count} warning ${aggregates.warning_count}`,
+          },
+        },
+        drafts: [{ id: "draft-1", body: `${scenario.runTag} breached ${aggregates.breached_count}` }],
+      };
+    },
+    expense_policy_audit: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const aggregates = scenario.expected.aggregates;
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["expense_id", "audit", "reasons", "run_tag"],
+            ...scenario.expected.groundTruth.map((record) => [
+              record.fields.expense_id!,
+              record.fields.audit!,
+              record.fields.reasons!,
+              scenario.runTag,
+            ]),
+          ]),
+          __drive_file_report: {
+            text: `Expense Exceptions Report ${scenario.runTag} exceptions ${aggregates.exception_count}`,
+          },
+        },
+        drafts: [{ id: "draft-1", body: `${scenario.runTag} exceptions ${aggregates.exception_count}` }],
+      };
+    },
+    budget_variance_deck: (scenario) => {
+      const truth = scenario.expected.groundTruth;
+      const unfavourable = truth.filter((record) => record.fields.unfavourable === "true");
+      const aggregates = scenario.expected.aggregates;
+      return {
+        resources: {
+          __drive_file_deck: {
+            slides: [
+              { text: `Executive Summary ${scenario.runTag} unfavourable lines ${aggregates.unfavourable_count}` },
+              {
+                text: `Unfavourable Variances ${
+                  unfavourable.map((record) =>
+                    `${record.fields.category} ${record.fields.variance_amount} ${record.fields.variance_percent}%`
+                  ).join(" | ")
+                }`,
+              },
+              {
+                text: `Detail ${
+                  truth.map((record) =>
+                    `${record.fields.category} budget ${record.fields.budget} actual ${record.fields.actual} variance ${record.fields.variance_amount} ${
+                      record.fields.variance_percent === "N/A" ? "N/A" : `${record.fields.variance_percent}%`
+                    }`
+                  ).join(" | ")
+                }`,
+              },
+            ],
+          },
+        },
+        drafts: [{ id: "draft-1", body: `${scenario.runTag} unfavourable ${aggregates.unfavourable_count}` }],
+      };
+    },
+    preapproved_pto_processing: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const source = scenario.fixtures[0]!.table!.map((row) => [...row]);
+      for (const record of scenario.expected.groundTruth) {
+        const row = source.find((candidate) => candidate[1] === record.fields.request_id);
+        if (!row) continue;
+        row[2] = "scheduled";
+        row[8] = record.fields.pto_balance_days!;
+        row[10] = record.fields.business_days!;
+      }
+      return {
+        resources: { [sheetId]: grid(source) },
+        drafts: scenario.expected.groundTruth.map((record, index) => ({
+          id: `draft-${index}`,
+          to: record.fields.employee_email!,
+          body: `${scenario.runTag} ${record.fields.employee_email} ${record.fields.business_days} business days`,
+        })),
+        events: [{
+          items: scenario.expected.groundTruth.map((record) => ({
+            summary: `Out of office ${scenario.runTag}`,
+            eventType: "default",
+            start: { date: record.fields.event_start! },
+            end: { date: record.fields.event_end! },
+          })),
+        }],
+      };
+    },
+    weekly_operating_review: (scenario) => {
+      const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
+      const rank: Record<string, number> = { red: 0, amber: 1, green: 2 };
+      const ordered = [...scenario.expected.groundTruth].sort((left, right) =>
+        rank[left.fields.rag!]! - rank[right.fields.rag!]! ||
+        left.fields.project_id!.localeCompare(right.fields.project_id!)
+      );
+      const aggregates = scenario.expected.aggregates;
+      const escalations = ordered.filter((record) => record.fields.rag === "red");
+      return {
+        resources: {
+          [sheetId]: grid([
+            ["project_id", "rag", "escalation", "owner", "run_tag"],
+            ...ordered.map((record) => [
+              record.fields.project_id!,
+              record.fields.rag!,
+              record.fields.escalation!,
+              record.fields.owner!,
+              scenario.runTag,
+            ]),
+          ]),
+          __drive_file_review: {
+            text: `Weekly Operating Review ${scenario.runTag} red ${aggregates.red_count} amber ${aggregates.amber_count} green ${aggregates.green_count} escalations ${
+              escalations.map((record) => record.fields.project_id).join(" ")
+            }`,
+          },
+        },
+        drafts: [{
+          id: "draft-1",
+          body: `${scenario.runTag} red ${aggregates.red_count} amber ${aggregates.amber_count} green ${aggregates.green_count}`,
+        }],
+      };
+    },
   };
-  assert.equal(
-    gradeSynthetic(budget, { [`__drive_file_deck`]: slides }, [{
-      body: budget.runTag,
-    }]).score,
-    100,
-  );
 
-  const hire = buildScenario(
-    "new_hire_onboarding_pack",
-    42,
-    "author",
-    "semantic-hire",
-  );
-  const hireRows = hire.fixtures[0]!.table!.map((row) => [...row]);
-  hireRows[1]![1] = "prepared";
-  hireRows[1]![8] = "true";
-  hireRows[1]![9] = "https://docs.google.com/document/d/pack";
-  hireRows[1]![10] = "https://calendar.google.com/event?id=event";
-  assert.equal(
-    gradeSynthetic(
-      hire,
-      {
-        hires: grid(hireRows),
-        [`__drive_file_${hire.resources[1]!.id}`]: {
-          text:
-            `Onboarding Pack {{NAME}} {{EMAIL}} {{MANAGER}} {{START_DATE}} {{RUN_TAG}} ${hire.runTag}`,
-        },
-        [`__drive_file_pack`]: {
-          text:
-            `Jordan Lee jordan.lee@example.test Morgan Patel 2026-07-20 ${hire.runTag}`,
-        },
-      },
-      [{ to: "jordan.lee@example.test", body: hire.runTag }],
-      [{
-        items: [{
-          summary: `${hire.runTag} Orientation`,
-          start: {
-            dateTime: "2026-07-20T07:00:00Z",
-            timeZone: "Europe/Paris",
-          },
-          end: {
-            dateTime: "2026-07-20T08:00:00Z",
-            timeZone: "Europe/Paris",
-          },
-        }],
-      }],
-    ).score,
-    100,
-  );
-
-  const meeting = buildScenario(
-    "customer_meeting_prep",
-    42,
-    "author",
-    "semantic-meeting",
-  );
-  assert.equal(
-    gradeSynthetic(
-      meeting,
-      {
-        [`__drive_file_prep`]: {
-          text:
-            `Acme 120 SSO security review delayed Objectives Account Facts Risks Questions ${meeting.runTag}`,
-        },
-      },
-      [{ body: `Acme ${meeting.runTag}` }],
-      [{
-        items: [{
-          description:
-            `Prep https://docs.google.com/document/d/prep ${meeting.runTag}`,
-        }],
-      }],
-    ).score,
-    100,
-  );
+  for (const task of TASKS) {
+    const scenario = buildScenario(task.id, 42, "author", "grader-satisfiable");
+    const build = perfect[task.id];
+    assert.ok(build, `${task.id} has no reference answer in this test`);
+    const answer = build(scenario);
+    const grade = gradeSynthetic(scenario, answer.resources, answer.drafts, answer.events ?? []);
+    assert.equal(
+      grade.score,
+      100,
+      `${task.id} scored ${grade.score}: ${
+        grade.items.filter((item) => item.earned < item.max).map((item) => item.id).join(", ")
+      }`,
+    );
+    // An empty Workspace must score nothing, or the rubric is measuring the
+    // fixture rather than the work.
+    assert.equal(gradeSynthetic(scenario, {}, []).score, 0, `${task.id} scored an empty answer`);
+  }
 });
 
 test("preview gate inspects executed commands, not documentation text", () => {
@@ -1713,7 +1747,7 @@ test("capture readiness ignores safe author quality misses and has no qualificat
     assert.equal(captureReady(ready), true, task.id);
   }
   const ready = {
-    taskId: "customer_meeting_prep",
+    taskId: "vendor_invoice_intake",
     authorGrade: { ...lowGrade, score: 100, passed: true },
     outcomes: sampleOutcomes(),
     previewPresented: true,
@@ -2070,7 +2104,7 @@ test("scorecard presents direct and safe replay variability", () => {
     markdown,
     /\| Cori replay \| 100 \| 100–100 \| 3\/3 \| 3\/3 \| 12\.5s \| 0 \| \$0\.0000 \|/u,
   );
-  assert.match(markdown, /\| lead_follow_up_queue \| 43 \| 70 \| 100 \| \+30 \| sheet \| none \|/u);
+  assert.match(markdown, /\| inbound_lead_qualification \| 43 \| 70 \| 100 \| \+30 \| sheet \| none \|/u);
   assert.match(markdown, /direct-agent and safe replay scores remain comparative measurements/iu);
 });
 
@@ -2109,11 +2143,11 @@ test("benchmark viewer keeps transcript, trace, snapshots, and workflow evidence
     sampleTrial(43, "direct", 80, ["draft"], 60_584),
     sampleTrial(43, "replay", 100, [], 12_499),
   ]);
-  result.trials[1]!.tracePath = "/tmp/cori-traces/lead_follow_up_queue-0-0.json";
+  result.trials[1]!.tracePath = "/tmp/cori-traces/inbound_lead_qualification-0-0.json";
   result.trials[1]!.workflowHash = "workflow-hash";
   const document = benchmarkViewerDocument(result, [
     {
-      path: "transcripts/authors/lead_follow_up_queue-direct.json",
+      path: "transcripts/authors/inbound_lead_qualification-direct.json",
       kind: "transcript",
       content: JSON.stringify({
         transcript: [
@@ -2134,12 +2168,12 @@ test("benchmark viewer keeps transcript, trace, snapshots, and workflow evidence
       }),
     },
     {
-      path: "snapshots/lead_follow_up_queue-0-0-direct-after.json",
+      path: "snapshots/inbound_lead_qualification-0-0-direct-after.json",
       kind: "snapshot",
       content: JSON.stringify({ resources: { sheet: { rows: 3 } } }),
     },
     {
-      path: "cori-traces/lead_follow_up_queue-0-0.json",
+      path: "cori-traces/inbound_lead_qualification-0-0.json",
       kind: "trace",
       content: JSON.stringify({
         code: 0,
@@ -2157,7 +2191,7 @@ test("benchmark viewer keeps transcript, trace, snapshots, and workflow evidence
       }),
     },
     {
-      path: "generated-workflows/lead_follow_up_queue/manifest.md",
+      path: "generated-workflows/inbound_lead_qualification/manifest.md",
       kind: "workflow",
       content: "# Lead follow-up queue",
     },
@@ -2228,7 +2262,7 @@ test("benchmark viewer normalizes messy logs without embedding large raw evidenc
   const spreadsheetUrl = "https://docs.google.com/spreadsheets/d/example/edit";
   const document = benchmarkViewerDocument(result, [
     {
-      path: "transcripts/authors/lead_follow_up_queue-jsonl.json",
+      path: "transcripts/authors/inbound_lead_qualification-jsonl.json",
       kind: "transcript",
       content: [
         JSON.stringify({ type: "user_message", message: { role: "user", content: "JSONL user message" } }),
@@ -2237,7 +2271,7 @@ test("benchmark viewer normalizes messy logs without embedding large raw evidenc
       ].join("\n"),
     },
     {
-      path: "snapshots/lead_follow_up_queue-large-after.json",
+      path: "snapshots/inbound_lead_qualification-large-after.json",
       kind: "snapshot",
       content: JSON.stringify({ spreadsheetUrl, rawOnly }),
     },
@@ -2261,7 +2295,7 @@ test("scorecard exposes one-shot phase outcomes and timings", () => {
   ]);
   const markdown = scorecard(base);
   assert.match(markdown, /## Per-task phase outcomes/u);
-  assert.match(markdown, /\| lead_follow_up_queue \| succeeded/u);
+  assert.match(markdown, /\| inbound_lead_qualification \| succeeded/u);
   assert.match(markdown, /\| One-shot captures \| 1; automatic retries 0 \|/u);
   assert.match(markdown, /\| Capture time \|/u);
 });
@@ -2448,6 +2482,48 @@ test("hybrid run fails before provisioning when the runtime model is missing", a
   }
 });
 
+test("a hybrid replay that ran no model is a replay-integrity failure", () => {
+  const clean: Grade = { score: 100, passed: true, safetyViolations: [], items: [] };
+  const withModel = {
+    status: "succeeded",
+    activities: [{ kind: "cli" }, { kind: "llm" }, { kind: "code" }],
+  };
+  const withoutModel = { status: "succeeded", activities: [{ kind: "cli" }, { kind: "code" }] };
+  assert.equal(traceRanRuntimeModel(withModel), true);
+  assert.equal(traceRanRuntimeModel(withoutModel), false);
+  assert.equal(traceRanRuntimeModel(null), false);
+
+  // A workflow that solved a regenerated-input task with fixed logic scores
+  // zero even when the Workspace state happens to be right this run.
+  const gated = hardGate(clean, true, true, !traceRanRuntimeModel(withoutModel));
+  assert.equal(gated.score, 0);
+  assert.equal(gated.passed, false);
+  assert.deepEqual(gated.safetyViolations, [missingRuntimeModelFailure]);
+  assert.equal(hardGate(clean, true, true, !traceRanRuntimeModel(withModel)).score, 100);
+});
+
+test("static policy requires an llm step only where inputs are regenerated", async () => {
+  for (const task of TASKS) {
+    const report = await inspectWorkflowPolicy(
+      join(packageRoot, "reference-workflows", task.id),
+      [],
+      task.parameters.map((parameter) => parameter.name),
+      task.requiresRuntimeModel === true,
+    );
+    assert.equal(report.ok, true, `${task.id}: ${report.violations.join("; ")}`);
+  }
+  // The same deterministic reference workflow fails the moment it is asked to
+  // stand in for a task whose inputs change shape every run.
+  const deterministic = await inspectWorkflowPolicy(
+    join(packageRoot, "reference-workflows", "sla_breach_pack"),
+    [],
+    undefined,
+    true,
+  );
+  assert.equal(deterministic.ok, false);
+  assert.match(deterministic.violations.join("\n"), /must decide them with an llm step/u);
+});
+
 function samplePhase(status: "succeeded" | "failed" | "skipped") {
   return {
     status,
@@ -2491,7 +2567,7 @@ function gradeSynthetic(
     resources: {
       ...resources,
       [`__drafts_${scenario.id}`]: drafts.length > 0
-        ? { drafts: [{ id: "draft-1" }] }
+        ? { drafts: drafts.map((_, index) => ({ id: `draft-${index}` })) }
         : {},
       [`__sent_${scenario.id}`]: {},
     },
@@ -2544,7 +2620,7 @@ function sampleBenchmarkResult(
       checkPassed: true,
       policy: { ok: true, violations: [], workflowHash: "abc" },
       tasks: [{
-        taskId: "lead_follow_up_queue",
+        taskId: "inbound_lead_qualification",
         authorGrade: completeGrade,
         outcomes: sampleOutcomes(),
         previewPresented: true,
@@ -2596,7 +2672,7 @@ function sampleTrial(
     draft: 20,
   };
   return {
-    taskId: "lead_follow_up_queue",
+    taskId: "inbound_lead_qualification",
     seed,
     lane,
     grade: {
@@ -2636,13 +2712,16 @@ function sampleTrial(
 }
 
 function grid(table: readonly (readonly string[])[]): Json {
+  return { sheets: [gridSheet(table)] };
+}
+
+/** One tab of a spreadsheet, for fixtures that write several. */
+function gridSheet(table: readonly (readonly string[])[]): Json {
   return {
-    sheets: [{
-      data: [{
-        rowData: table.map((row) => ({
-          values: row.map((formattedValue) => ({ formattedValue })),
-        })),
-      }],
+    data: [{
+      rowData: table.map((row) => ({
+        values: row.map((formattedValue) => ({ formattedValue })),
+      })),
     }],
   };
 }

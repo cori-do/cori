@@ -25,6 +25,7 @@ export async function inspectWorkflowPolicy(
   workflowDir: string,
   forbiddenRuntimeLiterals: readonly string[] = [],
   expectedParameters?: readonly string[],
+  requireRuntimeModel = false,
 ): Promise<WorkflowPolicyReport> {
   const violations: string[] = [];
   const files = await listFiles(workflowDir);
@@ -60,8 +61,10 @@ export async function inspectWorkflowPolicy(
       /\.(?:[cm]?[jt]sx?|jsonc?)$/u.test(path);
   });
   if (stepFiles.length === 0) violations.push("workflow has no numbered TypeScript steps");
+  let declaresRuntimeModel = false;
   for (const file of stepFiles) {
     const source = await readFile(file, "utf8");
+    if (/\bstep\.llm\s*\(/u.test(source)) declaresRuntimeModel = true;
     if (!hasCanonicalSdkImport(source)) {
       violations.push(`${relative(workflowDir, file)} must import step from @cori-do/sdk`);
     }
@@ -98,6 +101,13 @@ export async function inspectWorkflowPolicy(
     for (const literal of forbiddenRuntimeLiterals.filter(Boolean)) {
       if (source.includes(literal)) violations.push(`${relative(workflowDir, file)} hard-codes captured fixture value ${redactedLiteral(literal)}`);
     }
+  }
+  // Tasks whose source data is regenerated every run cannot be solved by a
+  // matcher written against the day the workflow happened to be captured.
+  if (requireRuntimeModel && !declaresRuntimeModel) {
+    violations.push(
+      "this task's inputs change shape every run, so the workflow must decide them with an llm step rather than logic fixed at capture time",
+    );
   }
   return { ok: violations.length === 0, violations, workflowHash: await hashDirectory(workflowDir) };
 }

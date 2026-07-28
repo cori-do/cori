@@ -2,7 +2,23 @@
 
 This package measures direct Google Workspace task completion against a captured, unchanged Cori workflow. It operates against the GWS account already configured on the machine; it does not create, manage, or require a Workspace tenant.
 
-The ten tasks have deterministic scenario generation, external Workspace-state grading, safety gates, structured harness adapters, persisted transcripts/traces, and maintainer-authored reference workflows. The benchmark never treats agent text or a process exit as correctness evidence.
+The ten tasks have seed-varying scenario generation, external Workspace-state grading against per-seed ground truth, safety gates, structured harness adapters, persisted transcripts/traces, and maintainer-authored reference workflows. The benchmark never treats agent text or a process exit as correctness evidence.
+
+## What the tasks measure
+
+Each task is written the way an operations runbook is written: the prompt states the business policy and the exact output contract, and stops there. It never says which input maps to which answer. The expected values for a run live in the scenario the seed generated, and the grader reads only those — no expected value is written into the grader, the prompt, or the reference workflow.
+
+Five tasks are on the **deterministic** track (`sla_breach_pack`, `expense_policy_audit`, `budget_variance_deck`, `preapproved_pto_processing`, `weekly_operating_review`). Their rules are total functions over structured input, so a workflow of `cli` and `code` steps is the correct answer and they run without a model.
+
+Five tasks are on the **hybrid** track (`support_inbox_triage`, `inbound_lead_qualification`, `vendor_invoice_intake`, `incident_postmortem_pack`, `contract_obligation_register`). Their source data is regenerated every run: wording, volume, language, layout, and values all change. Seat counts arrive as `"two teams of thirty"`, invoice layouts and field labels differ per supplier, incident transcripts are unordered and contain hypotheses the team ruled out, and contract clauses state notice periods by reference to other clauses. Three properties make the track real rather than declared:
+
+- `benchmark validate` runs a **regex-resistance check** over every hybrid bank. For each class label it rejects the fixture if any single token appears in every member of that class and in no member of any other. A bank a keyword matcher could score is a bug, and the check is tested against the fixture this benchmark previously shipped, which it rejects.
+- `inspectWorkflowPolicy` requires a captured hybrid workflow to declare at least one `step.llm`.
+- A hybrid replay whose Cori trace contains no `llm` activity is recorded as a replay-integrity failure and scores zero, even when the resulting Workspace state is correct.
+
+`support_inbox_triage` additionally declares a **re-run contract**: part of its inbox arrives already labelled by a simulated earlier run, and re-running against an unchanged mailbox must change nothing. It is the one task exempt from the "fixtures are always fresh" prompt clause.
+
+Seeds are held out on data, not just on tags: `assertSeedsProduceDistinctFixtures` fails the run if two seeds of a task produce identical ground truth, so three paired trials pose three different problems.
 
 ## Commands
 
@@ -22,7 +38,7 @@ pnpm --dir benchmarks/workflow-capture benchmark combine --run-ids <batch-1>,<ba
 
 `run` and `preflight` build `cori-cli` from the current repository checkout and pin the benchmark plus its authoring harness to the absolute `target/debug/cori` path. The selected executable's directory is also placed first on the child-process `PATH`, so an authoring agent that types `cori` still reaches that exact build. This prevents a globally installed `cori` on `PATH` from silently testing stale code. Every result records that path, whether it came from `workspace_dev` or an explicit override, and the executable SHA-256; `combine` requires the same digest across batches. Set `CORI_BENCH_CORI` only when deliberately testing an alternate executable.
 
-`preflight` is explicit because it creates and immediately trashes a namespaced Sheets canary. It additionally requires `gws 0.22.5`, `temporal`, `deno`, valid GWS credentials/scopes, `CORI_BENCH_CALENDAR_ID`, and `CORI_BENCH_LLM_MODEL` for the three hybrid tasks. It verifies that the selected Cori executable reports the model provider as an available LLM capability and that the configured calendar is a writable secondary calendar. Use `GWS_BIN` only to point to an alternate GWS executable; do not put credentials in benchmark artifacts.
+`preflight` is explicit because it creates and immediately trashes a namespaced Sheets canary. It additionally requires `gws 0.22.5`, `temporal`, `deno`, valid GWS credentials/scopes, `CORI_BENCH_CALENDAR_ID`, and `CORI_BENCH_LLM_MODEL` for the five hybrid tasks. The selected model class is named in the task prompt, so an authoring agent has a legal identifier to write into `step.llm({ model })`. It verifies that the selected Cori executable reports the model provider as an available LLM capability and that the configured calendar is a writable secondary calendar. Use `GWS_BIN` only to point to an alternate GWS executable; do not put credentials in benchmark artifacts.
 
 Create one dedicated secondary calendar outside the benchmark, then export its ID as `CORI_BENCH_CALENDAR_ID` for every batch. Calendar-backed scenarios always reuse this exact calendar; the runner never calls `calendars.insert`. Snapshots and cleanup query events by the unique scenario run tag, so author, direct, replay, and batch evidence stays isolated. Never set this variable to `primary` or to a calendar containing real events.
 
@@ -63,6 +79,7 @@ Each completed run already includes a portable `viewer.html` in that same direct
 - Direct task workspaces receive only the live-task and GWS contracts. After the author execution is graded, the same session receives the unmodified `cori_save_workflow` skill and the natural save request.
 - Captured workflows must have both an author-side completed `cori check` and an independent absolute-binary check report `Result: ✓ ready`; an attempted or compound command with a masked failure is not successful. Workflows also import `step` from `@cori-do/sdk`, have `tools_required: [gws]`, literal `gws` argv boundaries, no shell dispatchers or v1 builtins, and no credential fields.
 - Replays must emit a successful Cori trace, match the original post-capture workflow hash both before and after execution, create Gmail drafts only, and use tagged benchmark resources.
+- Replays of a hybrid task must execute at least one `llm` activity. A workflow that solved a regenerated-input task with logic fixed at capture time scores zero regardless of the Workspace state it produced.
 - The report claims reuse advantage only with no safety violations, a paired bootstrap lower confidence bound of at least -5 points, and lower cumulative cost at five repetitions.
 
 The release workflow is intentionally manual and runs only on a serialized self-hosted benchmark runner. Normal pull-request CI remains offline.

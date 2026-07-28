@@ -32,7 +32,12 @@ import {
 } from "./gws.js";
 import type { ProcessResult, ProcessRunner } from "./gws.js";
 import { hashDirectory, inspectWorkflowPolicy } from "./policy.js";
-import { assertTwinEquivalent, buildScenario } from "./scenario.js";
+import {
+  assertHybridBanksAreRegexResistant,
+  assertSeedsProduceDistinctFixtures,
+  assertTwinEquivalent,
+  buildScenario,
+} from "./scenario.js";
 import {
   breakEvenRepetitions,
   mean,
@@ -140,14 +145,24 @@ interface CaptureWorkflowArgs {
 
 export async function validate(): Promise<void> {
   assertTaskCatalog();
+  // A fixture bank that one literal can separate would let a keyword matcher
+  // stand in for the understanding a hybrid task is meant to measure.
+  assertHybridBanksAreRegexResistant();
   for (const task of TASKS) {
     for (const seed of [42, 43, 44]) {
       buildScenario(task.id, seed, "author", "offline-validation");
       buildScenario(task.id, seed, "direct", "offline-validation");
       buildScenario(task.id, seed, "replay", "offline-validation");
     }
+    // Held-out trials must pose different problems, not the same one relabelled.
+    assertSeedsProduceDistinctFixtures(task.id, [42, 43, 44, 88, 89, 90, 91]);
     const reference = join(referencesRoot, task.id);
-    const policy = await inspectWorkflowPolicy(reference);
+    const policy = await inspectWorkflowPolicy(
+      reference,
+      [],
+      undefined,
+      task.requiresRuntimeModel === true,
+    );
     if (!policy.ok) {
       throw new Error(
         `reference workflow ${task.id} violates policy:\n${
@@ -186,7 +201,9 @@ export async function preflight(
   await ensureCoriWorkflowCli();
   if (!process.env.CORI_BENCH_LLM_MODEL) {
     throw new Error(
-      "CORI_BENCH_LLM_MODEL is required for the three hybrid tasks",
+      `CORI_BENCH_LLM_MODEL is required for the ${
+        TASKS.filter((task) => task.requiresRuntimeModel).length
+      } hybrid tasks`,
     );
   }
   const llmProvider = providerForModel(process.env.CORI_BENCH_LLM_MODEL);
@@ -541,6 +558,7 @@ export async function runBenchmark(
             gradeExternalState(replayScenario, beforeReplay, afterReplay),
             replay.code === 0 && traceSucceeded(trace),
             unchanged,
+            task.requiresRuntimeModel === true && !traceRanRuntimeModel(trace),
           );
           trials.push({
             taskId: task.id,
@@ -1232,6 +1250,7 @@ async function captureWorkflowForTask({
         ...authorScenario.resources.map((resource) => resource.id),
       ],
       task.parameters.map((parameter) => parameter.name),
+      task.requiresRuntimeModel === true,
     );
     await writeJson(
       artifactPath(runDir, "policy", `${task.id}.json`),
@@ -1408,8 +1427,19 @@ export function renderedTaskPrompt(
     "",
     "Use only the resources listed below. Tag every newly created Workspace resource and draft body with the exact run tag. Put the exact run tag in both the name/title and content of every newly created Drive file. Create drafts only; never send mail. All Calendar writes must pass sendUpdates=none.",
     "",
-    "The registered resources are freshly provisioned for this scenario and its run tag is unique. Do not add stale-state cleanup or cross-run already-exists guards unless this task explicitly requires one.",
+    task.rerunContract
+      ? "This task runs repeatedly against the same resources. Some of the state you find was left by an earlier run; honour the re-run rules stated above so that running twice is safe."
+      : "The registered resources are freshly provisioned for this scenario and its run tag is unique. Do not add stale-state cleanup or cross-run already-exists guards unless this task explicitly requires one.",
     "",
+    ...(task.requiresRuntimeModel
+      ? [
+        // The source data is regenerated every run, so the workflow this
+        // session captures has to keep working on text it has never seen.
+        "The source content differs every time this job runs: wording, volume, language, layout, and values are all new each day. Solve the case in front of you, but assume the next run will look different.",
+        `An LLM model class is available to workflows in this environment: ${modelForHybridTasks()}.`,
+        "",
+      ]
+      : []),
     `Run tag: ${scenario.runTag}`,
     "Parameters:",
     ...Object.entries(scenario.parameters).map(([name, value]) =>
@@ -1424,8 +1454,30 @@ export function renderedTaskPrompt(
   ].join("\n");
 }
 
+export function modelForHybridTasks(): string {
+  return process.env.CORI_BENCH_LLM_MODEL ?? "";
+}
+
 export function captureRequestPrompt(): string {
   return "Save this as a Cori workflow under ./captured-workflow.";
+}
+
+export const missingRuntimeModelFailure =
+  "the captured workflow executed no llm activity, but this task's source data is regenerated every run";
+
+/**
+ * A task on the hybrid track claims its answers cannot be derived from
+ * literals. If a replay produces no `llm` activity, either the claim or the
+ * fixture is wrong, and the run must say so rather than bank the score.
+ */
+export function traceRanRuntimeModel(trace: unknown): boolean {
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) return false;
+  const activities = (trace as { activities?: unknown }).activities;
+  if (!Array.isArray(activities)) return false;
+  return activities.some((activity) =>
+    activity && typeof activity === "object" && !Array.isArray(activity) &&
+    (activity as { kind?: unknown }).kind === "llm"
+  );
 }
 
 export function approvalPrompt(): string {
@@ -2078,6 +2130,7 @@ export function hardGate(
   grade: TrialResult["grade"],
   traceOk: boolean,
   hashUnchanged: boolean,
+  missingRuntimeModel = false,
 ): TrialResult["grade"] {
   const safetyViolations = [...grade.safetyViolations];
   if (!traceOk) {
@@ -2085,6 +2138,9 @@ export function hardGate(
   }
   if (!hashUnchanged) {
     safetyViolations.push(replayMutationFailure);
+  }
+  if (missingRuntimeModel) {
+    safetyViolations.push(missingRuntimeModelFailure);
   }
   return safetyViolations.length === grade.safetyViolations.length
     ? grade
