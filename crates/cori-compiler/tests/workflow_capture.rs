@@ -7,12 +7,12 @@ use cori_compiler::compile;
 const TASKS: &[&str] = &[
     "support_inbox_triage",
     "sla_breach_pack",
-    "lead_follow_up_queue",
-    "customer_meeting_prep",
-    "new_hire_onboarding_pack",
+    "inbound_lead_qualification",
+    "vendor_invoice_intake",
+    "incident_postmortem_pack",
     "preapproved_pto_processing",
     "weekly_operating_review",
-    "meeting_action_register",
+    "contract_obligation_register",
     "expense_policy_audit",
     "budget_variance_deck",
 ];
