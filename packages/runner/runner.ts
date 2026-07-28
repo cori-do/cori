@@ -27,6 +27,8 @@
 // Envelope shape (success):  { "ok": true, "output": <value> }
 // Envelope shape (failure):  { "ok": false, "error": { "message", "stack"? } }
 
+import { pathToFileURL } from "node:url";
+
 import {
   isSchemaValidationError,
   jsonSchemaFromZod,
@@ -85,7 +87,11 @@ try {
 
 const url = stepPath.startsWith("file:")
   ? new URL(stepPath)
-  : new URL("file://" + stepPath);
+  // Rust canonicalisation on Windows may produce an extended-length path
+  // (`\\?\C:\…`). Concatenating `file://` turns that into `file:///?\C:\…`,
+  // which Deno interprets as a directory URL. `pathToFileURL` handles that
+  // Windows form (and normal paths) correctly.
+  : pathToFileURL(stepPath);
 
 let mod: { default?: unknown };
 try {

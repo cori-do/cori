@@ -13,8 +13,10 @@ export default [
   route("runs/live/:runId", "routes/run-live.tsx"),
   route("runs/:key/:utc", "routes/run-detail.tsx"),
   route("manage", "routes/manage.tsx", [
+    route("capabilities", "routes/manage.capabilities.tsx"),
     route("workers", "routes/manage.workers.tsx"),
     route("schedules", "routes/manage.schedules.tsx"),
     route("runs", "routes/manage.runs.tsx"),
+    route("approvals", "routes/manage.approvals.tsx"),
   ]),
 ] satisfies RouteConfig;

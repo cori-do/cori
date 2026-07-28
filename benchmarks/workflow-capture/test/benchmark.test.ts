@@ -132,7 +132,7 @@ test("no task prompt states the answer for its own fixture", () => {
 
 test("the staged real skill owns the workflow dataflow contract", async () => {
   const skill = await readFile(
-    join(packageRoot, "..", "..", "skills", "cori_save_workflow", "SKILL.md"),
+    join(packageRoot, "..", "..", "skills", "cori-save-workflow", "SKILL.md"),
     "utf8",
   );
   assert.match(
@@ -148,7 +148,7 @@ test("the staged real skill owns the workflow dataflow contract", async () => {
 
 test("the staged real skill preserves explicit parameter contracts", async () => {
   const skill = await readFile(
-    join(packageRoot, "..", "..", "skills", "cori_save_workflow", "SKILL.md"),
+    join(packageRoot, "..", "..", "skills", "cori-save-workflow", "SKILL.md"),
     "utf8",
   );
   assert.match(
@@ -171,7 +171,7 @@ test("the staged real skill requires valid Gmail raw-message separators", async 
     "..",
     "..",
     "skills",
-    "cori_save_workflow",
+    "cori-save-workflow",
   );
   const [skill, activityKinds] = await Promise.all([
     readFile(join(skillRoot, "SKILL.md"), "utf8"),
@@ -219,7 +219,7 @@ test("capture uses the natural skill request and literal approval", () => {
   assert.match(fresh, /resources are freshly provisioned[\s\S]*run tag is unique/u);
   assert.doesNotMatch(fresh, /The source content differs every time this job runs/u);
   assert.doesNotMatch(direct, /read \.\/CORI_AUTHORING\.md/u);
-  assert.doesNotMatch(direct, /cori_save_workflow/u);
+  assert.doesNotMatch(direct, /cori-save-workflow/u);
   assert.equal(
     captureRequestPrompt(),
     "Save this as a Cori workflow under ./captured-workflow.",
@@ -248,7 +248,7 @@ test("workflow authoring materials are staged only after direct task execution",
           workspace,
           ".agents",
           "skills",
-          "cori_save_workflow",
+          "cori-save-workflow",
           "SKILL.md",
         ),
         "utf8",
@@ -263,7 +263,7 @@ test("workflow authoring materials are staged only after direct task execution",
           workspace,
           ".agents",
           "skills",
-          "cori_save_workflow",
+          "cori-save-workflow",
           "SKILL.md",
         ),
         "utf8",

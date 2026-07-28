@@ -1,0 +1,12 @@
+{
+  "name": "cori",
+  "description": "Official Cori plugin — turn agent conversations into deterministic, re-runnable workflows.",
+  "owner": { "name": "Cori", "url": "https://cori.do" },
+  "plugins": [
+    {
+      "name": "cori",
+      "source": "./",
+      "description": "Capture conversations as deterministic Cori workflows; check and run them via MCP with human-in-the-loop consent."
+    }
+  ]
+}

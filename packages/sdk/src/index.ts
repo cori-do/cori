@@ -236,6 +236,9 @@ export const step = {
   ): CliStepDef {
     return {
       ...base("cli", opts),
+      // Keep the declared schemas on the runtime object — the runner
+      // enforces `output` after parse. Dropping them here made "typed
+      // workflows" a compile-time-only promise (field finding, 2026-07-22).
       input: opts.input,
       output: opts.output,
       command: opts.command as (input: unknown) => readonly string[],

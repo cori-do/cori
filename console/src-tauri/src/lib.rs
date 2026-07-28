@@ -5,7 +5,10 @@
 //! sidecar supervisor + in-process worker + cron driver, and wires
 //! the tray "Quit" handler to drain them in order.
 
+mod approvals_cmd;
 mod browse;
+mod capability_cmd;
+mod cli_install;
 mod commands;
 mod error;
 mod events;
@@ -16,6 +19,7 @@ mod state;
 mod supervisor;
 mod temporal;
 mod trigger;
+mod updater;
 mod worker;
 mod workers_schedules;
 
@@ -100,11 +104,20 @@ pub fn run() {
     // tauri-plugin-single-instance MUST be the first plugin on Windows
     // for the focus-existing-window behaviour to fire on relaunch.
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             focus_or_show_launcher(app);
+            // On Windows/Linux a `cori://` link launches a second
+            // instance with the URL in argv — route it like on_open_url.
+            for arg in argv {
+                if arg.starts_with("cori://") {
+                    dispatch_deep_link(app, &arg);
+                }
+            }
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         // Window-state plugin persists size/position across restarts.
         // The launcher is the only window we explicitly want restored;
         // disposable kinds (launch-*, run-*, manage) get tracked but
@@ -139,6 +152,31 @@ pub fn run() {
 
             // Tray icon.
             build_tray(app.handle())?;
+
+            // Heartbeat + approval-inbox watcher — the Console is the
+            // rich human-decision surface for ~/.cori/approvals/.
+            approvals_cmd::spawn_watcher(app.handle().clone());
+
+            // Update checks (announce-only; install is human-initiated).
+            updater::spawn_check(app.handle().clone());
+
+            // Deep links (macOS delivers them via this handler; the
+            // single-instance callback covers Windows/Linux argv).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        dispatch_deep_link(&handle, url.as_str());
+                    }
+                });
+                // Dev convenience: register the scheme for non-bundled
+                // builds so `cori://` links work under `cargo tauri dev`.
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    let _ = app.deep_link().register_all();
+                }
+            }
 
             // Spawn the Temporal sidecar supervisor.
             let sidecar_stop = supervisor::spawn(app.handle().clone());
@@ -179,6 +217,10 @@ pub fn run() {
             commands::get_run,
             commands::list_recent_workflows,
             commands::get_stack_status,
+            cli_install::cli_install_status,
+            cli_install::install_cli,
+            capability_cmd::list_capabilities,
+            capability_cmd::connect_capability,
             browse::peek_source,
             browse::list_dir,
             browse::get_last_local_dir,
@@ -187,10 +229,15 @@ pub fn run() {
             trigger::start_run,
             trigger::subscribe_run,
             trigger::record_trust,
+            approvals_cmd::list_approvals,
+            approvals_cmd::list_decided_approvals,
+            approvals_cmd::decide_approval,
+            updater::install_update,
             workers_schedules::list_workers,
             workers_schedules::list_schedules,
             workers_schedules::enable_schedule,
             workers_schedules::set_schedule_enabled,
+            workers_schedules::update_schedule,
             workers_schedules::delete_schedule,
         ])
         .run(tauri::generate_context!())
@@ -199,6 +246,7 @@ pub fn run() {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Open launcher", true, None::<&str>)?;
+    let approvals = MenuItem::with_id(app, "open_approvals", "Approvals…", true, None::<&str>)?;
     let history = MenuItem::with_id(app, "open_history", "History…", true, None::<&str>)?;
     let schedules = MenuItem::with_id(app, "open_schedules", "Schedules…", true, None::<&str>)?;
     let workers = MenuItem::with_id(app, "open_workers", "Workers…", true, None::<&str>)?;
@@ -208,7 +256,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &show, &sep_top, &history, &schedules, &workers, &sep_bot, &quit,
+            &show, &sep_top, &approvals, &history, &schedules, &workers, &sep_bot, &quit,
         ],
     )?;
 
@@ -222,6 +270,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id().as_ref() {
             "show" => focus_or_show_launcher(app),
+            "open_approvals" => emit_open_manage(app, "approvals"),
             "open_history" => emit_open_manage(app, "runs"),
             "open_schedules" => emit_open_manage(app, "schedules"),
             "open_workers" => emit_open_manage(app, "workers"),
@@ -259,6 +308,30 @@ fn toggle_launcher(app: &AppHandle) {
     }
 }
 
+/// Route a `cori://` link. The URL is a doorbell, never an authority:
+/// it only opens a UI on local state (see cori/docs/approvals-design.md).
+///
+///   cori://open/approval/<nonce>  → launcher + Inbox tab
+///   cori://open/inbox             → Inbox tab
+///   cori://open/run/<run_id>      → emit for the run view
+///   anything else                 → just surface the launcher
+fn dispatch_deep_link(app: &AppHandle, url: &str) {
+    info!(%url, "deep link received");
+    focus_or_show_launcher(app);
+    let path = url.trim_start_matches("cori://").trim_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let payload = match segments.as_slice() {
+        ["open", "approval", _] | ["open", "inbox"] => {
+            serde_json::json!({ "kind": "inbox" })
+        }
+        ["open", "run", run_id] => serde_json::json!({ "kind": "run", "run_id": run_id }),
+        _ => serde_json::json!({ "kind": "launcher" }),
+    };
+    if let Err(e) = app.emit("deeplink:open", payload) {
+        warn!(error = %e, "could not emit deeplink:open");
+    }
+}
+
 fn focus_or_show_launcher(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(LAUNCHER_LABEL) {
         let _ = w.show();
@@ -283,6 +356,10 @@ fn initiate_quit(app: &AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         info!("quit requested — draining background tasks");
+
+        // Requesters should fall back to their next confirmation channel
+        // right away, not wait out the heartbeat staleness window.
+        approvals_cmd::clear_heartbeat();
 
         let (cron_tx, worker_tx, sidecar_tx, queue) = {
             let Some(state) = app_handle.try_state::<AppState>() else {

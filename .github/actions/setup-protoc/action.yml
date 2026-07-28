@@ -1,0 +1,91 @@
+name: Setup protoc
+description: >-
+  Download a pinned protoc release, verify its SHA-256, and expose it to build
+  scripts via $PROTOC and $PATH. Replaces arduino/setup-protoc, which is
+  unmaintained (last commit Sept 2024) and still ships a Node 20 entry point.
+
+inputs:
+  version:
+    description: "protoc release version, without the leading `v`."
+    required: false
+    default: "35.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install protoc ${{ inputs.version }}
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        # SHA-256 of each published asset, pinned the same way as the Temporal
+        # sidecar in desktop-release.yml. Refresh on a version bump with:
+        #   gh api repos/protocolbuffers/protobuf/releases/tags/v<version> \
+        #     --jq '.assets[] | select(.name | startswith("protoc-")) | "\(.name) \(.digest)"'
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)
+            slug="linux-x86_64"
+            sha="6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7" ;;
+          Linux-ARM64)
+            slug="linux-aarch_64"
+            sha="01bf9d08808c7f96678b63f4bd8efa559bb4f83d5a7a270d5edaf507f9d5d9cf" ;;
+          macOS-ARM64)
+            slug="osx-aarch_64"
+            sha="193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2" ;;
+          macOS-X64)
+            slug="osx-x86_64"
+            sha="537d73604a344ded6fc94e98e07e529d4fe3e4a0b09e59905353950fafc2a1f7" ;;
+          # No arm64 Windows asset is published upstream; the x64 build runs
+          # under emulation on Windows-on-ARM runners.
+          Windows-*)
+            slug="win64"
+            sha="5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082" ;;
+          *)
+            echo "Unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}" >&2
+            exit 1 ;;
+        esac
+
+        asset="protoc-${PROTOC_VERSION}-${slug}.zip"
+        url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${asset}"
+        workdir="$(mktemp -d)"
+        cd "$workdir"
+        echo "Downloading ${url}"
+        curl -fL --retry 3 -o "${asset}" "${url}"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual=$(sha256sum "${asset}" | awk '{print $1}')
+        else
+          actual=$(shasum -a 256 "${asset}" | awk '{print $1}')
+        fi
+        if [ "${actual}" != "${sha}" ]; then
+          echo "SHA-256 mismatch for ${asset}: expected ${sha}, got ${actual}" >&2
+          exit 1
+        fi
+
+        # $RUNNER_TEMP is a native Windows path on windows runners; convert it
+        # so the shell builtins below see a single path flavour.
+        runner_temp="${RUNNER_TEMP}"
+        if command -v cygpath >/dev/null 2>&1; then
+          runner_temp="$(cygpath -u "${RUNNER_TEMP}")"
+        fi
+
+        dest="${runner_temp}/protoc"
+        rm -rf "${dest}"
+        mkdir -p "${dest}"
+        unzip -q "${asset}" -d "${dest}"
+        chmod +x "${dest}"/bin/protoc*
+        "${dest}/bin/protoc" --version
+
+        # prost-build (and therefore tonic-prost-build, which builds the
+        # temporal API protos) prefers $PROTOC over a PATH lookup. Later steps
+        # run under pwsh, not bash, so hand them native paths.
+        bin="${dest}/bin"
+        exe="${bin}/protoc"
+        if command -v cygpath >/dev/null 2>&1; then
+          exe="$(cygpath -w "${exe}.exe")"
+          bin="$(cygpath -w "${bin}")"
+        fi
+        echo "PROTOC=${exe}" >> "$GITHUB_ENV"
+        echo "${bin}" >> "$GITHUB_PATH"

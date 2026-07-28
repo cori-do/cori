@@ -1402,8 +1402,8 @@ export async function prepareCaptureWorkspace(
   workspace: string,
 ): Promise<void> {
   await cp(
-    join(repoRoot, "skills", "cori_save_workflow"),
-    join(workspace, ".agents", "skills", "cori_save_workflow"),
+    join(repoRoot, "skills", "cori-save-workflow"),
+    join(workspace, ".agents", "skills", "cori-save-workflow"),
     { recursive: true },
   );
 }

@@ -4,9 +4,9 @@ name: Desktop release
 # supported platform. Triggered on tags like `desktop-v0.2.10` or
 # manually via workflow_dispatch.
 #
-# IMPORTANT: signing + notarization require additional secrets that are
-# *not* configured here — see TODO blocks below. Without them the
-# produced artifacts are unsigned and will trigger Gatekeeper /
+# macOS builds are signed + notarized when the APPLE_* repository
+# secrets are configured (see the build step's env block). Windows
+# signing is still a TODO — unsigned .msi installers will trigger
 # SmartScreen warnings on download.
 
 on:
@@ -47,23 +47,38 @@ jobs:
             temporal_sha: ce84637dbf794d71e0c530d1b250edfb7b692784213e234f7d50ea310491e01a
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Verify tag matches app version
+        # Bundle filenames embed tauri.conf.json's `version`, and the
+        # landing page + docs link to them under the tag's version. A
+        # mismatched tag (desktop-v0.3.1 wrapping a 0.3.0 app) ships
+        # assets nobody can construct a URL for — fail fast instead.
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#desktop-v}"
+          app_version="$(jq -r .version console/src-tauri/tauri.conf.json)"
+          if [ "${tag_version}" != "${app_version}" ]; then
+            echo "Tag desktop-v${tag_version} does not match tauri.conf.json version ${app_version}." >&2
+            echo "Bump console/src-tauri/tauri.conf.json (and console/package.json) before tagging." >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/setup-protoc
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.target }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -174,20 +189,74 @@ jobs:
         working-directory: console
         run: pnpm install --frozen-lockfile
 
+      - name: Build cori CLI sidecar
+        # Bundled into the app as `cori-cli` (the bare name would
+        # collide with the `Cori` app binary on case-insensitive
+        # filesystems) and exposed as `cori` on the user's PATH by the
+        # launcher's "Install CLI" action. Built before the Tauri app
+        # so it shares the same rust-cache and target dir.
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release -p cori-cli --target "${TARGET}"
+
+          dest_dir="${GITHUB_WORKSPACE}/console/src-tauri/binaries"
+          mkdir -p "${dest_dir}"
+          if [[ "${TARGET}" == *windows* ]]; then
+            cp "target/${TARGET}/release/cori.exe" "${dest_dir}/cori-cli-${TARGET}.exe"
+          else
+            cp "target/${TARGET}/release/cori" "${dest_dir}/cori-cli-${TARGET}"
+            chmod +x "${dest_dir}/cori-cli-${TARGET}"
+          fi
+
+      - name: Write App Store Connect API key
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: printf '%s' "$APPLE_API_KEY_CONTENT" > "$RUNNER_TEMP/AuthKey.p8"
+
       - name: Build the Tauri app
         working-directory: console
         run: pnpm tauri build --target ${{ matrix.target }}
+        env:
+          # macOS signing + notarization. Tauri's bundler picks these up
+          # automatically: it imports the base64 .p12 into a temporary
+          # keychain, codesigns app + sidecars with the hardened runtime,
+          # then notarizes (via the App Store Connect API key) and staples
+          # the DMG. Empty on Linux/Windows runners, where they are
+          # ignored. See https://tauri.app/distribute/sign/macos/
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          # Updater artifact signing (tauri-plugin-updater). With the key
+          # present, tauri-cli emits a `.sig` next to each updater
+          # artifact (`.app.tar.gz` / `.AppImage` / `.msi`); the release
+          # job below assembles them into latest.json. Empty secret →
+          # no sigs → the manifest step skips itself.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      # TODO: macOS signing + notarization — requires APPLE_CERTIFICATE,
-      # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
-      # APPLE_PASSWORD, APPLE_TEAM_ID secrets. See
-      # https://tauri.app/distribute/sign/macos/
+      - name: Verify macOS signature + notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find target/${{ matrix.target }}/release/bundle/macos -maxdepth 1 -name '*.app' | head -n1)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose "$app"
+
       # TODO: Windows code signing — needs WINDOWS_CERTIFICATE,
       # WINDOWS_CERTIFICATE_PASSWORD; preferably an EV cert to avoid
       # SmartScreen warnings.
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cori-console-${{ matrix.target }}
           path: |
@@ -201,12 +270,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      # NOT merge-multiple: both macOS targets name their updater
+      # artifact `Cori.app.tar.gz` — merged, one would clobber the
+      # other. Per-target directories keep them apart; the manifest
+      # step below renames on upload.
+      - uses: actions/download-artifact@v8
         with:
           path: dist
-          merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/**/*.dmg
@@ -215,7 +287,84 @@ jobs:
             dist/**/*.deb
           generate_release_notes: true
 
-      # TODO: update tauri-plugin-updater manifest at
-      # https://cori.do/updates/latest.json once the updater signing
-      # keypair is generated (`tauri signer generate`) and the public
-      # key is hard-coded into tauri.conf.json's plugins.updater.pubkey.
+      # Updater manifest: collect the signed updater artifacts from each
+      # per-target directory, upload them (uniquely named) onto the
+      # release, and publish latest.json alongside. The feed at
+      # https://cori.do/updates/latest.json redirects here. Skips itself
+      # (with a notice) when no .sig files exist — i.e. when
+      # TAURI_SIGNING_PRIVATE_KEY wasn't configured for the build.
+      - name: Assemble + upload updater manifest
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os, subprocess, sys
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          version = tag.removeprefix("desktop-v")
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          # target-dir suffix -> (updater artifact glob, platform key, unique upload name)
+          PLATFORMS = [
+              ("aarch64-apple-darwin", "**/macos/*.app.tar.gz", "darwin-aarch64",
+               f"Cori_{version}_darwin-aarch64.app.tar.gz"),
+              ("x86_64-apple-darwin", "**/macos/*.app.tar.gz", "darwin-x86_64",
+               f"Cori_{version}_darwin-x86_64.app.tar.gz"),
+              ("x86_64-unknown-linux-gnu", "**/appimage/*.AppImage", "linux-x86_64", None),
+              ("x86_64-pc-windows-msvc", "**/msi/*.msi", "windows-x86_64", None),
+          ]
+
+          platforms = {}
+          uploads = []
+          for target, pattern, key, rename in PLATFORMS:
+              root = f"dist/cori-console-{target}"
+              files = [f for f in glob.glob(f"{root}/{pattern}", recursive=True)
+                       if not f.endswith(".sig")]
+              if not files:
+                  print(f"::notice::no updater artifact for {key} under {root} — skipping")
+                  continue
+              artifact = files[0]
+              sig = artifact + ".sig"
+              if not os.path.exists(sig):
+                  print(f"::notice::{artifact} has no .sig (signing key not set?) — skipping {key}")
+                  continue
+              name = rename or os.path.basename(artifact)
+              if rename:
+                  renamed = os.path.join(os.path.dirname(artifact), rename)
+                  os.rename(artifact, renamed)
+                  os.rename(sig, renamed + ".sig")
+                  artifact, sig = renamed, renamed + ".sig"
+                  uploads.append(artifact)  # msi/AppImage are uploaded by the release step
+              uploads.append(sig)
+              platforms[key] = {
+                  "url": f"{base}/{name}",
+                  "signature": open(sig).read().strip(),
+              }
+
+          if not platforms:
+              print("::notice::no signed updater artifacts found — latest.json not published")
+              sys.exit(0)
+
+          manifest = {
+              "version": version,
+              "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "platforms": platforms,
+          }
+          with open("latest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          uploads.append("latest.json")
+          print(json.dumps(manifest, indent=2))
+          # --repo is required: this job never checks out the repo, so gh
+          # has no git remote to infer the target from and would fail with
+          # "not a git repository".
+          subprocess.run(["gh", "release", "upload", tag, *uploads,
+                          "--repo", repo, "--clobber"],
+                         check=True)
+          PY

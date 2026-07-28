@@ -11,7 +11,7 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
 
-export type ManageTab = "workers" | "schedules" | "runs";
+export type ManageTab = "workers" | "schedules" | "runs" | "approvals";
 
 const LAUNCH_SIZE = { width: 520, height: 720 } as const;
 const RUN_SIZE = { width: 820, height: 720 } as const;

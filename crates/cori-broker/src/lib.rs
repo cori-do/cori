@@ -31,9 +31,11 @@ pub mod credentials;
 pub mod dispatch;
 pub mod dry_run;
 pub mod identity;
+pub mod install;
 pub mod llm;
 pub mod mcp;
 pub mod oauth;
+pub mod process;
 pub mod runtime;
 
 use std::time::Duration;

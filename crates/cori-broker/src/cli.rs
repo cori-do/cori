@@ -27,6 +27,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::capabilities::Capabilities;
 use crate::cli_auth::{self, AuthState};
 use crate::dispatch::{self, RunnerMode};
+use crate::process::hide_console_window;
 use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result};
 
@@ -72,7 +73,7 @@ pub fn run(
     //    PATH for this worker process," which is the honest question.
     let resolved_bin: PathBuf = match capabilities.cli_binaries.get(&binary) {
         Some(p) => p.clone(),
-        None => match crate::capabilities::which_on_path(&binary) {
+        None => match crate::install::resolve_binary(&binary) {
             Some(p) => p,
             None => {
                 return Err(BrokerError::CapabilityDenied {
@@ -100,9 +101,13 @@ pub fn run(
         });
     }
 
-    // 3. Spawn.
+    // 3. Spawn. Adapter-provided headless env first (never overrides
+    //    the parent environment), then step-declared env (always wins).
     let mut cmd = Command::new(&resolved_bin);
     cmd.args(&argv[1..]);
+    if let Some(adapter) = cli_auth::for_binary(&binary) {
+        cli_auth::apply_spawn_env(&mut cmd, adapter);
+    }
     if let Some(env) = &spec.env {
         for (k, v) in env {
             cmd.env(k, v);
@@ -111,6 +116,7 @@ pub fn run(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
 
     let proc_output = cmd.output().map_err(|e| BrokerError::CliSpawn {
         binary: binary.clone(),

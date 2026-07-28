@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Cori",
-  "version": "0.2.2",
+  "version": "0.3.7",
   "identifier": "do.cori.console",
   "build": {
     "beforeDevCommand": "pnpm vite:dev",
@@ -29,7 +29,18 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/temporal", "binaries/deno"],
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/temporal", "binaries/deno", "binaries/cori-cli"],
+    "macOS": {
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
+    },
+    "windows": {
+      "wix": {
+        "bannerPath": "windows/branding/cori-banner.bmp",
+        "dialogImagePath": "windows/branding/cori-dialog.bmp"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,5 +48,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["cori"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDODRDOTI1NDYwMERBMEIKUldRTDJnQkdKY21FUElkZUhybXVyT0RiM3lEZFZ6ZldsL0RtK1FWOHEvK25uSFZTL0xzdDhURlAK",
+      "endpoints": ["https://cori.do/updates/latest.json"]
+    }
   }
 }

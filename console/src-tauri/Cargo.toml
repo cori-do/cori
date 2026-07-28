@@ -20,9 +20,12 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-deep-link = "2"
 
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

@@ -17,6 +17,11 @@ pub struct PreflightReport {
     pub temporal_reachable: bool,
     pub endpoint: String,
     pub user_task_queue: String,
+    /// Non-fatal advisories. Deliberately deterministic: prose rules in
+    /// the authoring skill get skipped under conversation inertia and by
+    /// smaller models (observed twice in the field, 2026-07-22) — the
+    /// engine is the backstop that never forgets.
+    pub warnings: Vec<String>,
 }
 
 pub struct StepReadiness {
@@ -35,7 +40,14 @@ pub struct CapabilityReadiness {
     pub kind: CapabilityKind,
     pub authed: bool,
     pub detail: Option<String>,
-    pub login_command: Option<String>,
+    /// The action that actually unblocks this capability. Three states,
+    /// aligned with what `cori run` would say (a `check` that suggests
+    /// `cori login X` for a server that isn't even declared sends the
+    /// user down a dead end):
+    /// - not declared/installed → declare it (`mcp-servers.json`) or install it
+    /// - declared but not authed → `cori login X`
+    /// - ready → `None`
+    pub remedy: Option<String>,
 }
 
 pub fn check(path: String, update: bool, assume_yes: bool) -> Result<()> {
@@ -112,6 +124,8 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
         ready = false;
     }
 
+    let warnings = build_warnings(&loaded.compiled);
+
     Ok(PreflightReport {
         ready,
         steps,
@@ -119,7 +133,56 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
         temporal_reachable,
         endpoint: endpoint.target,
         user_task_queue,
+        warnings,
     })
+}
+
+/// Advisory lints on the compiled workflow shape.
+fn build_warnings(compiled: &CompiledWorkflow) -> Vec<String> {
+    let mut out = Vec::new();
+    for step in &compiled.steps {
+        if step.kind != StepKind::McpTool {
+            continue;
+        }
+        let server = match &step.placement {
+            Placement::RequiresCapability { id } => Some(id.as_str()),
+            _ => step.metadata.get("server").and_then(|v| v.as_str()),
+        };
+        if let Some(server) = server
+            && looks_like_google_workspace(server)
+        {
+            out.push(format!(
+                "step `{name}` calls MCP server `{server}`, which looks like Google \
+                 Workspace — the recommended path is a `gws` cli step (simpler, and it \
+                 avoids requiring `{server}` to be declared in ~/.cori/mcp-servers.json \
+                 on every worker). See the cori-save-workflow skill's Google Workspace \
+                 rule.",
+                name = step.name,
+            ));
+        }
+    }
+    out
+}
+
+/// Heuristic on the server name. Loose on purpose: this only feeds a
+/// warning, never an error, so a rare false positive costs one line of
+/// output while a false negative reproduces a known field failure.
+fn looks_like_google_workspace(server: &str) -> bool {
+    let s = server.to_ascii_lowercase();
+    let contains = [
+        "google",
+        "gdrive",
+        "gmail",
+        "gcal",
+        "gsheet",
+        "gdoc",
+        "workspace",
+    ];
+    if contains.iter().any(|n| s.contains(n)) {
+        return true;
+    }
+    let exact = ["drive", "sheets", "calendar", "docs"];
+    exact.iter().any(|n| s == *n)
 }
 
 fn build_step_readiness(
@@ -198,34 +261,50 @@ fn build_capability_readiness(
         let present = caps.has_cli(cli);
         let entry = lookup(cli);
         let authed = present && entry.map(|c| c.authed).unwrap_or(true);
+        let remedy = if !present {
+            Some(format!(
+                "`{cli}` is not installed on this machine — install it and re-check"
+            ))
+        } else if !authed {
+            Some(format!("cori login {cli}"))
+        } else {
+            None
+        };
         out.push(CapabilityReadiness {
             id: cli.clone(),
             kind: CapabilityKind::Cli,
             authed,
             detail: entry.and_then(|c| c.detail.clone()),
-            login_command: if !authed {
-                Some(format!("cori login {cli}"))
-            } else {
-                None
-            },
+            remedy,
         });
     }
     for mcp in &compiled.required_mcp_servers {
+        // Three distinct states — `run` distinguishes them, so `check`
+        // must too, or it green-lights (or mis-remedies) a workflow that
+        // will fail for a knowable reason.
+        let declared = caps.has_mcp(mcp);
         let entry = lookup(mcp);
         let (kind, authed) = match entry {
-            Some(c) => (c.kind, c.authed),
-            None => (CapabilityKind::McpStatic, caps.has_mcp(mcp)),
+            Some(c) => (c.kind, declared && c.authed),
+            None => (CapabilityKind::McpStatic, declared),
+        };
+        let remedy = if !declared {
+            Some(format!(
+                "MCP server `{mcp}` is not declared on this machine — add it to \
+                 `~/.cori/mcp-servers.json` with a `command` to launch it \
+                 (`cori login {mcp}` will not help until then)"
+            ))
+        } else if !authed {
+            Some(format!("cori login {mcp}"))
+        } else {
+            None
         };
         out.push(CapabilityReadiness {
             id: mcp.clone(),
             kind,
             authed,
             detail: entry.and_then(|c| c.detail.clone()),
-            login_command: if !authed {
-                Some(format!("cori login {mcp}"))
-            } else {
-                None
-            },
+            remedy,
         });
     }
     for llm in &compiled.required_llm_providers {
@@ -235,7 +314,7 @@ fn build_capability_readiness(
             kind: CapabilityKind::Llm,
             authed,
             detail: None,
-            login_command: if !authed {
+            remedy: if !authed {
                 Some(format!("cori login {llm}"))
             } else {
                 None
@@ -296,9 +375,16 @@ fn print_report(report: &PreflightReport) {
                 id = c.id,
                 kind = cap_kind_label(c.kind),
             );
-            if let Some(cmd) = &c.login_command {
-                println!("      needs sign-in — run: {cmd}");
+            if let Some(remedy) = &c.remedy {
+                println!("      {remedy}");
             }
+        }
+    }
+    if !report.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for w in &report.warnings {
+            println!("  ⚠ {w}");
         }
     }
     println!();
@@ -332,5 +418,26 @@ fn cap_kind_label(kind: CapabilityKind) -> &'static str {
         CapabilityKind::McpStatic => "MCP",
         CapabilityKind::Llm => "LLM",
         CapabilityKind::LocalFs => "local_fs",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_google_workspace;
+
+    #[test]
+    fn gws_heuristic_matches_field_server_names() {
+        // Names seen in real sessions.
+        assert!(looks_like_google_workspace("Google_Drive"));
+        assert!(looks_like_google_workspace("google-sheets"));
+        assert!(looks_like_google_workspace("gdrive"));
+        assert!(looks_like_google_workspace("Gmail"));
+        assert!(looks_like_google_workspace("drive"));
+        assert!(looks_like_google_workspace("sheets"));
+        // Non-Google servers must not warn.
+        assert!(!looks_like_google_workspace("slack"));
+        assert!(!looks_like_google_workspace("notion"));
+        assert!(!looks_like_google_workspace("dropbox"));
+        assert!(!looks_like_google_workspace("sharepoint-docs-x"));
     }
 }

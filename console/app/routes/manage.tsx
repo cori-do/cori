@@ -10,12 +10,20 @@ export function meta() {
 // is the more specific name for the runs tab — see the launcher footer
 // and tray menu, which call the same tab History.
 const TABS: Array<{ to: string; label: string }> = [
+  { to: "/manage/approvals", label: "Inbox" },
   { to: "/manage/runs", label: "History" },
   { to: "/manage/schedules", label: "Schedules" },
+  { to: "/manage/capabilities", label: "Capabilities" },
   { to: "/manage/workers", label: "Workers" },
 ];
 
-const VALID_TABS = new Set(["runs", "schedules", "workers"]);
+const VALID_TABS = new Set([
+  "runs",
+  "schedules",
+  "capabilities",
+  "workers",
+  "approvals",
+]);
 
 export default function Manage() {
   const navigate = useNavigate();

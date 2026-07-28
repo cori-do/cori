@@ -66,3 +66,17 @@ output_tokens      u64
 { "Person": { "user_id": "jean" } }
 { "Service": { "pool": "notion-pool" } }
 ```
+
+## Reading `error` on a failed `llm` activity
+
+The activity's `error` carries the raw provider error. Two failure modes look
+alike but need opposite fixes — read the message before touching anything:
+
+- **Auth / permission / missing-key error** → the provider capability isn't
+  signed in on that worker. Fix the *capability*: switch the step's `model` to
+  a family `cori status` shows as `authed: true`, or (bigger ask) have the
+  user run `cori login <provider>`.
+- **404 / "model not found"** → the provider is authenticated and reachable;
+  the model id simply doesn't exist. Plausible-looking ids — including dated
+  snapshot names — routinely 404. Fix the *id*: pick a valid model from the
+  same family. Switching providers or asking for a login here fixes nothing.

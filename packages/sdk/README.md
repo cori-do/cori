@@ -2,7 +2,6 @@
 
 TypeScript SDK to structure [Cori](https://github.com/cori-do/cori) workflow steps.
 
-> **Status:** v0.2.4
 
 ## Install
 

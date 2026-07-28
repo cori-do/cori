@@ -6,16 +6,24 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { MiddleTruncate } from "../components/middle-truncate";
 import { ThemeIconButton } from "../components/theme-icon-button";
 import {
+  decideApproval,
+  getCliInstallStatus,
   getLastLocalDir,
   getStackStatus,
   getStatus,
+  installCli,
+  installUpdate,
   isIpcError,
+  listApprovals,
+  onUpdaterAvailable,
   listDir,
   listRecentWorkflows,
   listRemoteWorkflows,
+  onApprovalsChanged,
   onStackStatus,
   peekSource,
   sourceToCli,
+  type ApprovalRequest,
   type DirEntry,
   type DirListing,
   type PeekResult,
@@ -27,7 +35,7 @@ import {
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
 import { formatRelative } from "../lib/format";
-import { openLaunch, openManage } from "../lib/windows";
+import { openLaunch, openManage, openRun } from "../lib/windows";
 
 export function meta() {
   return [{ title: "Cori" }];
@@ -103,6 +111,49 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       .then((s) => !cancelled && setStack(s))
       .catch(() => {});
     onStackStatus((s) => !cancelled && setStack(s))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Approval inbox: snapshot + live subscription. Items are human
+  // gates (MCP run confirms, trust consent) — surfaced above the
+  // search bar until decided.
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    listApprovals()
+      .then((a) => !cancelled && setApprovals(a))
+      .catch(() => {});
+    onApprovalsChanged((pending) => !cancelled && setApprovals(pending))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Deep links (cori://…) land here after the Rust side surfaces the
+  // launcher: the link is a doorbell, the UI decides what to open.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    listen<{ kind: string; run_id?: string }>("deeplink:open", (e) => {
+      const p = e.payload;
+      if (p?.kind === "inbox") void openManage("approvals");
+      else if (p?.kind === "run" && p.run_id) void openRun(p.run_id);
+    })
       .then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;
@@ -498,6 +549,12 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         <ThemeIconButton />
       </header>
 
+      <UpdateBanner />
+
+      <FirstRunCliPrompt />
+
+      {approvals.length > 0 && <ApprovalsPanel approvals={approvals} />}
+
       <SearchBar
         value={input}
         onChange={setInput}
@@ -536,6 +593,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       <footer className="launcher-foot">
         <StackBadge stack={stack} status={status} />
         <div className="launcher-foot-actions">
+          <CliInstallAction />
           <button
             type="button"
             className="btn"
@@ -556,6 +614,140 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       </footer>
     </div>
   );
+}
+
+// ─── Approvals panel ─────────────────────────────────────────────────────
+
+/**
+ * Compact attention banner for pending human gates. The launcher is an
+ * interrupter, not a reading surface: it shows what's being asked and
+ * the primary action; the readable detail (per-param table, history)
+ * lives in the manage window's Inbox tab.
+ */
+function ApprovalsPanel({ approvals }: { approvals: ApprovalRequest[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const decide = (nonce: string, approved: boolean) => {
+    setBusy(nonce);
+    decideApproval(nonce, approved)
+      // The watcher's `approvals:changed` removes the row; on error just
+      // release the buttons (the item may have expired meanwhile).
+      .catch(() => {})
+      .finally(() => setBusy((b) => (b === nonce ? null : b)));
+  };
+  return (
+    <div className="approvals" role="region" aria-label="Pending approvals">
+      <div className="approvals-header">
+        <span>
+          {approvals.length} approval{approvals.length > 1 ? "s" : ""} waiting
+        </span>
+        <button
+          type="button"
+          className="approvals-open-inbox"
+          onClick={() => void openManage("approvals")}
+        >
+          Open inbox →
+        </button>
+      </div>
+      {approvals.map((a) => {
+        const isAction = a.kind === "reauth_required";
+        return (
+          <div key={a.nonce} className="approval-row">
+            <div className="approval-body">
+              <div className="approval-head">
+                <span className={`pill ${approvalPill(a.kind)}`}>
+                  {approvalKindLabel(a.kind)}
+                </span>
+                <span className="approval-from">via {a.requested_by}</span>
+              </div>
+              <div className="approval-summary">{approvalSummary(a)}</div>
+            </div>
+            <div className="approval-actions">
+              {isAction ? (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy === a.nonce}
+                  onClick={() => decide(a.nonce, false)}
+                >
+                  Dismiss
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="btn approval-approve"
+                    disabled={busy === a.nonce}
+                    onClick={() => decide(a.nonce, true)}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy === a.nonce}
+                    onClick={() => decide(a.nonce, false)}
+                  >
+                    Decline
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * One readable line per item — structured facts over requester prose.
+ * The full message + per-param table are one click away in the Inbox.
+ */
+function approvalSummary(a: ApprovalRequest): string {
+  const p = a.payload;
+  const name =
+    (typeof p.workflow_name === "string" && p.workflow_name) ||
+    (typeof p.workflow_id === "string" && p.workflow_id) ||
+    (typeof p.remote_ref === "string" && p.remote_ref) ||
+    (typeof p.source === "string" && p.source) ||
+    "";
+  switch (a.kind) {
+    case "run_confirm": {
+      const nParams =
+        p.params && typeof p.params === "object"
+          ? Object.keys(p.params as object).length
+          : 0;
+      const dry = p.dry_run === true ? " · dry run" : "";
+      return `Run "${name}" — ${String(p.steps ?? "?")} steps, ${nParams} param${nParams === 1 ? "" : "s"}${dry}`;
+    }
+    case "trust_consent":
+      return `Trust ${name} @ ${typeof p.sha === "string" ? p.sha.slice(0, 8) : "?"} (first run)`;
+    case "schedule_reconsent":
+      return `Schedule for "${name}" paused — workflow changed upstream`;
+    case "step_gate":
+      return `"${name}" is waiting on step approval`;
+    case "reauth_required":
+      return `${String(p.capability ?? "a capability")} needs sign-in — ${String(p.login_command ?? "")}`;
+  }
+}
+
+function approvalKindLabel(kind: ApprovalRequest["kind"]): string {
+  switch (kind) {
+    case "run_confirm":
+      return "run request";
+    case "trust_consent":
+      return "trust request";
+    case "schedule_reconsent":
+      return "schedule changed";
+    case "step_gate":
+      return "step approval";
+    case "reauth_required":
+      return "sign-in needed";
+  }
+}
+
+function approvalPill(kind: ApprovalRequest["kind"]): string {
+  return kind === "trust_consent" ? "bad" : "warn";
 }
 
 function placeholderFor(ctx: LauncherContext): string {
@@ -1067,7 +1259,7 @@ function Welcome() {
       <section className="welcome-section">
         <h3 className="welcome-subtitle">Create your first workflow</h3>
         <p className="welcome-body">
-          Install the <code>cori_save_workflow</code> agent skill, then
+          Install the <code>cori-save-workflow</code> agent skill, then
           ask your AI assistant to save a workflow with you.
         </p>
         <button
@@ -1099,6 +1291,214 @@ function formatErr(e: unknown): string {
   if (isIpcError(e)) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+// ─── Self-update banner ──────────────────────────────────────────────────
+
+/**
+ * Shown when the updater announces a newer signed build. Install is
+ * human-initiated — clicking downloads, verifies, installs, restarts.
+ */
+function UpdateBanner() {
+  const [version, setVersion] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"idle" | "busy" | "error">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    onUpdaterAvailable((v) => !cancelled && setVersion(v))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  if (!version) return null;
+  return (
+    <div className="first-run-cli" role="region" aria-label="Update available">
+      <span className="first-run-cli-text">
+        Cori {version} is available.
+        {phase === "error" && (
+          <span style={{ color: "var(--red)" }}> Install failed — try again.</span>
+        )}
+      </span>
+      <button
+        type="button"
+        className="btn primary"
+        disabled={phase === "busy"}
+        onClick={() => {
+          setPhase("busy");
+          installUpdate().catch(() => setPhase("error"));
+        }}
+      >
+        {phase === "busy" ? "Installing…" : "Install & restart"}
+      </button>
+    </div>
+  );
+}
+
+// ─── First-run CLI install prompt ────────────────────────────────────────
+
+const CLI_PROMPT_DISMISSED_KEY = "cori.first-run-cli-prompt-dismissed";
+
+/**
+ * On first launch, offer to put `cori` on PATH — so plugin/agent users
+ * never have to find the footer button (or a terminal). Shows only when
+ * the bundle ships the CLI and it isn't installed yet; one dismissal is
+ * remembered forever. The footer's "Install CLI" button remains as the
+ * quiet, always-available path.
+ */
+function FirstRunCliPrompt() {
+  const [state, setState] = useState<
+    | { kind: "hidden" }
+    | { kind: "offer" }
+    | { kind: "busy" }
+    | { kind: "done"; path: string; onPath: boolean }
+    | { kind: "error"; message: string }
+  >({ kind: "hidden" });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (localStorage.getItem(CLI_PROMPT_DISMISSED_KEY)) return;
+    getCliInstallStatus()
+      .then((s) => {
+        if (!cancelled && s.bundled && !s.installed_path) {
+          setState({ kind: "offer" });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (state.kind === "hidden") return null;
+
+  const dismiss = () => {
+    localStorage.setItem(CLI_PROMPT_DISMISSED_KEY, "1");
+    setState({ kind: "hidden" });
+  };
+
+  return (
+    <div className="first-run-cli" role="region" aria-label="Install the cori command">
+      {state.kind === "done" ? (
+        <>
+          <span className="first-run-cli-text">
+            ✓ <code>cori</code> installed
+            {state.onPath ? "" : " (add its directory to your PATH to use it in terminals)"}
+            {" — agents and terminals can now use Cori."}
+          </span>
+          <button type="button" className="btn" onClick={dismiss}>
+            Done
+          </button>
+        </>
+      ) : (
+        <>
+          <span className="first-run-cli-text">
+            Put the <code>cori</code> command on your PATH? Agents (Claude, Cursor, …)
+            and terminals need it to check and run workflows.
+            {state.kind === "error" && (
+              <span style={{ color: "var(--red)" }}> Install failed: {state.message}</span>
+            )}
+          </span>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={state.kind === "busy"}
+            onClick={() => {
+              setState({ kind: "busy" });
+              installCli()
+                .then((r) => setState({ kind: "done", path: r.path, onPath: r.on_path }))
+                .catch((e) => setState({ kind: "error", message: formatErr(e) }));
+            }}
+          >
+            {state.kind === "busy" ? "Installing…" : "Install CLI"}
+          </button>
+          <button type="button" className="btn" disabled={state.kind === "busy"} onClick={dismiss}>
+            Not now
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── CLI install ──────────────────────────────────────────────────────────
+
+/**
+ * "Install CLI" footer action. Rendered only when this bundle ships
+ * the CLI sidecar AND `cori` isn't already on PATH — users who
+ * installed via install.sh (or already clicked this) never see it.
+ */
+function CliInstallAction() {
+  const [visible, setVisible] = useState(false);
+  const [phase, setPhase] = useState<
+    | { kind: "idle" }
+    | { kind: "busy" }
+    | { kind: "done"; path: string; onPath: boolean }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  useEffect(() => {
+    let cancelled = false;
+    getCliInstallStatus()
+      .then((s) => {
+        if (!cancelled) setVisible(s.bundled && !s.installed_path);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!visible) return null;
+
+  if (phase.kind === "done") {
+    return (
+      <span
+        className="launcher-foot-note"
+        title={
+          phase.onPath
+            ? `Installed at ${phase.path}`
+            : `Installed at ${phase.path} — add its directory to your PATH to use it`
+        }
+      >
+        ✓ cori installed{phase.onPath ? "" : " (not on PATH)"}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn"
+      disabled={phase.kind === "busy"}
+      onClick={() => {
+        setPhase({ kind: "busy" });
+        installCli()
+          .then((r) =>
+            setPhase({ kind: "done", path: r.path, onPath: r.on_path }),
+          )
+          .catch((e) => setPhase({ kind: "error", message: formatErr(e) }));
+      }}
+      title={
+        phase.kind === "error"
+          ? `Install failed: ${phase.message} — click to retry`
+          : "Put the `cori` command on your PATH so terminals and agents can use it"
+      }
+    >
+      {phase.kind === "busy"
+        ? "Installing…"
+        : phase.kind === "error"
+          ? "Install CLI ✗"
+          : "Install CLI"}
+    </button>
+  );
 }
 
 // ─── Footer + icons ───────────────────────────────────────────────────────

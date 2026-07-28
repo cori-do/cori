@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
+use cori_broker::process::hide_console_window;
 
 use super::refspec::AdvertisedRef;
 
@@ -22,6 +23,7 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<std::process::Output> {
     // Disable interactive prompts; we want fast, deterministic failures
     // that the user can re-run manually with `git clone` to debug auth.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    hide_console_window(&mut cmd);
     let out = cmd
         .output()
         .with_context(|| format!("spawning `git {}`", args.join(" ")))?;
@@ -102,23 +104,25 @@ pub fn has_commit(bare: &Path, sha: &str) -> Result<bool> {
 pub fn checkout_sha(bare: &Path, sha: &str, dest: &Path) -> Result<()> {
     use std::process::Stdio;
     let dest_str = dest.to_string_lossy().into_owned();
-    let mut archive = Command::new("git")
+    let mut archive_cmd = Command::new("git");
+    archive_cmd
         .args(["archive", "--format=tar", sha])
         .current_dir(bare)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawning `git archive`")?;
+        .stderr(Stdio::piped());
+    hide_console_window(&mut archive_cmd);
+    let mut archive = archive_cmd.spawn().context("spawning `git archive`")?;
     let archive_stdout = archive
         .stdout
         .take()
         .ok_or_else(|| anyhow!("`git archive` stdout unavailable"))?;
-    let tar = Command::new("tar")
+    let mut tar_cmd = Command::new("tar");
+    tar_cmd
         .args(["-x", "-C", &dest_str])
         .stdin(Stdio::from(archive_stdout))
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawning `tar -x`")?;
+        .stderr(Stdio::piped());
+    hide_console_window(&mut tar_cmd);
+    let tar = tar_cmd.spawn().context("spawning `tar -x`")?;
 
     let archive_out = archive
         .wait_with_output()

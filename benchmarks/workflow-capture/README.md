@@ -76,7 +76,7 @@ Each completed run already includes a portable `viewer.html` in that same direct
 
 - Preview must not write a workflow; approval is required before `captured-workflow/` can exist.
 - Author external-state scores are reported measurements, not run-success gates. Safety violations stop that task immediately.
-- Direct task workspaces receive only the live-task and GWS contracts. After the author execution is graded, the same session receives the unmodified `cori_save_workflow` skill and the natural save request.
+- Direct task workspaces receive only the live-task and GWS contracts. After the author execution is graded, the same session receives the unmodified `cori-save-workflow` skill and the natural save request.
 - Captured workflows must have both an author-side completed `cori check` and an independent absolute-binary check report `Result: ✓ ready`; an attempted or compound command with a masked failure is not successful. Workflows also import `step` from `@cori-do/sdk`, have `tools_required: [gws]`, literal `gws` argv boundaries, no shell dispatchers or v1 builtins, and no credential fields.
 - Replays must emit a successful Cori trace, match the original post-capture workflow hash both before and after execution, create Gmail drafts only, and use tagged benchmark resources.
 - Replays of a hybrid task must execute at least one `llm` activity. A workflow that solved a regenerated-input task with logic fixed at capture time scores zero regardless of the Workspace state it produced.

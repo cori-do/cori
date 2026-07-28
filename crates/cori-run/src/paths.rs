@@ -68,3 +68,9 @@ pub fn trust_file() -> Result<PathBuf> {
 pub fn schedules_dir() -> Result<PathBuf> {
     Ok(home()?.join("schedules"))
 }
+
+/// `~/.cori/approvals/` — local human-in-the-loop approval inbox
+/// (`pending/` and `decided/` beneath it). See `approvals` module.
+pub fn approvals_dir() -> Result<PathBuf> {
+    Ok(home()?.join("approvals"))
+}
