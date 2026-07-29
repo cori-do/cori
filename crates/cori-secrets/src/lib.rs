@@ -232,8 +232,7 @@ pub fn default_credentials_dir() -> Result<PathBuf> {
 }
 
 fn entry(account: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, account)
-        .map_err(|e| SecretError::Keychain(e.to_string()))
+    keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| SecretError::Keychain(e.to_string()))
 }
 
 fn keychain_available() -> bool {
