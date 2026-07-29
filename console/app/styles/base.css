@@ -115,6 +115,15 @@
   --shadow-md: 0 4px 14px rgba(10, 37, 64, 0.07);
   --shadow-lg: 0 20px 48px -16px rgba(10, 37, 64, 0.28);
 
+  --glass-window: rgba(246, 249, 253, 0.72);
+  --glass-bar: rgba(255, 255, 255, 0.48);
+  --glass-sidebar: rgba(246, 249, 253, 0.42);
+  --glass-content: rgba(255, 255, 255, 0.3);
+  --glass-raised: rgba(255, 255, 255, 0.62);
+  --glass-hover: rgba(255, 255, 255, 0.72);
+  --glass-line: rgba(75, 94, 124, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.8);
+
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
@@ -158,6 +167,15 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
   --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, 0.9);
+
+  --glass-window: rgba(9, 14, 24, 0.72);
+  --glass-bar: rgba(18, 25, 39, 0.52);
+  --glass-sidebar: rgba(9, 14, 24, 0.44);
+  --glass-content: rgba(12, 18, 29, 0.6);
+  --glass-raised: rgba(31, 40, 58, 0.56);
+  --glass-hover: rgba(43, 54, 76, 0.66);
+  --glass-line: rgba(255, 255, 255, 0.11);
+  --glass-highlight: rgba(255, 255, 255, 0.13);
 }
 
 * { box-sizing: border-box; }
@@ -172,7 +190,7 @@ html, body {
   font-family: var(--font-sans);
   font-feature-settings: "ss01", "cv11";
   color: var(--foreground);
-  background: var(--surface);
+  background: transparent;
   -webkit-font-smoothing: antialiased;
   overflow: hidden; /* desktop app: each pane scrolls itself */
 }
@@ -514,16 +532,42 @@ table.runs td strong {
 .manage {
   height: 100vh;
   width: 100vw;
-  background: var(--surface);
   color: var(--foreground);
 }
+.run-window,
+.manage { background: var(--surface); }
 
 /* A column, not a fixed grid: the launcher grows an update banner, a CLI
    prompt and an approvals panel between the header and the bar, so the
    row count is not knowable up front. Only the results pane flexes (see
    `.results`), and it carries min-height: 0 so it scrolls inside whatever
    size the user chose rather than pushing the footer off-screen. */
-.launcher { display: flex; flex-direction: column; }
+.launcher {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--glass-line);
+  border-radius: 14px;
+  background:
+    radial-gradient(
+      circle at 86% -8%,
+      rgb(var(--accent-rgb) / 0.13),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at -6% 112%,
+      rgba(56, 217, 255, 0.08),
+      transparent 38%
+    ),
+    var(--glass-window);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.05),
+    0 24px 70px rgba(5, 12, 24, 0.24);
+  backdrop-filter: blur(30px) saturate(145%);
+  -webkit-backdrop-filter: blur(30px) saturate(145%);
+}
 .run-window,
 .manage { display: grid; grid-template-rows: auto 1fr; }
 
@@ -562,17 +606,73 @@ table.runs td strong {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--rule);
+  min-height: 42px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--glass-line);
+  background: var(--glass-bar);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  backdrop-filter: blur(22px) saturate(155%);
+  -webkit-backdrop-filter: blur(22px) saturate(155%);
   -webkit-app-region: drag;
+  user-select: none;
 }
 .launcher-head > * { -webkit-app-region: no-drag; }
 .launcher-head-spacer { flex: 1; -webkit-app-region: drag; }
-.launcher-mark { border-radius: var(--radius-sm); flex-shrink: 0; }
+.launcher-mark {
+  border-radius: 5px;
+  flex-shrink: 0;
+  filter: drop-shadow(0 1px 3px rgb(var(--accent-rgb) / 0.25));
+}
 .launcher-title {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--foreground);
+  letter-spacing: 0.015em;
+}
+.launcher-head-divider {
+  width: 1px;
+  height: 17px;
+  background: var(--glass-line);
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 2px;
+}
+.window-control {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  padding: 0;
+  border: 0.5px solid rgba(0, 0, 0, 0.16);
+  border-radius: 50%;
+  cursor: default;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.2);
+}
+.window-control.is-close { background: #ff5f57; }
+.window-control.is-minimize { background: #febc2e; }
+.window-control.is-maximize { background: #28c840; }
+.window-control svg {
+  position: absolute;
+  inset: 2px;
+  width: 7px;
+  height: 7px;
+  fill: none;
+  stroke: rgba(33, 20, 20, 0.78);
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.window-controls:hover .window-control svg,
+.window-control:focus-visible svg { opacity: 1; }
+.window-control:focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb) / 0.5);
+  outline-offset: 2px;
 }
 
 /* Engine state — dot plus one word, the site's "engine ready". */
@@ -594,15 +694,16 @@ table.runs td strong {
   align-items: center;
   justify-content: center;
   padding: 0;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  background: var(--glass-content);
+  border: 1px solid var(--glass-line);
+  border-radius: 7px;
   color: var(--muted);
   cursor: pointer;
   transition: border-color 150ms ease, color 150ms ease;
 }
 .theme-icon-btn:hover {
-  border-color: var(--rule);
+  border-color: var(--rule-strong);
+  background: var(--glass-raised);
   color: var(--foreground);
 }
 
@@ -614,7 +715,10 @@ table.runs td strong {
   align-items: center;
   gap: 6px;
   padding: 9px 12px;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--glass-line);
+  background: var(--glass-content);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
 }
 .search-bar-field {
   display: flex;
@@ -623,12 +727,23 @@ table.runs td strong {
   flex: 1;
   min-width: 0;
   padding: 5px 9px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
-  transition: border-color 150ms ease;
+  border: 1px solid var(--glass-line);
+  border-radius: 9px;
+  background: var(--glass-raised);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 4px 18px rgba(7, 14, 28, 0.06);
+  transition: border-color 150ms ease, background 150ms ease,
+    box-shadow 150ms ease;
 }
-.search-bar-field:focus-within { border-color: var(--accent); }
+.search-bar-field:focus-within {
+  border-color: rgb(var(--accent-rgb) / 0.55);
+  background: var(--glass-hover);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 0 0 3px rgb(var(--accent-rgb) / 0.08),
+    0 8px 24px rgba(7, 14, 28, 0.08);
+}
 .search-bar-key {
   flex-shrink: 0;
   font-family: var(--font-mono);
@@ -660,7 +775,7 @@ table.runs td strong {
   font-size: 9.5px;
   letter-spacing: 0.04em;
   color: var(--muted);
-  background: var(--surface);
+  background: var(--glass-content);
   white-space: nowrap;
   max-width: 55%;
   overflow: hidden;
@@ -683,15 +798,16 @@ table.runs td strong {
   align-items: center;
   justify-content: center;
   padding: 0;
-  background: transparent;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-md);
+  background: var(--glass-content);
+  border: 1px solid var(--glass-line);
+  border-radius: 8px;
   color: var(--muted);
   cursor: pointer;
   transition: border-color 150ms ease, color 150ms ease;
 }
 .search-bar-browse:hover {
   border-color: var(--accent);
+  background: var(--glass-raised);
   color: var(--accent);
 }
 
@@ -701,7 +817,8 @@ table.runs td strong {
   align-items: center;
   gap: 8px;
   padding: 7px 12px;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--glass-line);
+  background: var(--glass-sidebar);
   min-width: 0;
 }
 .crumb-label { flex-shrink: 0; }
@@ -776,12 +893,16 @@ table.runs td strong {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid var(--rule);
+  border-right: 1px solid var(--glass-line);
+  background: var(--glass-sidebar);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
 }
 .launcher-detail {
   overflow-y: auto;
   min-width: 0;
   min-height: 0;
+  background: var(--glass-content);
 }
 
 /* Too narrow for two columns — the list keeps the top half and the
@@ -793,7 +914,7 @@ table.runs td strong {
   }
   .launcher-list {
     border-right: none;
-    border-bottom: 1px solid var(--rule);
+    border-bottom: 1px solid var(--glass-line);
   }
 }
 
@@ -861,9 +982,14 @@ table.runs td strong {
   min-width: 0;
   width: 100%;
 }
-.result-row:hover:not(:disabled) { background: var(--surface-3); }
+.result-row:hover:not(:disabled) { background: var(--glass-raised); }
 /* Where the keyboard is. */
-.result-row.is-selected { background: var(--surface-3); }
+.result-row.is-selected {
+  background: var(--glass-hover);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 3px 14px rgba(7, 14, 28, 0.05);
+}
 /* What the right pane is showing — usually the same row, and the two
    marks are deliberately different so the moment they diverge reads. */
 .result-row.is-open { box-shadow: inset 2px 0 0 var(--accent); }
@@ -1128,7 +1254,11 @@ table.runs td strong {
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--glass-line);
+  background: var(--glass-bar);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
   min-width: 0;
 }
 .launcher-foot-facts {
