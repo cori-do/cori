@@ -40,15 +40,7 @@ export default function Workers({ loaderData }: { loaderData: WorkersResponse })
                 </h3>
                 <code style={{ color: "var(--muted)", fontSize: 12 }}>{w.task_queue}</code>
               </div>
-              <h4
-                style={{
-                  margin: "12px 0 6px",
-                  fontSize: 11,
-                  textTransform: "uppercase",
-                  color: "var(--muted)",
-                  letterSpacing: "0.06em",
-                }}
-              >
+              <h4 className="label" style={{ margin: "14px 0 8px" }}>
                 Capabilities
               </h4>
               {w.capabilities.length === 0 ? (

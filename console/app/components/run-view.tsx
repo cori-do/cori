@@ -200,8 +200,8 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
   return (
     <div className="run-window">
       <header className="run-window-head" data-tauri-drag-region>
-        <h1 style={{ margin: 0 }}>
-          {title}{" "}
+        <h1>
+          <span className="run-window-title">{title}</span>
           <span className={`pill ${pillFor(status)}`}>{status}</span>
         </h1>
         <div style={{ flex: 1 }} />
@@ -281,16 +281,12 @@ function TraceBody({ trace }: { trace: RunTrace }) {
               key={a.activity_id}
               className={`step ${a.status === "failed" ? "failed" : ""}`}
             >
-              <div className="num">{i + 1}.</div>
-              <div>
+              <div className="num">{stepNumber(i)}</div>
+              <div className="step-body">
                 <div className="name">{a.step_name}</div>
                 <div className="meta">
-                  {a.kind}
-                  {" · "}
                   {a.attempts > 1 ? `${a.attempts} attempts` : "1 attempt"}
                   {a.task_queue ? ` · ${a.task_queue}` : ""}
-                  {" · "}
-                  {formatDuration(a.duration_ms)}
                 </div>
                 {a.error && (
                   <div className="meta" style={{ color: "var(--red)" }}>
@@ -306,12 +302,12 @@ function TraceBody({ trace }: { trace: RunTrace }) {
                   <pre>{JSON.stringify(a.output, null, 2)}</pre>
                 </details>
               </div>
+              <div className={kindClass(a.kind)}>{a.kind}</div>
               <div className="right">
-                <div>
-                  <span className={`pill ${pillFor(a.status)}`}>{a.status}</span>
-                </div>
+                <span className={`pill ${pillFor(a.status)}`}>{a.status}</span>
+                <span>{formatDuration(a.duration_ms)}</span>
                 {a.cost_eur != null && a.cost_eur > 0 && (
-                  <div>{formatCost(a.cost_eur)}</div>
+                  <span className="cost">{formatCost(a.cost_eur)}</span>
                 )}
               </div>
             </div>
@@ -374,22 +370,20 @@ function LiveStepRow({ idx, step }: { idx: number; step: LiveStep | undefined })
   if (!step) return null;
   return (
     <div className={`step ${step.status === "failed" ? "failed" : ""}`}>
-      <div className="num">{idx}.</div>
-      <div>
+      <div className="num">{stepNumber(idx - 1)}</div>
+      <div className="step-body">
         <div className="name">{step.step_name}</div>
-        <div className="meta">
-          {step.kind ?? "—"}
-          {step.task_queue ? ` · ${step.task_queue}` : ""}
-        </div>
+        {step.task_queue && <div className="meta">{step.task_queue}</div>}
         {step.error && (
           <div className="meta" style={{ color: "var(--red)" }}>{step.error}</div>
         )}
       </div>
+      <div className={kindClass(step.kind)}>{step.kind ?? "—"}</div>
       <div className="right">
-        <div>
-          <span className={`pill ${pillFor(step.status)}`}>{step.status}</span>
-        </div>
-        {step.duration_ms != null && <div>{formatDuration(step.duration_ms)}</div>}
+        <span className={`pill ${pillFor(step.status)}`}>{step.status}</span>
+        {step.duration_ms != null && (
+          <span>{formatDuration(step.duration_ms)}</span>
+        )}
       </div>
     </div>
   );
@@ -420,7 +414,7 @@ function extractCapabilityIds(error: string): string[] {
   return [...ids];
 }
 
-function ConnectOffer({ error }: { error: string }) {
+export function ConnectOffer({ error }: { error: string }) {
   const ids = useMemo(() => extractCapabilityIds(error), [error]);
   const [caps, setCaps] = useState<CapabilityInfo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -492,7 +486,22 @@ function ConnectOffer({ error }: { error: string }) {
   );
 }
 
-// ── Status helpers ────────────────────────────────────────────────────
+// ── Presentation helpers ──────────────────────────────────────────────
+
+/** `01`, `02`, … — zero-padded so the column stays one width and the
+ *  step names all start on the same pixel. */
+function stepNumber(index: number): string {
+  return String(index + 1).padStart(2, "0");
+}
+
+/**
+ * `llm` is the only kind that bills, which makes it the one thing on the
+ * row worth colouring: it names itself in the number colour, the same as
+ * the cost beside it.
+ */
+function kindClass(kind: string | undefined): string {
+  return kind === "llm" ? "kind is-billed" : "kind";
+}
 
 function runStatus(s: RunState): string {
   if (s.trace) return s.trace.status;

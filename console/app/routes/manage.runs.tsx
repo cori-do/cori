@@ -80,8 +80,10 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
                 <td>
                   <span className={`pill ${pillFor(r.status)}`}>{r.status}</span>
                 </td>
-                <td>{formatDuration(r.duration_ms)}</td>
-                <td>{formatCost(r.cost?.total_eur)}</td>
+                {/* Duration and cost are numbers, so they read as numbers:
+                    tabular, cyan, aligned down the column. */}
+                <td className="num">{formatDuration(r.duration_ms)}</td>
+                <td className="num">{formatCost(r.cost?.total_eur)}</td>
                 <td className="mono">{r.run_id.slice(0, 8)}</td>
               </tr>
             ))}
