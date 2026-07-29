@@ -21,6 +21,7 @@ import {
 import { Channel } from "@tauri-apps/api/core";
 import {
   isIpcError,
+  listRuns,
   recordTrust,
   resolveWorkflow,
   startRun,
@@ -28,10 +29,17 @@ import {
   type ParameterDef,
   type PlanStep,
   type RunEvent,
+  type RunListEntry,
   type RunTrace,
   type WorkflowPreflight,
 } from "../lib/api";
-import { formatCost, formatDuration } from "../lib/format";
+import {
+  formatAbsolute,
+  formatCost,
+  formatDuration,
+  formatRelative,
+} from "../lib/format";
+import { openRun } from "../lib/windows";
 import { ConnectOffer } from "./run-view";
 
 /** What the launcher can ask of the pane from its own key handling. */
@@ -76,6 +84,9 @@ export function WorkflowPane({
   const [consent, setConsent] = useState<ConsentRequired | null>(null);
   const [trusting, setTrusting] = useState(false);
   const [run, setRun] = useState<RunState | null>(null);
+  const [history, setHistory] = useState<RunListEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   // Only the newest resolve is allowed to land: arrowing down a long list
   // and pressing Enter twice must not let a slow first request overwrite
@@ -127,6 +138,39 @@ export function WorkflowPane({
   }, [source, resolve]);
 
   const running = run != null && !run.closed;
+  const completedRunId = run?.closed
+    ? (run.trace?.run_id ?? run.runId ?? "closed")
+    : null;
+
+  // Run history belongs to this exact source, not merely to a manifest id
+  // that another folder could share. `history_key` is computed by the Rust
+  // loader with the same path/ref identity used when traces are persisted.
+  useEffect(() => {
+    const historyKey = preflight?.history_key;
+    if (!historyKey) {
+      setHistory([]);
+      setHistoryLoading(false);
+      setHistoryError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    listRuns({ history_key: historyKey, limit: 12 })
+      .then((runs) => {
+        if (!cancelled) setHistory(runs);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setHistoryError(formatErr(e));
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preflight?.history_key, completedRunId]);
 
   const startWorkflow = useCallback(() => {
     if (!source || !preflight || running) return;
@@ -263,6 +307,12 @@ export function WorkflowPane({
           <Steps preflight={preflight} run={run} />
 
           <RunSummary run={run} />
+
+          <WorkflowHistory
+            runs={history}
+            loading={historyLoading}
+            error={historyError}
+          />
         </>
       )}
     </div>
@@ -482,6 +532,105 @@ function RunSummary({ run }: { run: RunState | null }) {
       )}
     </div>
   );
+}
+
+// ─── Workflow run history ───────────────────────────────────────────────
+
+function WorkflowHistory({
+  runs,
+  loading,
+  error,
+}: {
+  runs: RunListEntry[];
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <section className="pane-history" aria-labelledby="workflow-history-title">
+      <div className="pane-history-head">
+        <span id="workflow-history-title" className="label">
+          Run history
+        </span>
+        {runs.length > 0 && (
+          <span className="pane-history-count">
+            {runs.length} recent
+          </span>
+        )}
+      </div>
+
+      {loading && runs.length === 0 && (
+        <div className="pane-history-empty">Loading runs…</div>
+      )}
+      {error && <div className="pane-history-empty is-error">{error}</div>}
+      {!loading && !error && runs.length === 0 && (
+        <div className="pane-history-empty">
+          No launches recorded for this workflow yet.
+        </div>
+      )}
+
+      {runs.length > 0 && (
+        <div className="pane-history-list">
+          {runs.map((entry) => (
+            <HistoryRow key={`${entry.key}:${entry.utc}`} entry={entry} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HistoryRow({ entry }: { entry: RunListEntry }) {
+  const statusClass = historyStatusClass(entry.status);
+  const status = entry.status.replaceAll("_", " ");
+  return (
+    <button
+      type="button"
+      className="pane-history-row"
+      onClick={() =>
+        void openRun(entry.run_id, { key: entry.key, utc: entry.utc })
+      }
+      title={`Open run ${entry.run_id}\n${formatAbsolute(entry.started_at)}`}
+    >
+      <span className={`pane-history-mark ${statusClass}`} aria-hidden>
+        {historyStatusMark(entry.status)}
+      </span>
+      <span className="pane-history-main">
+        <span className={`pane-history-status ${statusClass}`}>{status}</span>
+        <span className="pane-history-meta">
+          <span title={formatAbsolute(entry.started_at)}>
+            {formatRelative(entry.started_at)}
+          </span>
+          <span aria-hidden>·</span>
+          <span>{historyTriggerLabel(entry.trigger)}</span>
+        </span>
+      </span>
+      <span className="pane-history-duration">
+        {formatDuration(entry.duration_ms)}
+      </span>
+      <span className="pane-history-open" aria-hidden>
+        →
+      </span>
+    </button>
+  );
+}
+
+function historyStatusClass(status: string): string {
+  if (status === "succeeded") return "is-ok";
+  if (status === "failed") return "is-bad";
+  if (status === "running") return "is-live";
+  return "is-muted";
+}
+
+function historyStatusMark(status: string): string {
+  if (status === "succeeded") return "✓";
+  if (status === "failed") return "×";
+  if (status === "running") return "•";
+  return "–";
+}
+
+function historyTriggerLabel(trigger: string): string {
+  if (trigger === "mcp") return "agent";
+  return trigger.replaceAll("_", " ");
 }
 
 // ─── Parameters ──────────────────────────────────────────────────────────

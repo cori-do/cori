@@ -38,7 +38,6 @@ import {
   type StatusResponse,
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
-import { formatRelative } from "../lib/format";
 import { openManage, openRun } from "../lib/windows";
 
 export function meta() {
@@ -211,10 +210,10 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     };
   }, [input]);
 
-  // Recents are derived from persisted run traces on disk, so the
-  // loader's snapshot goes stale the moment a run completes in another
-  // window (or from the CLI). Re-run the loader whenever the launcher
-  // regains focus — that's when the user is about to look at the list.
+  // The workflow directory is reconstructed from persisted run traces,
+  // so the loader's snapshot goes stale when another source is run for
+  // the first time. Re-run the loader whenever the launcher regains
+  // focus — individual run details live in the selected workflow pane.
   useEffect(() => {
     const w = getCurrentWebviewWindow();
     let unlisten: UnlistenFn | undefined;
@@ -918,7 +917,7 @@ function Breadcrumb({
   if (context.kind === "recents") {
     return (
       <div className="crumb">
-        <span className="crumb-label">Recents</span>
+        <span className="crumb-label">Workflows</span>
       </div>
     );
   }
@@ -929,8 +928,8 @@ function Breadcrumb({
           type="button"
           className="crumb-pop"
           onClick={onPop}
-          title="Back to recents (Esc)"
-          aria-label="Back to recents"
+          title="Back to workflows (Esc)"
+          aria-label="Back to workflows"
         >
           ←
         </button>
@@ -952,8 +951,8 @@ function Breadcrumb({
           type="button"
           className="crumb-pop"
           onClick={onPop}
-          title="Back to recents (Esc)"
-          aria-label="Back to recents"
+          title="Back to workflows (Esc)"
+          aria-label="Back to workflows"
         >
           ←
         </button>
@@ -1092,7 +1091,7 @@ function ResultsPane({
       return (
         <div className="results">
           <div className="results-empty">
-            No recent workflow matches that filter.
+            No workflow matches that filter.
           </div>
         </div>
       );
@@ -1106,7 +1105,7 @@ function ResultsPane({
     }
     return (
       <div className="results">
-        <div className="results-empty">No recents to show.</div>
+        <div className="results-empty">No workflows to show.</div>
       </div>
     );
   }
@@ -1163,6 +1162,7 @@ function RecentRow({
   const sourceLabel = describeRecentSource(r);
   const displayName = r.name ?? r.workflow_id;
   const disabled = !src;
+  const origin = r.source?.kind ?? "unavailable";
   return (
     <button
       type="button"
@@ -1184,18 +1184,12 @@ function RecentRow({
       </span>
       <div className="result-row-body">
         <div className="result-row-name">{displayName}</div>
-        <div className="result-row-meta">
-          <span className={`pill ${pillFor(r.last_status)}`}>
-            {r.last_status}
-          </span>
-          <span>{formatRelative(r.last_run_at)}</span>
-          {/* Where it came from, pushed to the far edge. A repo you
-              pulled it from is the one thing on the row worth a colour;
-              a path on your own disk is just where the folder is. */}
+        <div className="result-row-location">
+          <span className="result-row-origin">{origin}</span>
           {sourceLabel && (
             <MiddleTruncate
               text={sourceLabel}
-              tail={Math.min(22, Math.floor(sourceLabel.length / 2))}
+              tail={Math.min(18, Math.floor(sourceLabel.length / 2))}
               className={
                 r.source?.kind === "remote"
                   ? "result-row-source is-remote"
@@ -1640,12 +1634,6 @@ function identityLabel(s: StatusResponse | null): string | null {
   if (s.identity.kind === "person") return s.identity.user_id;
   if (s.identity.kind === "service") return `service:${s.identity.pool}`;
   return null;
-}
-
-function pillFor(status: string): string {
-  if (status === "succeeded") return "ok";
-  if (status === "failed") return "bad";
-  return "muted";
 }
 
 /**
