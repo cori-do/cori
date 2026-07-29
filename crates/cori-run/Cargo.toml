@@ -32,6 +32,7 @@ cori-protocol.workspace = true
 cori-manifest.workspace = true
 cori-compiler.workspace = true
 cori-broker.workspace = true
+cori-secrets.workspace = true
 cori-worker.workspace = true
 
 [dev-dependencies]

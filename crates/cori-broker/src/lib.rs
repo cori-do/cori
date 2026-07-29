@@ -159,7 +159,7 @@ pub enum BrokerError {
     LlmUnknownModel { model: String },
 
     #[error(
-        "LLM credentials missing for provider `{provider}` — set the {env_var} environment variable, or run `cori config set llm.{provider}.api_key <key>`"
+        "LLM credentials missing for provider `{provider}` — set the {env_var} environment variable, or run `cori login {provider}`"
     )]
     LlmMissingCredentials {
         provider: &'static str,

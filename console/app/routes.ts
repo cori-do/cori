@@ -15,6 +15,7 @@ export default [
   route("runs/:key/:utc", "routes/run-detail.tsx"),
   route("manage", "routes/manage.tsx", [
     route("capabilities", "routes/manage.capabilities.tsx"),
+    route("providers", "routes/manage.providers.tsx"),
     route("workers", "routes/manage.workers.tsx"),
     route("schedules", "routes/manage.schedules.tsx"),
     route("runs", "routes/manage.runs.tsx"),

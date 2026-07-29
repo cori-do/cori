@@ -1,14 +1,14 @@
 //! LLM provider credential resolution.
 //!
-//! The CLI loads `~/.cori/config.toml` and passes any `llm.<provider>.api_key`
-//! values to the broker via [`LlmCredentials`]. Env vars
-//! (`OPENAI_API_KEY` etc.) take precedence over config values so users can
-//! override per-shell without rewriting config.
+//! The CLI reads API keys from the shared secret store (OS keychain,
+//! file fallback — see `cori-secrets`) and passes them to the broker
+//! via [`LlmCredentials`]. Env vars (`OPENAI_API_KEY` etc.) take
+//! precedence over stored values so users can override per-shell.
 //!
 //! If neither source supplies a key and the run is interactive (stdin is
-//! a TTY), [`prompt_for_missing`] writes to stderr asking the user to set
-//! the env var or run `cori config set`, then waits for Enter and
-//! re-reads the env. Non-interactive runs surface
+//! a TTY), [`require`] writes to stderr asking the user to set the env
+//! var or run `cori login <provider>`, then waits for Enter and re-reads
+//! the env. Non-interactive runs surface
 //! [`BrokerError::LlmMissingCredentials`] immediately.
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -85,16 +85,21 @@ pub fn require(creds: &LlmCredentials, provider: &'static str) -> Result<String>
     let mut stderr = io::stderr();
     let _ = writeln!(
         stderr,
-        "\nThis step requires an {provider} API key.\n  · Set {env_var}=<your-key> in your environment, OR\n  · Run `cori config set llm.{provider}.api_key <your-key>`\nPress Enter once the key is set (or Ctrl-C to abort)…",
+        "\nThis step requires an {provider} API key.\n  · Set {env_var}=<your-key> in your environment, OR\n  · Run `cori login {provider}` in another terminal\nPress Enter once the key is set (or Ctrl-C to abort)…",
     );
     let _ = stderr.flush();
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
 
-    // Re-read just this var from the env — handles the case where the
-    // user exported it in another shell or wrote it to config in
-    // another terminal.
+    // Re-read the env and the secret store — handles both `export …`
+    // in this shell's parent and `cori login <provider>` run in
+    // another terminal while we waited.
     if let Some(k) = env_nonempty(env_var) {
+        return Ok(k);
+    }
+    if let Ok(store) = cori_secrets::SecretStore::open_default()
+        && let Ok(Some(k)) = store.get(&cori_secrets::llm_account(provider))
+    {
         return Ok(k);
     }
     Err(BrokerError::LlmMissingCredentials { provider, env_var })

@@ -9,6 +9,7 @@ members = [
     "crates/cori-ledger",
     "crates/cori-manifest",
     "crates/cori-protocol",
+    "crates/cori-secrets",
     "console/src-tauri",
 ]
 
@@ -67,6 +68,7 @@ futures = "0.3"
 
 # Phase 5: credentials + OAuth.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+rpassword = "7"
 # Capability binary installs (`cori capability install`).
 flate2 = "1"
 tar = "0.4"
@@ -82,6 +84,7 @@ cori-ledger = { path = "crates/cori-ledger" }
 cori-manifest = { path = "crates/cori-manifest" }
 cori-protocol = { path = "crates/cori-protocol" }
 cori-run = { path = "crates/cori-run" }
+cori-secrets = { path = "crates/cori-secrets" }
 cori-worker = { path = "crates/cori-worker" }
 
 [profile.release]

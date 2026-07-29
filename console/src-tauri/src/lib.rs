@@ -12,6 +12,7 @@ mod cli_install;
 mod commands;
 mod error;
 mod events;
+mod llm_cmd;
 mod remote_browse;
 mod runs;
 mod sidecars;
@@ -230,6 +231,9 @@ pub fn run() {
             cli_install::install_cli,
             capability_cmd::list_capabilities,
             capability_cmd::connect_capability,
+            llm_cmd::list_llm_providers,
+            llm_cmd::set_llm_provider_key,
+            llm_cmd::remove_llm_provider_key,
             browse::peek_source,
             browse::list_dir,
             browse::get_last_local_dir,

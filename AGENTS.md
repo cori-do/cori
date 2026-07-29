@@ -264,7 +264,7 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 
 ```
 ~/.cori/
-  config.toml              # temporal.host (optional), llm.<provider>.api_key, [remotes].hosts, …
+  config.toml              # temporal.host (optional), [remotes].hosts, … — never secrets; LLM keys → OS keychain via `cori login <provider>`
   cache/                   # rebuildable compiled DAGs, keyed by sha(path + content_hash)
     sources/<sha256>/      # verified immutable source snapshots used by workers
     remote/                # fetched remote workflows (system `git` clones)
@@ -273,7 +273,7 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
       <host>/<repo>/<sha>/ # working tree at <sha>
   runs/<key>/*.json        # run traces; key = <folder>-<short(abs_path)> (local) or
                            #              <repo_or_subpath_leaf>-<short(host/repo//subpath)> (remote)
-  credentials/             # OAuth/CLI TOKEN METADATA only (expiry, owner). Tokens → OS keychain.
+  credentials/             # OAuth/CLI TOKEN METADATA + LLM-key index only (no secrets). Tokens/keys → OS keychain.
   cluster/<queue>.json     # capability reports published by `cori work` (v1 cluster-presence hack)
   schedules/<id>.json      # schedule intent — read by the cron driver inside the desktop app
                            #   or `cori work` (id = sha256(source + schedule)[..12])

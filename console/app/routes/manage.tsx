@@ -14,6 +14,7 @@ const TABS: Array<{ to: string; label: string }> = [
   { to: "/manage/runs", label: "History" },
   { to: "/manage/schedules", label: "Schedules" },
   { to: "/manage/capabilities", label: "Capabilities" },
+  { to: "/manage/providers", label: "AI Providers" },
   { to: "/manage/workers", label: "Workers" },
 ];
 
@@ -21,6 +22,7 @@ const VALID_TABS = new Set([
   "runs",
   "schedules",
   "capabilities",
+  "providers",
   "workers",
   "approvals",
 ]);

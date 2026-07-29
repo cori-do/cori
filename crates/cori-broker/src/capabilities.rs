@@ -200,7 +200,7 @@ pub fn validate(
             out.push(MissingCapability {
                 kind: "LLM provider",
                 name: p.clone(),
-                hint: format!("set {env_var} or run `cori config set llm.{p}.api_key <key>`"),
+                hint: format!("set {env_var} or run `cori login {p}`"),
             });
         }
     }
