@@ -264,6 +264,9 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           loading: false,
           error: null,
         });
+        // Land on the first real entry, not the ".." row — so Enter
+        // right after drilling in doesn't bounce back up.
+        setSelIndex(listing.parent && listing.entries.length > 0 ? 1 : 0);
       })
       .catch((e) => {
         if (reqId !== contextRequestId.current) return;
@@ -401,11 +404,27 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     }
     if (ctx.kind === "local") {
       const entries = ctx.listing?.entries ?? [];
-      return fuzzyFilter(entries, input.trim(), (e) => e.name).map((e) => ({
-        kind: "dir-entry",
-        entry: e,
-        key: e.path,
-      }));
+      const matches = fuzzyFilter(entries, input.trim(), (e) => e.name).map(
+        (e): ListedItem => ({
+          kind: "dir-entry",
+          entry: e,
+          key: e.path,
+        }),
+      );
+      // A ".." row leads back up — only while not filtering, so a typed
+      // filter matches folder contents alone.
+      const parent = ctx.listing?.parent;
+      if (parent && input.trim().length === 0) {
+        return [
+          {
+            kind: "dir-entry",
+            entry: { name: "..", kind: "dir", path: parent },
+            key: `parent:${parent}`,
+          },
+          ...matches,
+        ];
+      }
+      return matches;
     }
     if (ctx.kind === "remote") {
       const listing = ctx.listing;
@@ -541,6 +560,14 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           handleArrowRight();
         }
         break;
+      case "ArrowLeft":
+        // ← climbs to the parent folder, mirroring →'s drill-in. Only
+        // when the bar is empty so it never fights caret movement.
+        if (input.length === 0 && ctx.kind === "local" && ctx.listing?.parent) {
+          e.preventDefault();
+          enterLocalContext(ctx.listing.parent);
+        }
+        break;
       case "Enter":
         e.preventDefault();
         handleEnter();
@@ -556,7 +583,13 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       case "Backspace":
         if (input.length === 0 && ctx.kind !== "recents") {
           e.preventDefault();
-          popContext();
+          // In a folder, Backspace climbs one level; only at the
+          // filesystem root (or in remote context) does it pop home.
+          if (ctx.kind === "local" && ctx.listing?.parent) {
+            enterLocalContext(ctx.listing.parent);
+          } else {
+            popContext();
+          }
         }
         break;
     }
@@ -1305,7 +1338,9 @@ function DirEntryRow({
     e.kind === "workflow"
       ? "workflow · open"
       : e.kind === "dir"
-        ? "folder · open"
+        ? e.name === ".."
+          ? "parent folder"
+          : "folder · open"
         : e.symlink
           ? "symlink (not followed)"
           : "file";

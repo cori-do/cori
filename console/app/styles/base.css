@@ -566,10 +566,12 @@ table.runs td strong {
   border: 1px solid var(--glass-line);
   border-radius: 14px;
   background: var(--glass-window);
+  /* No outer drop shadow: the OS draws the window shadow (shadow: true in
+     tauri.conf.json). A CSS one would paint to the webview's square bounds
+     and get clipped into a hard square edge at the window corners. */
   box-shadow:
     inset 0 1px 0 var(--glass-highlight),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.05),
-    0 24px 70px rgba(5, 12, 24, 0.24);
+    inset 0 -1px 0 rgba(0, 0, 0, 0.05);
   backdrop-filter: blur(30px) saturate(145%);
   -webkit-backdrop-filter: blur(30px) saturate(145%);
 }
