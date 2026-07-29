@@ -571,7 +571,9 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(path)
