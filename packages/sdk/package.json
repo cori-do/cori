@@ -21,7 +21,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no tests yet\""
+    "test": "tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "typescript": "^6.0.3"

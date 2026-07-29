@@ -260,6 +260,7 @@ mod tests {
             activity_id: id.into(),
             index: 0,
             source_path: format!("steps/{id}.ts"),
+            source_sha256: None,
             kind,
             name: id.into(),
             description: String::new(),

@@ -25,13 +25,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::{LlmCredentials, LlmOptions};
-use cori_broker::{TriggerContext, runtime as broker_runtime};
 use cori_protocol::{
     ActivityTrace, CostSummary, RunTrace, StepKind, TokenUsage, WorkerIdentity,
-    identity_from_queue, task_queue_for,
+    bounded_activity_attempts, identity_from_queue, task_queue_for,
 };
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
 use cori_worker::runner::run_workflow_once;
@@ -136,7 +136,7 @@ pub struct ConsentRequired {
 /// assessment (+ a `ConsentRequired` marker if a remote ref needs
 /// first-run consent).
 pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<PreflightOutcome> {
-    let (resolved, loaded) = workflow_loader::resolve_arg(source, update)?;
+    let (resolved, mut loaded) = workflow_loader::resolve_arg(source, update)?;
 
     let mut consent_required = None;
     if let Some(rr) = resolved.remote.as_ref()
@@ -154,6 +154,16 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
                 sha: rr.sha.clone(),
             });
         }
+    }
+
+    // Do not resolve imports from an untrusted remote workflow before the
+    // consent gate. Local and already-trusted workflows must be executable
+    // TypeScript before preflight can report them as ready.
+    if consent_required.is_none() {
+        workflow_loader::materialize_execution_snapshot(&mut loaded)?;
+        let runtime = runtime::resolve()?;
+        runtime::validate_workflow_sources(&runtime, &loaded.execution_root, &loaded.compiled)?;
+        let _ = build_source_bundle_for_execution(&loaded)?;
     }
 
     let credentials = resolve_llm_credentials();
@@ -257,15 +267,13 @@ pub async fn run_workflow(
         }
     }
 
-    // 3. Install Deno runtime
-    runtime::ensure_installed()?;
-    let runtime_root = paths::runtime_dir()?;
-    let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
-        anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
-             export CORI_DENO=$(which deno)"
-        )
-    })?;
+    // 3. Freeze the exact compiled bytes after consent, then resolve Deno and
+    // validate every module from that content-addressed snapshot before any
+    // activity can make an external side effect. The check does not evaluate
+    // module code.
+    workflow_loader::materialize_execution_snapshot(&mut loaded)?;
+    let runtime = runtime::resolve()?;
+    runtime::validate_workflow_sources(&runtime, &loaded.execution_root, &loaded.compiled)?;
 
     // 4. Capabilities
     let credentials = resolve_llm_credentials();
@@ -365,6 +373,12 @@ pub async fn run_workflow(
 
     progress.on_plan(&assignments);
 
+    // Temporal task queues have no host affinity: even a task scheduled to
+    // this identity's queue can be claimed by another poller on another
+    // machine. Transport the verified snapshot for every activity-bearing
+    // workflow and retain `source_root` only as a legacy same-host fallback.
+    let source_bundle = build_source_bundle_for_execution(&loaded)?;
+
     // 9. Build Temporal worker + run
     let run_id = caller_run_id.unwrap_or_else(new_run_id);
     let started_at = Utc::now();
@@ -374,7 +388,8 @@ pub async fn run_workflow(
         runtime: runtime.clone(),
         caps: caps.clone(),
         llm_opts: llm_opts.clone(),
-        source_root: loaded.absolute_path.clone(),
+        source_root: loaded.execution_root.clone(),
+        source_cache_dir: paths::source_cache_dir()?,
         credentials_dir: paths::credentials_dir()?,
     };
     let _ = set_broker_ctx(broker_ctx);
@@ -389,11 +404,10 @@ pub async fn run_workflow(
         reauth_timeout_secs: std::env::var("CORI_REAUTH_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok()),
-        // The activity worker may be a different process (`cori work`)
-        // started from a different cwd. Carry the absolute workflow
-        // root so step file resolution doesn't depend on the worker's
-        // startup directory.
-        source_root: loaded.absolute_path.display().to_string(),
+        // New runs always give activity-bearing workflows a verified bundle.
+        // `source_root` remains for old histories and in-memory smoke tests.
+        source_root: loaded.execution_root.display().to_string(),
+        source_bundle,
     };
 
     let workflow_output_res = {
@@ -456,7 +470,7 @@ pub async fn run_workflow(
 
         progress.on_step_finish(&summary);
 
-        let note = summary.notes.first().cloned();
+        let note = (!summary.notes.is_empty()).then(|| summary.notes.join("; "));
 
         let (task_queue_field, worker_identity_field) =
             match assignment_by_id.get(summary.activity_id.as_str()) {
@@ -637,6 +651,48 @@ fn auth_error_signature(error: &str) -> bool {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn projected_attempts(step: &cori_protocol::CompiledStep) -> usize {
+    let default: u32 = match step.kind {
+        StepKind::Cli | StepKind::McpTool | StepKind::Builtin => 1,
+        StepKind::Code | StepKind::Llm => 3,
+    };
+    usize::try_from(bounded_activity_attempts(
+        step.metadata
+            .get("retries")
+            .and_then(|value| value.get("max"))
+            .and_then(JsonValue::as_u64),
+        default,
+    ))
+    .unwrap_or(usize::MAX)
+}
+
+/// Build and budget the immutable source payload exactly as `cori run` will.
+///
+/// `cori check` calls this after freezing and validating modules so it cannot
+/// report ready for a workflow that run would reject at the transport gate.
+pub fn build_source_bundle_for_execution(
+    loaded: &workflow_loader::LoadedWorkflow,
+) -> Result<Option<cori_protocol::SourceBundle>> {
+    if !requires_source_transport(&loaded.compiled.steps) {
+        return Ok(None);
+    }
+    let bundle = cori_broker::source_bundle::build(&loaded.execution_root, &loaded.content_hash)?;
+    let projected_dispatches = loaded
+        .compiled
+        .steps
+        .iter()
+        .filter(|step| step.kind != StepKind::Builtin)
+        .map(projected_attempts)
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| anyhow::anyhow!("projected activity attempt count overflow"))?;
+    cori_broker::source_bundle::validate_history_budget(&bundle, projected_dispatches)?;
+    Ok(Some(bundle))
+}
+
+fn requires_source_transport(steps: &[cori_protocol::CompiledStep]) -> bool {
+    steps.iter().any(|step| step.kind != StepKind::Builtin)
+}
+
 pub fn new_run_id() -> String {
     format!("run_{}", uuid::Uuid::new_v4().simple())
 }
@@ -775,7 +831,7 @@ pub(crate) mod test_env {
 
 #[cfg(test)]
 mod reauth_tests {
-    use super::{auth_error_signature, step_capability};
+    use super::{auth_error_signature, requires_source_transport, step_capability};
 
     #[test]
     fn cli_step_capability_comes_from_compiler_metadata() {
@@ -789,6 +845,7 @@ mod reauth_tests {
             activity_id: "01_read_sheet_values".into(),
             index: 0,
             source_path: "steps/01_read_sheet_values.ts".into(),
+            source_sha256: None,
             kind: StepKind::Cli,
             name: "read_sheet_values".into(),
             description: String::new(),
@@ -807,6 +864,16 @@ mod reauth_tests {
             ..step
         };
         assert_eq!(step_capability(&code_step), None);
+        assert!(
+            requires_source_transport(std::slice::from_ref(&code_step)),
+            "same-queue activities still need source transport because task queues have no host affinity"
+        );
+
+        let builtin_step = cori_protocol::CompiledStep {
+            kind: StepKind::Builtin,
+            ..code_step
+        };
+        assert!(!requires_source_transport(&[builtin_step]));
     }
 
     use super::StepKind;

@@ -74,6 +74,7 @@ pub fn run(
     input: &JsonValue,
     user_id: &str,
     credentials_dir: &Path,
+    expected_target: Option<(&str, &str)>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -85,6 +86,10 @@ pub fn run(
             envelope: args_call.output.to_string(),
             source: e,
         })?;
+    let (expected_server, expected_tool) = expected_target
+        .map(|(server, tool)| (Some(server), Some(tool)))
+        .unwrap_or((None, None));
+    validate_target_boundary(expected_server, expected_tool, &spec.server, &spec.tool)?;
 
     let server_cfg = capabilities.mcp_servers.get(&spec.server).ok_or_else(|| {
         BrokerError::CapabilityDenied {
@@ -103,15 +108,59 @@ pub fn run(
 
     // 3. Spawn + call.
     let output = call_tool(server_cfg, &spec.tool, &spec.args, &extra_env)?;
+    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &output)?;
+
+    let mut stderr = args_call.stderr;
+    if !validated.stderr.trim().is_empty() {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&validated.stderr);
+    }
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
-        output,
+        output: validated.output,
         duration: started.elapsed(),
-        stderr: args_call.stderr,
+        stderr,
         cost_eur: None,
         usage: None,
+        notes: Vec::new(),
     })
+}
+
+/// Enforce the compiler's static MCP target immediately before capability and
+/// credential resolution. `None` is retained only for legacy Temporal
+/// histories created before frozen step metadata was carried in activities.
+pub(crate) fn validate_target_boundary(
+    expected_server: Option<&str>,
+    expected_tool: Option<&str>,
+    actual_server: &str,
+    actual_tool: &str,
+) -> Result<()> {
+    if let Some(expected) = expected_server
+        && expected != actual_server
+    {
+        return Err(BrokerError::CapabilityDenied {
+            kind: "MCP server",
+            name: actual_server.to_string(),
+            hint: format!(
+                "step was compiled for MCP server `{expected}` but runtime evaluation produced `{actual_server}`; the server must remain the directly declared literal"
+            ),
+        });
+    }
+    if let Some(expected) = expected_tool
+        && expected != actual_tool
+    {
+        return Err(BrokerError::CapabilityDenied {
+            kind: "MCP tool",
+            name: actual_tool.to_string(),
+            hint: format!(
+                "step was compiled for MCP tool `{expected}` but runtime evaluation produced `{actual_tool}`; the tool must remain the directly declared literal"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Look up an OAuth token in the per-user store and return the extra
@@ -286,5 +335,34 @@ fn read_response(r: &mut impl BufRead, expect_id: u64) -> Result<JsonValue> {
             Some(id) if id == expect_id => return Ok(v),
             _ => continue,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_runtime_mcp_target_switches() {
+        let server_error =
+            validate_target_boundary(Some("approved"), Some("read"), "other", "read")
+                .expect_err("runtime server switch must fail");
+        assert!(matches!(
+            server_error,
+            BrokerError::CapabilityDenied { kind: "MCP server", name, .. } if name == "other"
+        ));
+
+        let tool_error =
+            validate_target_boundary(Some("approved"), Some("read"), "approved", "delete")
+                .expect_err("runtime tool switch must fail");
+        assert!(matches!(
+            tool_error,
+            BrokerError::CapabilityDenied { kind: "MCP tool", name, .. } if name == "delete"
+        ));
+    }
+
+    #[test]
+    fn permits_legacy_mcp_targets_without_frozen_metadata() {
+        validate_target_boundary(None, None, "server", "tool").expect("legacy compatibility");
     }
 }

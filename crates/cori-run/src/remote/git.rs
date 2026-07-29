@@ -170,18 +170,52 @@ impl FileLock {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating `{}`", parent.display()))?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-            .with_context(|| format!("opening `{}`", path.display()))?;
+        let file = open_lock_file(path)?;
         lock_exclusive(&file)?;
         Ok(Self {
             file,
             path: path.to_path_buf(),
         })
+    }
+}
+
+#[cfg(not(windows))]
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("opening `{}`", path.display()))
+}
+
+#[cfg(windows)]
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            // No sharing: the open handle itself is the inter-process lock.
+            .share_mode(0)
+            .open(path)
+        {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if matches!(error.raw_os_error(), Some(32) | Some(33))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("locking `{}`", path.display()));
+            }
+        }
     }
 }
 
@@ -226,10 +260,7 @@ unsafe extern "C" {
 
 #[cfg(windows)]
 fn lock_exclusive(_file: &std::fs::File) -> Result<()> {
-    // Windows is best-effort in v1 — no flock equivalent in std, and we
-    // don't take a third-party dep just for this. Two concurrent
-    // `cori run`s of the same repo on Windows may race the bare clone;
-    // the second will see "destination exists" and fail loudly.
+    // `open_lock_file` acquired the handle with share_mode(0).
     Ok(())
 }
 

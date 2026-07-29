@@ -37,6 +37,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod process;
 pub mod runtime;
+pub mod source_bundle;
 
 use std::time::Duration;
 
@@ -49,8 +50,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivityOutcome {
     pub status: ActivityStatus,
-    /// Decoded JSON output of the activity. `Null` when the activity
-    /// failed or was skipped.
+    /// Decoded JSON output of the activity. Dry-run activities are skipped
+    /// externally but return schema-valid output for downstream dataflow.
     pub output: JsonValue,
     pub duration: Duration,
     /// Captured stderr from the subprocess. Useful for surfacing in the
@@ -64,6 +65,9 @@ pub struct ActivityOutcome {
     /// Token usage breakdown for LLM activities.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
+    /// Trace-only diagnostics that must not be mixed into step dataflow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Per-activity token accounting for LLM calls.
@@ -93,6 +97,9 @@ pub enum BrokerError {
     #[error("runner subprocess I/O error: {0}")]
     Io(#[source] std::io::Error),
 
+    #[error("workflow source bundle rejected: {message}")]
+    SourceBundle { message: String },
+
     #[error("runner produced no envelope on stdout (exit {exit_code})\n--- stderr ---\n{stderr}")]
     MissingEnvelope { exit_code: i32, stderr: String },
 
@@ -105,6 +112,12 @@ pub enum BrokerError {
 
     #[error("step failed: {message}")]
     StepFailed {
+        message: String,
+        stack: Option<String>,
+    },
+
+    #[error("schema validation failed: {message}")]
+    SchemaValidation {
         message: String,
         stack: Option<String>,
     },

@@ -1,4 +1,5 @@
 packages:
+  - "benchmarks/workflow-capture"
   - "packages/runner"
   - "packages/sdk"
 allowBuilds:

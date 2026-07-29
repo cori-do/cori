@@ -36,7 +36,6 @@ version: 1
 parameters:
   - name: spreadsheet_id
     type: string
-    default: 1_i5iOB7t0cW6-OSyQtdOWSiAUrO3bwxjF-tSwjFQRSA
     description: Target Google Sheets spreadsheet ID
   - name: source_tab
     type: string

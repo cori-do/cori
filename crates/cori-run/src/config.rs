@@ -120,3 +120,26 @@ fn parse_value(raw: &str) -> Value {
     }
     Value::String(raw.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_from_parses_nested_table_document() {
+        let path = std::env::temp_dir().join(format!(
+            "cori-config-nested-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, "[llm.openai]\napi_key = \"test-value\"\n").unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.get("llm.openai.api_key").and_then(Value::as_str),
+            Some("test-value")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+}

@@ -48,6 +48,8 @@ pub struct LlmOptions {
 struct PromptSpec {
     model: String,
     prompt: String,
+    #[serde(default, rename = "batchPrompts")]
+    batch_prompts: Vec<String>,
     #[serde(default)]
     batch: Option<BatchSpec>,
     #[serde(default, rename = "outputSchema")]
@@ -58,7 +60,6 @@ struct PromptSpec {
 
 #[derive(Debug, Deserialize, Clone)]
 struct BatchSpec {
-    size: usize,
     by: String,
 }
 
@@ -68,13 +69,12 @@ pub fn run(
     step_file_path: &Path,
     input: &JsonValue,
     opts: &LlmOptions,
+    expected_model: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
-    // For batched calls, we need to invoke `llm_prompt` once per chunk
-    // (the prompt closes over `input` so the user's `prompt(input)`
-    // function decides how to render each chunk). We start with one call
-    // to read `model`, `batch`, and `outputSchema`.
+    // The runner parses the input and renders every batch prompt in one
+    // process, preserving transformed values that cannot cross JSON intact.
     let initial =
         dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::LlmPrompt, input)?;
     let spec: PromptSpec =
@@ -82,15 +82,14 @@ pub fn run(
             envelope: initial.output.to_string(),
             source: e,
         })?;
+    validate_model_boundary(expected_model, &spec.model)?;
 
     let provider = pick_provider(&spec.model, &opts.credentials)?;
     let output_schema = spec.output_schema.as_ref();
 
-    // Decide whether to batch.
-    let chunks = decide_chunks(input, spec.batch.as_ref());
     let mut combined_stderr = initial.stderr;
 
-    let (text_responses, total_usage) = if chunks.is_empty() {
+    let (text_responses, total_usage) = if spec.batch_prompts.is_empty() {
         // No batching — single call, reuse the prompt we already rendered.
         let req = providers::LlmRequest {
             model: &spec.model,
@@ -98,41 +97,27 @@ pub fn run(
             output_schema,
             strict_retry: false,
         };
-        let resp = call_with_schema_retry(&*provider, &req)?;
+        let resp = call_with_schema_retry(
+            &*provider,
+            &req,
+            runtime,
+            step_file_path,
+            spec.has_output_schema,
+        )?;
         (vec![resp.text], resp.usage)
     } else {
-        // Batched — re-render the prompt for each chunk by re-invoking
-        // the runner with the chunk substituted into the named field, then
-        // fan out provider calls across worker threads.
-        let by = spec.batch.as_ref().unwrap().by.clone();
-        let mut chunk_inputs: Vec<JsonValue> = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            chunk_inputs.push(substitute_field(input, &by, JsonValue::Array(chunk)));
-        }
-
-        // Render prompts for each chunk via the runner.
-        let mut prompts: Vec<String> = Vec::with_capacity(chunk_inputs.len());
-        for chunk_input in &chunk_inputs {
-            let p = dispatch::invoke_with_input(
-                runtime,
-                step_file_path,
-                RunnerMode::LlmPrompt,
-                chunk_input,
-            )?;
-            let sp: PromptSpec =
-                serde_json::from_value(p.output).map_err(|e| BrokerError::BadEnvelope {
-                    envelope: "<batch prompt>".to_string(),
-                    source: e,
-                })?;
-            prompts.push(sp.prompt);
-            if !p.stderr.trim().is_empty() {
-                combined_stderr.push('\n');
-                combined_stderr.push_str(&p.stderr);
-            }
-        }
-
-        // Parallel dispatch.
-        fan_out(&*provider, &spec.model, &prompts, output_schema)?
+        // The runner renders every chunk immediately after parsing the input,
+        // before transformed values cross the JSON process boundary. Parallel
+        // provider dispatch can then use those frozen prompt strings directly.
+        fan_out(
+            &*provider,
+            &spec.model,
+            &spec.batch_prompts,
+            output_schema,
+            runtime,
+            step_file_path,
+            spec.has_output_schema,
+        )?
     };
 
     // Validate + merge.
@@ -143,10 +128,28 @@ pub fn run(
     let outputs = outputs?;
 
     let final_output = if outputs.len() == 1 {
-        outputs.into_iter().next().unwrap()
+        outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| BrokerError::StepFailed {
+                message: "LLM provider produced no output".to_string(),
+                stack: None,
+            })?
     } else {
-        merge_batched_outputs(outputs, &spec.batch.as_ref().unwrap().by)
+        let batch = spec.batch.as_ref().ok_or_else(|| BrokerError::StepFailed {
+            message: "runner returned multiple LLM batch prompts without batch metadata"
+                .to_string(),
+            stack: None,
+        })?;
+        merge_batched_outputs(outputs, &batch.by)
     };
+    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &final_output)?;
+    if !validated.stderr.trim().is_empty() {
+        if !combined_stderr.is_empty() && !combined_stderr.ends_with('\n') {
+            combined_stderr.push('\n');
+        }
+        combined_stderr.push_str(&validated.stderr);
+    }
 
     let cost = pricing::cost_eur(
         &spec.model,
@@ -156,12 +159,30 @@ pub fn run(
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
-        output: final_output,
+        output: validated.output,
         duration: started.elapsed(),
         stderr: combined_stderr,
         cost_eur: cost,
         usage: Some(total_usage),
+        notes: Vec::new(),
     })
+}
+
+/// Enforce the compiler's literal model before provider and credential
+/// selection. `None` is retained only for legacy Temporal histories.
+pub(crate) fn validate_model_boundary(expected: Option<&str>, actual: &str) -> Result<()> {
+    if let Some(expected) = expected
+        && expected != actual
+    {
+        return Err(BrokerError::CapabilityDenied {
+            kind: "LLM model",
+            name: actual.to_string(),
+            hint: format!(
+                "step was compiled for model `{expected}` but runtime evaluation produced `{actual}`; the model must remain the directly declared literal"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Pick a provider implementation by model-name prefix.
@@ -195,38 +216,15 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Split `input[batch.by]` into chunks of `batch.size`. Returns an empty
-/// vec when batching does not apply (no batch spec, named field missing
-/// or not an array, or array short enough to fit in one call).
-fn decide_chunks(input: &JsonValue, batch: Option<&BatchSpec>) -> Vec<Vec<JsonValue>> {
-    let Some(batch) = batch else {
-        return Vec::new();
-    };
-    let Some(arr) = input.get(&batch.by).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    if arr.len() <= batch.size {
-        return Vec::new();
-    }
-    arr.chunks(batch.size).map(|c| c.to_vec()).collect()
-}
-
-/// Return a clone of `input` with `field` replaced by `value`.
-fn substitute_field(input: &JsonValue, field: &str, value: JsonValue) -> JsonValue {
-    let mut obj = match input {
-        JsonValue::Object(m) => m.clone(),
-        _ => JsonMap::new(),
-    };
-    obj.insert(field.to_string(), value);
-    JsonValue::Object(obj)
-}
-
 /// Fan out one provider call per prompt across worker threads.
 fn fan_out(
     provider: &dyn providers::LlmProvider,
     model: &str,
     prompts: &[String],
     output_schema: Option<&JsonValue>,
+    runtime: &Runtime,
+    step_file_path: &Path,
+    has_output_schema: bool,
 ) -> Result<(Vec<String>, TokenUsage)> {
     let concurrency = DEFAULT_BATCH_CONCURRENCY.min(prompts.len().max(1));
     let results: Arc<Mutex<Vec<Option<Result<providers::LlmResponse>>>>> =
@@ -256,7 +254,13 @@ fn fan_out(
                         output_schema,
                         strict_retry: false,
                     };
-                    let r = call_with_schema_retry(provider, &req);
+                    let r = call_with_schema_retry(
+                        provider,
+                        &req,
+                        runtime,
+                        step_file_path,
+                        has_output_schema,
+                    );
                     results.lock().unwrap()[i] = Some(r);
                 }
             });
@@ -274,17 +278,22 @@ fn fan_out(
     Ok((text, total))
 }
 
-/// Call the provider, retrying once with `strict_retry: true` if the
-/// response can't be JSON-parsed (when a schema was provided).
+/// Call the provider, retrying once with `strict_retry: true` when a declared
+/// output schema rejects the response. The runner performs the same Zod parse
+/// used at the activity boundary, so syntactically valid but shape-invalid JSON
+/// receives the strict retry too.
 fn call_with_schema_retry(
     provider: &dyn providers::LlmProvider,
     req: &providers::LlmRequest<'_>,
+    runtime: &Runtime,
+    step_file_path: &Path,
+    has_output_schema: bool,
 ) -> Result<providers::LlmResponse> {
     let first = provider.complete(req)?;
-    if req.output_schema.is_none() {
+    if !has_output_schema {
         return Ok(first);
     }
-    if serde_json::from_str::<JsonValue>(strip_json_fences(&first.text)).is_ok() {
+    if candidate_schema_error(runtime, step_file_path, &first.text)?.is_none() {
         return Ok(first);
     }
     // Retry once with a stricter system message.
@@ -298,11 +307,11 @@ fn call_with_schema_retry(
         }
     };
     let second = provider.complete(&retry_req)?;
-    if serde_json::from_str::<JsonValue>(strip_json_fences(&second.text)).is_err() {
+    if let Some(reason) = candidate_schema_error(runtime, step_file_path, &second.text)? {
         return Err(BrokerError::LlmSchemaMismatch {
             provider: provider.name(),
             attempts: 2,
-            reason: "response was not valid JSON".to_string(),
+            reason,
         });
     }
     // Sum usage across both attempts so cost accounting reflects reality.
@@ -310,6 +319,22 @@ fn call_with_schema_retry(
         text: second.text,
         usage: first.usage + second.usage,
     })
+}
+
+fn candidate_schema_error(
+    runtime: &Runtime,
+    step_file_path: &Path,
+    text: &str,
+) -> Result<Option<String>> {
+    let candidate = match serde_json::from_str::<JsonValue>(strip_json_fences(text)) {
+        Ok(candidate) => candidate,
+        Err(error) => return Ok(Some(format!("response was not valid JSON: {error}"))),
+    };
+    match dispatch::invoke_validate_output(runtime, step_file_path, &candidate) {
+        Ok(_) => Ok(None),
+        Err(BrokerError::SchemaValidation { message, .. }) => Ok(Some(message)),
+        Err(error) => Err(error),
+    }
 }
 
 /// Parse the LLM's text. With a schema, expect JSON; without one, return
@@ -422,31 +447,31 @@ mod tests {
     }
 
     #[test]
-    fn chunks_split_when_oversized() {
-        let input = json!({ "rows": [1, 2, 3, 4, 5] });
-        let chunks = decide_chunks(
-            &input,
-            Some(&BatchSpec {
-                size: 2,
-                by: "rows".into(),
-            }),
-        );
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0], vec![json!(1), json!(2)]);
-        assert_eq!(chunks[2], vec![json!(5)]);
+    fn rejects_runtime_model_switches() {
+        validate_model_boundary(Some("gpt-4o-mini"), "gpt-4o-mini").expect("matching frozen model");
+        let error = validate_model_boundary(Some("gpt-4o-mini"), "claude-3-5-sonnet")
+            .expect_err("runtime model switch must fail");
+        assert!(matches!(
+            error,
+            BrokerError::CapabilityDenied { kind: "LLM model", name, .. }
+                if name == "claude-3-5-sonnet"
+        ));
+        validate_model_boundary(None, "legacy-model").expect("legacy compatibility");
     }
 
     #[test]
-    fn no_chunks_when_short() {
-        let input = json!({ "rows": [1, 2] });
-        let chunks = decide_chunks(
-            &input,
-            Some(&BatchSpec {
-                size: 5,
-                by: "rows".into(),
-            }),
-        );
-        assert!(chunks.is_empty());
+    fn prompt_spec_accepts_pre_rendered_batch_prompts() {
+        let spec: PromptSpec = serde_json::from_value(json!({
+            "model": "gpt-4o-mini",
+            "prompt": "",
+            "batch": { "by": "rows", "size": 2 },
+            "batchPrompts": ["rows 1-2", "row 3"],
+            "outputSchema": null,
+            "hasOutputSchema": false
+        }))
+        .expect("prompt spec");
+        assert_eq!(spec.batch_prompts, vec!["rows 1-2", "row 3"]);
+        assert_eq!(spec.batch.expect("batch").by, "rows");
     }
 
     #[test]

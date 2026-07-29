@@ -112,12 +112,29 @@ Never write to `~/.cori/` — that's Cori's own state directory. Workflow folder
 
 ### Step 3: Decide what's a parameter
 
-Look at every concrete value in the productive actions — spreadsheet IDs, environment names, paths, dates, thresholds, channel names. For each, ask: *would this value change the next time someone runs this workflow?*
+First recover the procedure's public input contract from the conversation. An
+explicit `Parameters`, `Inputs`, or run-arguments list is authoritative: copy
+those parameter names and types exactly. Do not add another parameter merely
+because a fixed requirement could be made configurable. Output destinations,
+tab or sheet names, recipients, statuses, titles, policy thresholds, and safety
+behavior remain constants when the task specifies them as fixed values. A
+default does not turn a fixed requirement into a caller input.
 
-- Changes → **parameter**: snake_case name, TS type, default derived from this run.
+If the conversation has no explicit input contract, look at every concrete
+value in the productive actions — spreadsheet IDs, message IDs, run tags,
+environment names, paths, dates, thresholds, channel names. For each, ask:
+*is the caller expected to choose this value on each run?*
+
+- Changes → **parameter**: snake_case name and TS type. Omit the default for run-scoped or externally allocated values.
 - Fixed property of the system → **constant**: leave inline in the step file.
 
-When in doubt, parametrize. It's cheap to accept a default at trigger time; expensive to discover something is hardcoded mid-run.
+When there is no explicit contract and the distinction is unclear, ask before
+previewing instead of silently expanding the workflow's interface.
+
+Treat opaque external identifiers and fixture selectors as ephemeral unless the user explicitly says they are stable: spreadsheet/document/message/event IDs, run tags, tag-scoped queries, generated filenames, timestamps such as `as_of`, and values returned by an API. Declare these as required parameters or derive them from an earlier step; **never copy their captured value into `manifest.md`, `types.ts`, helper modules, or runtime step files.** If an explicit contract omits a required ephemeral value that cannot be derived, ask the user to expand the contract; do not add it silently. When no explicit contract exists, genuine caller preferences such as a locale or `dry_run` choice may have defaults.
+
+Before previewing, compare the manifest parameter names with any explicit input
+contract. They must match exactly unless the user approved a contract change.
 
 ### Step 4: Decompose into steps with a kind per step
 
@@ -141,12 +158,54 @@ Rules that matter:
 - **Prefer `cli` and `mcp_tool` over `code` when you can.** They reuse tools the user already has installed and authenticated.
 - **Google Workspace goes through the `gws` CLI — enforce this as a pre-write lint, not a preference.** Before writing any step file, scan your draft decomposition: **if a step calls an MCP tool against a Google Drive / Gmail / Sheets / Calendar / Docs server, rewrite it as a `gws` `cli` step first.** The pull of the source conversation is strong (it probably used the MCP tool) and `cori check` will happily pass the MCP version — which then fails at run time on the worker unless that server is declared in `~/.cori/mcp-servers.json`. The `gws` path avoids that whole class of failure, and it's usually *simpler*: the Sheets API returns value arrays directly, which in a real field session deleted an entire download-and-parse step. Subcommands mirror the Google APIs (e.g. `gws sheets spreadsheets values get …`), so translating is mechanical. Declare `tools_required: [gws]` as usual; see `references/example_workflow.md` for real `gws` steps.
 - **A `cli` command's first argv element must be the real, statically named executable.** It is the capability Cori discovers, validates, and spawns. Do not use generic dispatchers such as `env`, `sh`, `bash`, or `xargs` to launch a dynamic executable path. If a prior step creates a runtime-specific interpreter or executable, keep a stable declared tool as argv[0] and use a small argument-safe wrapper; see `references/activity_kinds.md`.
+- **GWS is always invoked directly.** Every Google Workspace CLI activity must return an argv beginning with the literal `"gws"`. Never invoke `gws` through Deno, Node, Python, a shell, or another wrapper. Before previewing, verify every literal GWS method with `gws schema <service.resource.method> --resolve-refs` and inspect method help when flags are uncertain.
+- **Gmail raw messages use real RFC line breaks.** When a GWS step creates a Gmail draft or message through `message.raw`, assemble headers and body with `"\r\n"` in TypeScript source and include `"\r\n\r\n"` between them. Never use `"\\r\\n"`: that emits literal backslash characters, folds the payload into a malformed header, and can fail with `Invalid To header`. Use the UTF-8-safe Base64url pattern and malformed-header guard in `references/activity_kinds.md`.
+- **A `cli` `parse` callback never receives workflow state.** Its signature is
+  `parse(stdout, { stderr, exitCode })`. Derive output only from CLI stdout or
+  return a fixed acknowledgement. If later steps need a value already present
+  in the command input, keep using its existing flat-state key; do not try to
+  re-emit it from `parse`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.
 - **Pick `llm` models from a provider the machine is actually signed into.** Before writing an `llm` step, run `cori status` (or the MCP `status` tool) and read the capabilities list: choose a model id from a family showing `authed: true`. Never default to a habitual model id — a step targeting an unauthenticated provider is the single most common reason `cori check` comes back not-ready, and swapping the `model` field yourself is a one-line fix, whereas asking the user to `cori login` a whole new provider is a much bigger ask. Record in `## Notes` which provider the step was validated against.
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
+
+#### Execution dataflow contract
+
+Cori passes one flat state object through the numbered steps. Design every
+schema and output around these exact rules:
+
+- State begins with the manifest parameters as top-level keys.
+- After a successful step, an object output is shallow-merged into that same
+  flat object. Outputs are not nested under the step name.
+- A duplicate top-level output key overwrites the value produced earlier.
+- Every required key in a step's `input` schema must exactly match a manifest
+  parameter or a top-level key produced by an earlier step.
+- Every value discovered at runtime — record IDs, resource contents, classifications,
+  counts, summaries — must reach its consumer through this state. A read/query step
+  whose output is ignored is not a valid substitute for hardcoded captured data.
+- Preserve multiple records and side-effect IDs in arrays or under unique
+  wrapper keys. Never emit repeated generic keys such as `message`, `id`, or
+  `label_id` when later steps need more than one of those values.
+
+Runtime Zod parsing is the enforcement boundary: declared input schemas parse
+before a callback or external side effect, and declared output schemas parse
+before a successful result returns. Object parsing applies Zod's unknown-key
+policy, defaults, and transforms. Schemas remain optional only for compatibility
+with older workflows; every newly captured step should declare both.
+
+For support-inbox workflows, fetched messages and created label IDs must remain
+uniquely addressable from later steps. Use a `messages` array, a
+`label_ids_by_message` array/map, or explicit unique wrapper keys; do not let
+successive fetch/create steps overwrite a shared `message` or `label_id` key.
+Never copy captured message IDs, subjects, senders, timestamps, classifications,
+summaries, or counts into runtime source. If v1's missing `for_each` requires a
+fixed-cardinality layout, add a pure `code` step that validates the expected
+cardinality and expands runtime-derived IDs into unique keys, then use explicit
+GWS lanes. If the cardinality is not fixed by the task contract, stop and explain
+that the workflow cannot yet be captured safely.
 
 **Pre-write lint — run this checklist on every step of your draft decomposition, before Step 5. Answer each item explicitly; do not skip it because the decomposition "looks done":**
 
@@ -183,6 +242,11 @@ Create the directory layout. Use the `@cori-do/sdk` templates from [`references/
 - Default-exports the `step.<kind>({…})` call
 
 Capture real I/O from the conversation as fixtures under `tests/fixtures/`. For `code` activities, generate a `Deno.test` unit test that pins the expected output. Users who want to verify before running can `deno task test` inside the workflow directory. This is the trust layer for whoever reviews the workflow later.
+
+Captured records belong only in `tests/fixtures/`; runtime modules must consume
+parameters and earlier outputs. Tests must exercise a step or shared pure helper
+against a fixture. Do not generate tautologies such as comparing a literal array
+with the same literal array.
 
 **Write a `deno.json` at the workflow root** so the `@cori-do/sdk` and `zod` imports in every step and test resolve — the same way the runtime resolves them. The SDK and zod are published on the public npm registry; the import map points at them with `npm:` specifiers, exactly mirroring the runtime's own import map. No `npm install`, no `node_modules` — Deno fetches and caches on first run. Template:
 
@@ -273,7 +337,16 @@ If they say edit, ask what to change, re-show, re-ask. If they say yes, write th
 cori check <chosen_path>
 ```
 
-`cori check` parses the manifest, statically analyses every step file, validates that declared `tools_required` / `mcp_servers` match actual usage, and runs preflight. It does **not** execute. Surface any errors back to the user in plain language — don't just dump raw `cori` output. If validation fails, offer to fix.
+`cori check` validates the manifest and static capability declarations, statically parses and type-checks every workflow module with Deno, then runs capability/preflight checks. It does **not** execute step callbacks, execute Zod schemas against runtime values, or perform cross-step dataflow analysis. Runtime schema enforcement fails safely at the first consuming activity. Surface any check errors back to the user in plain language — don't just dump raw `cori` output. If validation fails, offer to fix.
+
+Before asking for approval, build a short inventory of captured run-scoped
+literals (resource/record IDs, run tags, tag-scoped queries, timestamps) and
+search for each across `manifest.md` and every non-test runtime source file.
+Any match is a capture bug unless the user explicitly designated that value as
+stable. Also compare the manifest parameter set with any explicit `Parameters`,
+`Inputs`, or run-arguments list from the conversation; fixed task requirements
+must not appear as extra parameters. Verify that every read/query output needed
+by the procedure is consumed by a later step.
 
 ### Step 8: Confirm and suggest next action
 
@@ -285,7 +358,7 @@ Don't auto-run. Saving and running are separate decisions.
 
 **If the user does run it and it succeeds, close the loop in `## Notes`:** record the validation date, the model/provider that actually ran, and any dead ends hit on the way there (e.g. "first tried `gpt-4o-mini`; openai isn't authed on this machine — validated with anthropic instead"). A workflow whose Notes say when and with what it last worked is trustworthy to the next person — or the next agent session — that picks it up.
 
-Before reporting success, inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, that exact name must appear in `tools_required`, and it must not be a generic dispatcher used to hide a second command. Syntax-check any inline interpreter snippet after assembling it, because `cori check` validates the workflow shape but does not execute or parse embedded programs. Also re-scan for `mcp_tool` steps targeting Google Workspace servers — if `cori check` printed a warning about one, treat it as a review-gate item, not as noise: propose the `gws` rewrite to the user before shipping.
+Before reporting success, repeat the run-scoped-literal and dataflow audit. Inspect every generated `cli` step once more: argv[0] must be a string literal naming the actual executable, the set of those literal executables must exactly match `tools_required`, and no interpreter or dispatcher may hide a second declared command. For GWS, every argv[0] is `"gws"`. In Gmail draft/message steps, reject `"\\r\\n"` source joins and confirm the raw message builder uses real `"\r\n"` separators plus the guard from `references/activity_kinds.md`. Syntax-check any inline interpreter snippet after assembling it, because `cori check` parses the TypeScript module but cannot parse a Python or shell program stored inside a string. Also re-scan for `mcp_tool` steps targeting Google Workspace servers — if `cori check` printed a warning about one, treat it as a review-gate item, not as noise: propose the `gws` rewrite to the user before shipping.
 
 ---
 

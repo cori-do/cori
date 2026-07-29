@@ -57,6 +57,7 @@ async fn runs_a_trivial_builtin_workflow() {
             activity_id: "step-1".to_string(),
             index: 0,
             source_path: String::new(),
+            source_sha256: None,
             kind: StepKind::Builtin,
             name: "noop".to_string(),
             description: String::new(),
@@ -82,6 +83,7 @@ async fn runs_a_trivial_builtin_workflow() {
         // Empty → activity falls back to BrokerCtx::source_root, which
         // the smoke test sets up directly.
         source_root: String::new(),
+        source_bundle: None,
     };
 
     let out = run_workflow_once(&rt, "cori-smoke".to_string(), input)

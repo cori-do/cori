@@ -11,6 +11,59 @@ use serde::{Deserialize, Serialize};
 
 pub use cori_manifest::Manifest;
 
+/// Resource bounds applied before untrusted workflow trees are compiled or
+/// transported. Keeping these limits in the shared protocol prevents the
+/// compiler and cross-machine bundle path from accepting different inputs.
+pub const MAX_WORKFLOW_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_WORKFLOW_SOURCE_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_WORKFLOW_SOURCE_FILES: usize = 512;
+pub const MAX_WORKFLOW_SOURCE_PATH_BYTES: usize = 240;
+pub const MAX_WORKFLOW_SOURCE_PATH_DEPTH: usize = 32;
+/// Explicit retry overrides are bounded so Temporal's `0 == unlimited`
+/// sentinel and integer conversion cannot create an unbounded activity.
+pub const MAX_ACTIVITY_ATTEMPTS: u32 = 10;
+pub const MAX_ACTIVITY_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
+/// Apply the shared retry bound used by workflow dispatch and source-history
+/// projection. Invalid legacy values fall back to the kind's safe default.
+pub fn bounded_activity_attempts(configured: Option<u64>, default: u32) -> u32 {
+    configured
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (1..=MAX_ACTIVITY_ATTEMPTS).contains(value))
+        .unwrap_or_else(|| default.clamp(1, MAX_ACTIVITY_ATTEMPTS))
+}
+
+pub fn bounded_activity_timeout_ms(configured: Option<u64>, default: u64) -> u64 {
+    configured
+        .filter(|value| (1..=MAX_ACTIVITY_TIMEOUT_MS).contains(value))
+        .unwrap_or_else(|| default.clamp(1, MAX_ACTIVITY_TIMEOUT_MS))
+}
+
+/// Return whether a workflow path component looks like a credential file.
+///
+/// Workflow source is frozen into Cori's cache and may be transported in
+/// Temporal history, so this check must run before either persistence path.
+pub fn workflow_source_component_looks_sensitive(component: &str) -> bool {
+    let name = component.to_ascii_lowercase();
+    name == ".env"
+        || name.starts_with(".env.")
+        || matches!(
+            name.as_str(),
+            ".npmrc"
+                | ".netrc"
+                | ".authinfo"
+                | ".git-credentials"
+                | "credentials.json"
+                | "secrets.json"
+                | "id_rsa"
+                | "id_ed25519"
+        )
+        || name.starts_with("client_secret")
+        || [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
 /// Closed set of step kinds. Mirrors the SDK's `StepKind`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +87,30 @@ pub struct RetryPolicy {
 pub enum BackoffKind {
     Exponential,
     Linear,
+}
+
+/// Immutable workflow source transported through Temporal for activity runs.
+/// Task queues have no host affinity, so even the triggering identity's queue
+/// may dispatch to a worker that cannot resolve the trigger's local path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceBundle {
+    pub format_version: u32,
+    pub encoding: SourceBundleEncoding,
+    /// Full SHA-256 of the logical workflow tree.
+    pub content_sha256: String,
+    /// Full SHA-256 of the compressed archive bytes.
+    pub archive_sha256: String,
+    pub file_count: u32,
+    pub uncompressed_bytes: u64,
+    /// Base64-encoded deterministic tar+gzip bytes. Base64 keeps Temporal's
+    /// JSON converter from expanding each byte into a JSON number.
+    pub archive_b64: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceBundleEncoding {
+    TarGzipBase64,
 }
 
 impl Default for RetryPolicy {
@@ -72,6 +149,13 @@ pub struct CompiledStep {
     pub index: u32,
     /// Filename relative to the workflow root (e.g. `steps/01_read.ts`).
     pub source_path: String,
+    /// SHA-256 of the exact step source compiled into this DAG. Activities
+    /// use this frozen digest to reject source drift before dispatch.
+    ///
+    /// `None` is retained only for compatibility with workflows started by
+    /// Cori versions that predate source-boundary enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
     pub kind: StepKind,
     pub name: String,
     pub description: String,
@@ -99,10 +183,10 @@ pub struct CompiledStep {
 pub struct CompiledWorkflow {
     pub manifest: Manifest,
     pub steps: Vec<CompiledStep>,
-    /// CLI binary names referenced anywhere in the steps. Subset of
+    /// CLI binary names referenced anywhere in the steps. Exactly matches
     /// `manifest.tools_required` after validation.
     pub required_cli_binaries: Vec<String>,
-    /// MCP server names referenced anywhere in the steps. Subset of
+    /// MCP server names referenced anywhere in the steps. Exactly matches
     /// `manifest.mcp_servers` after validation.
     pub required_mcp_servers: Vec<String>,
     /// LLM providers (`openai` / `anthropic` / `gemini`) referenced by
@@ -238,6 +322,22 @@ mod tests {
         assert!(WorkerIdentity::person("j.ean").is_err());
         assert!(WorkerIdentity::person("").is_err());
         assert!(WorkerIdentity::person("ok-name_2").is_ok());
+    }
+
+    #[test]
+    fn activity_attempts_never_use_temporals_unlimited_zero() {
+        assert_eq!(bounded_activity_attempts(Some(0), 3), 3);
+        assert_eq!(
+            bounded_activity_attempts(Some(u64::from(MAX_ACTIVITY_ATTEMPTS) + 1), 3),
+            3
+        );
+        assert_eq!(bounded_activity_attempts(Some(5), 3), 5);
+        assert_eq!(bounded_activity_timeout_ms(Some(0), 30_000), 30_000);
+        assert_eq!(
+            bounded_activity_timeout_ms(Some(MAX_ACTIVITY_TIMEOUT_MS + 1), 30_000),
+            30_000
+        );
+        assert_eq!(bounded_activity_timeout_ms(Some(2500), 30_000), 2500);
     }
 
     #[test]

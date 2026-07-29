@@ -21,7 +21,7 @@ use tracing::debug;
 
 use crate::BrokerError;
 use crate::process::hide_console_window;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, apply_module_resolution_flags};
 
 pub const ENVELOPE_PREFIX: &str = "\u{001E}CORI_RUNNER\u{001E}";
 
@@ -42,6 +42,8 @@ pub enum RunnerMode {
     McpArgs,
     LlmPrompt,
     LlmStub,
+    OutputStub,
+    ValidateOutput,
 }
 
 impl RunnerMode {
@@ -53,6 +55,8 @@ impl RunnerMode {
             RunnerMode::McpArgs => "mcp_args",
             RunnerMode::LlmPrompt => "llm_prompt",
             RunnerMode::LlmStub => "llm_stub",
+            RunnerMode::OutputStub => "output_stub",
+            RunnerMode::ValidateOutput => "validate_output",
         }
     }
 }
@@ -69,6 +73,8 @@ struct EnvelopeError {
     message: String,
     #[serde(default)]
     stack: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// Invoke the runner. `payload` is written verbatim to stdin (it should
@@ -94,10 +100,24 @@ pub fn invoke(
     cmd.arg("run")
         .arg("--quiet")
         .arg("--no-prompt")
-        .arg("--sloppy-imports")
-        .arg("--allow-read")
-        .arg("--allow-env")
-        .arg("--allow-net=registry.npmjs.org,esm.sh,jsr.io")
+        .arg("--cached-only");
+    apply_module_resolution_flags(&mut cmd);
+    let step_parent = step_file_path.parent().unwrap_or_else(|| Path::new("."));
+    let workflow_root = if step_parent.file_name().and_then(|name| name.to_str()) == Some("steps") {
+        step_parent.parent().unwrap_or(step_parent)
+    } else {
+        step_parent
+    };
+    let runtime_root = runtime
+        .config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    cmd.arg(format!("--allow-read={}", workflow_root.display()))
+        .arg(format!("--allow-read={}", runtime_root.display()))
+        .arg("--no-remote")
+        .arg("--lock")
+        .arg(&runtime.lock_path)
+        .arg("--frozen")
         .arg("--config")
         .arg(&runtime.config_path)
         .arg(&runtime.runner_script)
@@ -129,21 +149,36 @@ pub fn invoke(
         }
     };
 
+    let output = decode_envelope(envelope_json)?;
+    Ok(RunnerCall {
+        output,
+        duration,
+        stderr,
+    })
+}
+
+fn decode_envelope(envelope_json: &str) -> crate::Result<JsonValue> {
     let parsed: Envelope =
         serde_json::from_str(envelope_json).map_err(|e| BrokerError::BadEnvelope {
             envelope: envelope_json.to_string(),
             source: e,
         })?;
-
     match parsed {
-        Envelope::Ok { ok: true, output } => Ok(RunnerCall {
-            output,
-            duration,
-            stderr,
-        }),
+        Envelope::Ok { ok: true, output } => Ok(output),
         Envelope::Err {
             ok: false,
-            error: EnvelopeError { message, stack },
+            error:
+                EnvelopeError {
+                    message,
+                    stack,
+                    code,
+                },
+        } if code.as_deref() == Some("schema_validation") => {
+            Err(BrokerError::SchemaValidation { message, stack })
+        }
+        Envelope::Err {
+            ok: false,
+            error: EnvelopeError { message, stack, .. },
         } => Err(BrokerError::StepFailed { message, stack }),
         Envelope::Ok { ok: false, .. } | Envelope::Err { ok: true, .. } => {
             Err(BrokerError::BadEnvelope {
@@ -165,6 +200,22 @@ pub fn invoke_with_input(
     input: &JsonValue,
 ) -> crate::Result<RunnerCall> {
     invoke(runtime, step_file_path, mode, &json!({ "input": input }))
+}
+
+/// Validate and parse an external activity result through the step's optional
+/// output schema. This is used after MCP and LLM calls, whose result is not
+/// produced inside the Deno runner itself.
+pub fn invoke_validate_output(
+    runtime: &Runtime,
+    step_file_path: &Path,
+    output: &JsonValue,
+) -> crate::Result<RunnerCall> {
+    invoke(
+        runtime,
+        step_file_path,
+        RunnerMode::ValidateOutput,
+        &json!({ "output": output }),
+    )
 }
 
 /// Find the last `ENVELOPE_PREFIX`-marked line in the runner's stdout and
@@ -204,5 +255,18 @@ mod tests {
              {ENVELOPE_PREFIX}{{\"ok\":true,\"output\":2}}\n"
         );
         assert_eq!(extract_envelope(&s), Some("{\"ok\":true,\"output\":2}"));
+    }
+
+    #[test]
+    fn schema_error_envelope_maps_to_schema_validation() {
+        let error = decode_envelope(
+            r#"{"ok":false,"error":{"code":"schema_validation","message":"input schema validation failed:\n- input.messages[0].id: required"}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BrokerError::SchemaValidation { message, .. }
+                if message.contains("input.messages[0].id")
+        ));
     }
 }

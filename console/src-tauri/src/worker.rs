@@ -9,10 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::LlmOptions;
-use cori_broker::{TriggerContext, runtime as broker_runtime};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 use cori_run::{paths, planner, runtime as cli_runtime};
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
@@ -68,13 +68,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
         info!(path = %deno.display(), "using bundled deno sidecar");
     }
 
-    let runtime_root = paths::runtime_dir()?;
-    let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
-        anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
-             export CORI_DENO=$(which deno)"
-        )
-    })?;
+    let runtime = cli_runtime::resolve()?;
 
     let credentials = cori_run::resolve_llm_credentials();
     let home = paths::home()?;
@@ -91,6 +85,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
         caps: caps.clone(),
         llm_opts,
         source_root: cwd,
+        source_cache_dir: paths::source_cache_dir()?,
         credentials_dir: paths::credentials_dir()?,
     };
     let _ = set_broker_ctx(broker_ctx);

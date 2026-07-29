@@ -180,6 +180,11 @@ pub fn parse_remote_ref(arg: &str) -> Result<RemoteRef> {
     }
 
     let (repo, subpath, explicit_split) = split_repo_subpath(&path)?;
+    validate_remote_path("repository", &repo, false)?;
+    if repo.split('/').count() < 2 {
+        bail!("repository `{repo}` must include both an owner and repository name");
+    }
+    validate_remote_path("workflow subpath", &subpath, true)?;
 
     let kind = classify_ref(&ref_str);
 
@@ -243,7 +248,7 @@ fn split_repo_subpath(path: &str) -> Result<(String, String, bool)> {
     if let Some((repo, sub)) = path.split_once("//") {
         return Ok((repo.to_string(), sub.to_string(), true));
     }
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = path.split('/').collect();
     if parts.len() < 2 {
         bail!("`{path}` is not a recognised git path (expected `owner/repo[/subpath]`)");
     }
@@ -254,6 +259,32 @@ fn split_repo_subpath(path: &str) -> Result<(String, String, bool)> {
         String::new()
     };
     Ok((repo, subpath, false))
+}
+
+fn validate_remote_path(label: &str, value: &str, allow_empty: bool) -> Result<()> {
+    if value.is_empty() {
+        if allow_empty {
+            return Ok(());
+        }
+        bail!("{label} cannot be empty");
+    }
+    if value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        bail!("{label} `{value}` must use non-empty relative path components");
+    }
+    for component in value.split('/') {
+        if component.is_empty()
+            || matches!(component, "." | "..")
+            || component.contains('\\')
+            || component
+                .chars()
+                .any(|character| character.is_control() || character == '\0')
+        {
+            bail!(
+                "{label} `{value}` contains unsafe path component `{component}`; remote paths must be relative and cannot contain `.`, `..`, backslashes, or control characters"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Classify what kind of ref the user typed. See §2.3.
@@ -433,6 +464,22 @@ mod tests {
     #[test]
     fn rejects_unrecognised_arg() {
         assert!(parse_remote_ref("nothost").is_err());
+    }
+
+    #[test]
+    fn rejects_remote_repo_and_subpath_traversal() {
+        for reference in [
+            "github.com/org/repo//../secret@main",
+            "github.com/org/repo/../../secret@main",
+            "github.com/org/../repo@main",
+            "github.com/org//repo@main",
+            "github.com/org/repo//nested\\escape@main",
+        ] {
+            assert!(
+                parse_remote_ref(reference).is_err(),
+                "unsafe remote path accepted: {reference}"
+            );
+        }
     }
 
     #[test]

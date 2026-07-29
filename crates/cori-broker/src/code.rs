@@ -23,5 +23,6 @@ pub fn run(runtime: &Runtime, step_file_path: &Path, input: &JsonValue) -> Resul
         stderr: call.stderr,
         cost_eur: None,
         usage: None,
+        notes: Vec::new(),
     })
 }

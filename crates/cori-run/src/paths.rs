@@ -28,6 +28,12 @@ pub fn cache_dir() -> Result<PathBuf> {
     Ok(home()?.join("cache"))
 }
 
+/// Content-addressed workflow source snapshots materialized for activity
+/// execution, including bundles received from another machine.
+pub fn source_cache_dir() -> Result<PathBuf> {
+    Ok(cache_dir()?.join("sources"))
+}
+
 pub fn runs_dir() -> Result<PathBuf> {
     Ok(home()?.join("runs"))
 }
