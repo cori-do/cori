@@ -262,7 +262,9 @@ fn login_llm_provider(provider: &'static str, stdin_key: bool) -> Result<()> {
     if store.uses_keychain() {
         println!("✓ Stored {provider} API key in the OS keychain.");
     } else {
-        println!("✓ Stored {provider} API key in ~/.cori/credentials (no keychain on this machine; file is 0600).");
+        println!(
+            "✓ Stored {provider} API key in ~/.cori/credentials (no keychain on this machine; file is 0600)."
+        );
     }
     println!("  (To override per shell, export the matching env var instead.)");
     notify_open_workflows(provider);

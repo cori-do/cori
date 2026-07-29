@@ -722,12 +722,18 @@ pub fn persist_trace(
 pub fn resolve_llm_credentials() -> LlmCredentials {
     let mut from_store = LlmCredentials::default();
     if let Ok(store) = cori_secrets::SecretStore::open_default() {
-        from_store.openai_api_key = store.get(&cori_secrets::llm_account("openai")).ok().flatten();
+        from_store.openai_api_key = store
+            .get(&cori_secrets::llm_account("openai"))
+            .ok()
+            .flatten();
         from_store.anthropic_api_key = store
             .get(&cori_secrets::llm_account("anthropic"))
             .ok()
             .flatten();
-        from_store.gemini_api_key = store.get(&cori_secrets::llm_account("gemini")).ok().flatten();
+        from_store.gemini_api_key = store
+            .get(&cori_secrets::llm_account("gemini"))
+            .ok()
+            .flatten();
     }
     LlmCredentials::from_env().or_fill_from(&from_store)
 }
