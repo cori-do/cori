@@ -6,6 +6,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { MiddleTruncate } from "../components/middle-truncate";
 import { ThemeIconButton } from "../components/theme-icon-button";
 import {
+  WorkflowPane,
+  type WorkflowPaneHandle,
+} from "../components/workflow-pane";
+import {
   decideApproval,
   getCliInstallStatus,
   getLastLocalDir,
@@ -35,7 +39,7 @@ import {
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
 import { formatRelative } from "../lib/format";
-import { openLaunch, openManage, openRun } from "../lib/windows";
+import { openManage, openRun } from "../lib/windows";
 
 export function meta() {
   return [{ title: "Cori" }];
@@ -97,7 +101,11 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   const [stack, setStack] = useState<StackStatus | undefined>(undefined);
   const [ctx, setCtx] = useState<LauncherContext>({ kind: "recents" });
   const [dragOver, setDragOver] = useState(false);
+  // The workflow filling the right pane. Picking one on the left sets
+  // this; nothing about it opens a window.
+  const [picked, setPicked] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const paneRef = useRef<WorkflowPaneHandle>(null);
   // Bumped on every async context-entry request; only the latest
   // response is applied (older ones land in the background but are
   // discarded). Avoids the user-typed-faster race.
@@ -334,7 +342,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           const peek = await peekSource(path);
           if (peek.kind === "local" && peek.local_exists) {
             if (peek.is_workflow_dir) {
-              void openLaunch(peek.normalized);
+              setPicked(peek.normalized);
             } else {
               enterLocalContext(peek.normalized);
             }
@@ -429,16 +437,17 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     });
   }
 
+  /** Fill the right pane with a workflow. Folders drill in instead. */
   function activateItem(item: ListedItem) {
     if (item.kind === "recent") {
       const src = sourceToCli(item.recent.source);
-      if (src) void openLaunch(src);
+      if (src) setPicked(src);
       return;
     }
     if (item.kind === "dir-entry") {
       const e = item.entry;
       if (e.kind === "workflow") {
-        void openLaunch(e.path);
+        setPicked(e.path);
         return;
       }
       if (e.kind === "dir") {
@@ -449,9 +458,18 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       return;
     }
     if (item.kind === "remote-entry") {
-      void openLaunch(buildRemoteSource(item.listing, item.entry));
+      setPicked(buildRemoteSource(item.listing, item.entry));
       return;
     }
+  }
+
+  /** The source string the highlighted row would put in the pane, if any. */
+  function sourceOf(item: ListedItem | undefined): string | null {
+    if (!item) return null;
+    if (item.kind === "recent") return sourceToCli(item.recent.source);
+    if (item.kind === "dir-entry")
+      return item.entry.kind === "workflow" ? item.entry.path : null;
+    return buildRemoteSource(item.listing, item.entry);
   }
 
   function handleEnter() {
@@ -465,21 +483,29 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       }
       if (peek.kind === "remote") {
         if (remoteRefHasSubpath(peek.normalized)) {
-          // Phase 3: a subpath-bearing ref names a specific workflow —
-          // open the launch screen directly; the launch window's
-          // `resolve_workflow` will surface consent or capability gaps.
-          void openLaunch(peek.normalized);
+          // A subpath-bearing ref names a specific workflow — put it
+          // straight in the pane, which surfaces consent or capability
+          // gaps as it resolves.
+          setPicked(peek.normalized);
           return;
         }
-        // Phase 4: bare `host/owner/repo[@ref]` — list workflows in
-        // the repo so the user can pick a subpath.
+        // Bare `host/owner/repo[@ref]` — list the repo's workflows so
+        // the user can pick a subpath.
         enterRemoteContext(peek.normalized);
         return;
       }
     }
 
     const item = items[selIndex];
-    if (item) activateItem(item);
+    if (!item) return;
+
+    // Open it. Press run. The second Enter on a workflow already in the
+    // pane starts it, rather than resolving the same source again.
+    if (sourceOf(item) === picked && paneRef.current?.canRun()) {
+      paneRef.current.run();
+      return;
+    }
+    activateItem(item);
   }
 
   function handleArrowRight() {
@@ -541,11 +567,12 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           src="/cori-mark.png"
           alt=""
           className="launcher-mark"
-          width={22}
-          height={22}
+          width={18}
+          height={18}
         />
-        <div className="launcher-title">Cori</div>
+        <div className="launcher-title">cori</div>
         <div className="launcher-head-spacer" />
+        <EngineBadge stack={stack} status={status} />
         <ThemeIconButton />
       </header>
 
@@ -567,31 +594,42 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         }}
       />
 
-      <Breadcrumb
-        context={ctx}
-        onPop={popContext}
-        onRefresh={
-          ctx.kind === "remote"
-            ? () => enterRemoteContext(ctx.refStr, true)
-            : undefined
-        }
-      />
+      {/* Your workflows on the left, the one you picked on the right. */}
+      <div className="launcher-panes">
+        <div className="launcher-list">
+          <Breadcrumb
+            context={ctx}
+            onPop={popContext}
+            onRefresh={
+              ctx.kind === "remote"
+                ? () => enterRemoteContext(ctx.refStr, true)
+                : undefined
+            }
+          />
 
-      <ResultsPane
-        ctx={ctx}
-        items={items}
-        selectedIndex={selIndex}
-        onSelect={(i) => {
-          setSelIndex(i);
-          activateItem(items[i]);
-        }}
-        onHover={setSelIndex}
-        inputIsEmpty={input.length === 0}
-        recentsCount={recents.length}
-      />
+          <ResultsPane
+            ctx={ctx}
+            items={items}
+            selectedIndex={selIndex}
+            pickedSource={picked}
+            sourceOf={sourceOf}
+            onSelect={(i) => {
+              setSelIndex(i);
+              activateItem(items[i]);
+            }}
+            onHover={setSelIndex}
+            inputIsEmpty={input.length === 0}
+            recentsCount={recents.length}
+          />
+        </div>
+
+        <div className="launcher-detail">
+          <WorkflowPane source={picked} handleRef={paneRef} />
+        </div>
+      </div>
 
       <footer className="launcher-foot">
-        <StackBadge stack={stack} status={status} />
+        <MachineFacts status={status} />
         <div className="launcher-foot-actions">
           <CliInstallAction />
           <button
@@ -785,6 +823,14 @@ interface SearchBarProps {
   onBrowse: () => void;
 }
 
+/** ⌘ on Apple hardware, Ctrl everywhere else — the same key the global
+ *  handler above listens for. Read once: it cannot change at runtime. */
+const FOCUS_KEY_HINT = /Mac|iPhone|iPad/.test(
+  typeof navigator === "undefined" ? "" : navigator.userAgent,
+)
+  ? "⌘L"
+  : "^L";
+
 function SearchBar({
   value,
   onChange,
@@ -796,20 +842,27 @@ function SearchBar({
 }: SearchBarProps) {
   return (
     <div className="search-bar">
-      <input
-        ref={inputRef}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder={placeholder}
-        aria-label="Search workflows or paste a path / ref"
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        autoFocus
-      />
-      {value.length > 0 && <Chip peek={peek} />}
+      {/* One recessed pill holds the shortcut, the input and the chip, so
+          the bar reads as a single control rather than three. */}
+      <div className="search-bar-field">
+        <span className="search-bar-key" aria-hidden>
+          {FOCUS_KEY_HINT}
+        </span>
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          aria-label="Search workflows or paste a path / ref"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoFocus
+        />
+        {value.length > 0 && <Chip peek={peek} />}
+      </div>
       <button
         type="button"
         className="search-bar-browse"
@@ -840,7 +893,7 @@ function Chip({ peek }: { peek: PeekResult | null }) {
   }
   return (
     <span className="search-bar-chip remote" title={peek.normalized}>
-      <span style={{ marginRight: 6 }}>remote</span>
+      <span>remote</span>
       <MiddleTruncate
         text={peek.normalized}
         tail={Math.min(20, Math.floor(peek.normalized.length / 2))}
@@ -950,6 +1003,9 @@ interface ResultsPaneProps {
   ctx: LauncherContext;
   items: ListedItem[];
   selectedIndex: number;
+  /** Source currently filling the right pane, so its row can say so. */
+  pickedSource: string | null;
+  sourceOf: (item: ListedItem | undefined) => string | null;
   onSelect: (index: number) => void;
   onHover: (index: number) => void;
   inputIsEmpty: boolean;
@@ -960,6 +1016,8 @@ function ResultsPane({
   ctx,
   items,
   selectedIndex,
+  pickedSource,
+  sourceOf,
   onSelect,
   onHover,
   inputIsEmpty,
@@ -1060,6 +1118,7 @@ function ResultsPane({
           key={item.key}
           item={item}
           selected={i === selectedIndex}
+          open={pickedSource != null && sourceOf(item) === pickedSource}
           onClick={() => onSelect(i)}
           onHover={() => onHover(i)}
           buttonRef={(el) => {
@@ -1074,6 +1133,8 @@ function ResultsPane({
 interface ItemRowProps {
   item: ListedItem;
   selected: boolean;
+  /** This row's workflow is the one currently in the right pane. */
+  open: boolean;
   onClick: () => void;
   onHover: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
@@ -1092,6 +1153,7 @@ function ItemRow(props: ItemRowProps) {
 function RecentRow({
   item,
   selected,
+  open,
   onClick,
   onHover,
   buttonRef,
@@ -1105,7 +1167,7 @@ function RecentRow({
     <button
       type="button"
       ref={buttonRef}
-      className={`result-row${selected ? " is-selected" : ""}`}
+      className={rowClass(selected, open)}
       onClick={onClick}
       onMouseEnter={onHover}
       disabled={disabled}
@@ -1114,7 +1176,7 @@ function RecentRow({
       title={
         disabled
           ? "Older run — no recoverable source on disk"
-          : `${displayName} — open launch screen`
+          : `${displayName} — open in the pane`
       }
     >
       <span className="result-row-icon" aria-hidden>
@@ -1127,10 +1189,18 @@ function RecentRow({
             {r.last_status}
           </span>
           <span>{formatRelative(r.last_run_at)}</span>
+          {/* Where it came from, pushed to the far edge. A repo you
+              pulled it from is the one thing on the row worth a colour;
+              a path on your own disk is just where the folder is. */}
           {sourceLabel && (
             <MiddleTruncate
               text={sourceLabel}
               tail={Math.min(22, Math.floor(sourceLabel.length / 2))}
+              className={
+                r.source?.kind === "remote"
+                  ? "result-row-source is-remote"
+                  : "result-row-source"
+              }
             />
           )}
         </div>
@@ -1142,6 +1212,7 @@ function RecentRow({
 function DirEntryRow({
   item,
   selected,
+  open,
   onClick,
   onHover,
   buttonRef,
@@ -1152,7 +1223,7 @@ function DirEntryRow({
   const disabled = e.kind === "file";
   const subtitle =
     e.kind === "workflow"
-      ? "workflow · open launch screen"
+      ? "workflow · open"
       : e.kind === "dir"
         ? "folder · open"
         : e.symlink
@@ -1162,7 +1233,7 @@ function DirEntryRow({
     <button
       type="button"
       ref={buttonRef}
-      className={`result-row${selected ? " is-selected" : ""}`}
+      className={rowClass(selected, open)}
       onClick={onClick}
       onMouseEnter={onHover}
       disabled={disabled}
@@ -1204,6 +1275,7 @@ function remoteRefHasSubpath(normalized: string): boolean {
 function RemoteEntryRow({
   item,
   selected,
+  open,
   onClick,
   onHover,
   buttonRef,
@@ -1214,7 +1286,7 @@ function RemoteEntryRow({
     <button
       type="button"
       ref={buttonRef}
-      className={`result-row${selected ? " is-selected" : ""}`}
+      className={rowClass(selected, open)}
       onClick={onClick}
       onMouseEnter={onHover}
       role="option"
@@ -1230,6 +1302,7 @@ function RemoteEntryRow({
           <MiddleTruncate
             text={label}
             tail={Math.min(22, Math.floor(label.length / 2))}
+            className="result-row-source is-remote"
           />
         </div>
         {e.description && (
@@ -1503,7 +1576,13 @@ function CliInstallAction() {
 
 // ─── Footer + icons ───────────────────────────────────────────────────────
 
-function StackBadge({
+/**
+ * Engine state, top-right of the chrome bar — a dot and one word, the
+ * same place the site's launcher says "engine ready". Which identity and
+ * which endpoint that engine is are facts, not state, so they live in the
+ * footer strip instead.
+ */
+function EngineBadge({
   stack,
   status,
 }: {
@@ -1515,25 +1594,42 @@ function StackBadge({
     state === "up" ? "dot ok" : state === "down" ? "dot bad" : "dot warn";
   const label =
     state === "up"
-      ? "Ready"
+      ? "engine ready"
       : state === "down"
-        ? "Offline"
+        ? "engine offline"
         : state === "degraded"
-          ? "Degraded"
-          : "Starting…";
-  const identity = identityLabel(status);
+          ? "engine degraded"
+          : "engine starting…";
   const reason =
     stack && (stack.state === "degraded" || stack.state === "down")
       ? stack.reason
       : undefined;
   return (
-    <div className="launcher-status" title={reason}>
+    <span className="engine-badge" title={reason ?? label}>
       <span className={dot} />
-      <span className="launcher-status-text">
-        <span className="launcher-status-state">{label}</span>
-        {identity && (
-          <span className="launcher-status-meta">{identity}</span>
-        )}
+      {label}
+    </span>
+  );
+}
+
+/**
+ * The footer's mono strip: which queue this machine dispatches to, and
+ * which Temporal it talks to. Both are the answer to "where am I", which
+ * is what the site's `~/cori/workflows · main · 2 ahead` answers there.
+ */
+function MachineFacts({ status }: { status: StatusResponse | null }) {
+  if (!status) return null;
+  const identity = identityLabel(status);
+  return (
+    <div className="launcher-foot-facts">
+      <span title={`Task queue: ${status.task_queue}`}>
+        {identity ?? status.task_queue}
+      </span>
+      <span className="sep" aria-hidden>
+        ·
+      </span>
+      <span title={`Temporal endpoint: ${status.endpoint}`}>
+        {status.endpoint}
       </span>
     </div>
   );
@@ -1550,6 +1646,17 @@ function pillFor(status: string): string {
   if (status === "succeeded") return "ok";
   if (status === "failed") return "bad";
   return "muted";
+}
+
+/**
+ * Two different things can be true of a row, so they get two marks:
+ * `is-selected` is where the keyboard is, `is-open` is what the right
+ * pane is showing. Usually the same row — but arrowing down the list
+ * while a run is under way is exactly when they differ, and that is
+ * exactly when the difference matters.
+ */
+function rowClass(selected: boolean, open: boolean): string {
+  return `result-row${selected ? " is-selected" : ""}${open ? " is-open" : ""}`;
 }
 
 function WorkflowIcon() {
