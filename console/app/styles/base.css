@@ -769,7 +769,7 @@ table.runs td strong {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 16rem minmax(0, 1fr);
+  grid-template-columns: 15rem minmax(0, 1fr);
 }
 .launcher-list {
   display: flex;
@@ -798,9 +798,9 @@ table.runs td strong {
 }
 
 /* ─── Launcher: results ──────────────────────────────────────────────
-   The site's workflow list: a dot-sized glyph, a mono name, and — when
-   the workflow came from somewhere else — where, in cyan on the right.
-   The selected row is a raised control, not a coloured banner. */
+   A workflow directory, not a run log. Each row identifies one source
+   with its name and location; status and timing belong to the selected
+   workflow's history in the detail pane. */
 .results {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -906,10 +906,27 @@ table.runs td strong {
   min-width: 0;
 }
 .result-row-meta > * { min-width: 0; }
-/* Where it came from — pushed to the far edge. Only a repo earns the
-   colour; a path on your own disk is just where the folder is. */
+.result-row-location {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.result-row-origin {
+  flex-shrink: 0;
+  color: var(--rule-strong);
+}
+.result-row-origin::after {
+  content: "·";
+  margin-left: 6px;
+}
+/* A repo earns the accent colour; a path on this machine remains quiet. */
 .result-row-source {
-  margin-left: auto;
+  margin-left: 0;
   flex-shrink: 1;
   opacity: 0.85;
 }
@@ -1074,6 +1091,117 @@ table.runs td strong {
   color: var(--accent-2);
   font-variant-numeric: tabular-nums;
 }
+
+.pane-history {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.pane-history-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.pane-history-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.pane-history-list {
+  display: flex;
+  flex-direction: column;
+}
+.pane-history-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 4px;
+  border: none;
+  border-top: 1px solid var(--rule);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.pane-history-row:hover {
+  background: var(--surface-2);
+}
+.pane-history-mark {
+  align-self: start;
+  padding-top: 1px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+}
+.pane-history-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.pane-history-status {
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-history-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-history-meta > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pane-history-duration {
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pane-history-open {
+  color: var(--rule-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.pane-history-row:hover .pane-history-open { color: var(--accent); }
+.pane-history-mark.is-ok,
+.pane-history-status.is-ok { color: var(--green); }
+.pane-history-mark.is-bad,
+.pane-history-status.is-bad { color: var(--red); }
+.pane-history-mark.is-live,
+.pane-history-status.is-live { color: var(--accent); }
+.pane-history-mark.is-muted,
+.pane-history-status.is-muted { color: var(--muted); }
+.pane-history-empty {
+  padding: 11px 4px;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.pane-history-empty.is-error { color: var(--red); }
 
 /* First-run welcome — shown when there are no recents yet. */
 .welcome {

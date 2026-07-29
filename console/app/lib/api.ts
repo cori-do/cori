@@ -212,6 +212,8 @@ export interface ConsentRequired {
 export interface WorkflowPreflight {
   manifest: ManifestSummary;
   content_hash: string;
+  /** Stable run-history directory for this exact local path or remote source. */
+  history_key: string;
   absolute_path: string;
   steps: StepSummary[];
   required_cli_binaries: string[];
@@ -306,7 +308,13 @@ export type StackStatus =
 
 export const getStatus = () => call<StatusResponse>("get_status");
 
-export const listRuns = (args: { workflow_id?: string; limit?: number } = {}) =>
+export const listRuns = (
+  args: {
+    workflow_id?: string;
+    history_key?: string;
+    limit?: number;
+  } = {},
+) =>
   call<RunListEntry[]>("list_runs", args);
 
 export const getRun = (args: { key: string; filename: string }) =>
