@@ -567,7 +567,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     <div className={`launcher${dragOver ? " is-drag-over" : ""}`}>
       <header
         className="launcher-head"
-        data-tauri-drag-region
+        data-tauri-drag-region="deep"
         onDoubleClick={toggleLauncherMaximize}
       >
         <WindowControls />
@@ -578,6 +578,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           className="launcher-mark"
           width={18}
           height={18}
+          draggable={false}
         />
         <div className="launcher-title">cori</div>
         <div className="launcher-head-spacer" />
