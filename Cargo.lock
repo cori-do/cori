@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "cori-broker"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "cori-cli"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "cori-compiler"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "cori-manifest",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "cori-console"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "cori-ledger"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "serde",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "cori-manifest"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "cori-protocol"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "chrono",
  "cori-manifest",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "cori-run"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "cori-secrets"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "chrono",
  "dirs",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "cori-worker"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "async-trait",
