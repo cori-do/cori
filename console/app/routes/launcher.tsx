@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRevalidator } from "react-router";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -215,6 +216,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   // the first time. Re-run the loader whenever the launcher regains
   // focus — individual run details live in the selected workflow pane.
   useEffect(() => {
+    if (!isTauri()) return;
     const w = getCurrentWebviewWindow();
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
@@ -331,6 +333,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   // plain folder → enter the local-browse context. Multi-path drops:
   // pick the first path that classifies as a local directory.
   useEffect(() => {
+    if (!isTauri()) return;
     const w = getCurrentWebviewWindow();
     let unlistenFn: UnlistenFn | undefined;
     let cancelled = false;
@@ -561,13 +564,20 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
   return (
     <div className={`launcher${dragOver ? " is-drag-over" : ""}`}>
-      <header className="launcher-head" data-tauri-drag-region>
+      <header
+        className="launcher-head"
+        data-tauri-drag-region="deep"
+        onDoubleClick={toggleLauncherMaximize}
+      >
+        <WindowControls />
+        <span className="launcher-head-divider" aria-hidden />
         <img
           src="/cori-mark.png"
           alt=""
           className="launcher-mark"
           width={18}
           height={18}
+          draggable={false}
         />
         <div className="launcher-title">cori</div>
         <div className="launcher-head-spacer" />
@@ -650,6 +660,82 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         </div>
       </footer>
     </div>
+  );
+}
+
+function WindowControls() {
+  const act = (action: "close" | "minimize" | "maximize") => {
+    if (!isTauri()) return;
+    const window = getCurrentWebviewWindow();
+    if (action === "close") void window.close();
+    else if (action === "minimize") void window.minimize();
+    else void window.toggleMaximize();
+  };
+
+  return (
+    <div className="window-controls" aria-label="Window controls">
+      <button
+        type="button"
+        className="window-control is-close"
+        onClick={() => act("close")}
+        onDoubleClick={(event) => event.stopPropagation()}
+        aria-label="Close launcher"
+        title="Close launcher"
+      >
+        <WindowControlGlyph kind="close" />
+      </button>
+      <button
+        type="button"
+        className="window-control is-minimize"
+        onClick={() => act("minimize")}
+        onDoubleClick={(event) => event.stopPropagation()}
+        aria-label="Minimize launcher"
+        title="Minimize launcher"
+      >
+        <WindowControlGlyph kind="minimize" />
+      </button>
+      <button
+        type="button"
+        className="window-control is-maximize"
+        onClick={() => act("maximize")}
+        onDoubleClick={(event) => event.stopPropagation()}
+        aria-label="Maximize launcher"
+        title="Maximize launcher"
+      >
+        <WindowControlGlyph kind="maximize" />
+      </button>
+    </div>
+  );
+}
+
+function toggleLauncherMaximize() {
+  if (!isTauri()) return;
+  void getCurrentWebviewWindow().toggleMaximize();
+}
+
+function WindowControlGlyph({
+  kind,
+}: {
+  kind: "close" | "minimize" | "maximize";
+}) {
+  if (kind === "close") {
+    return (
+      <svg viewBox="0 0 8 8" aria-hidden>
+        <path d="m2 2 4 4M6 2 2 6" />
+      </svg>
+    );
+  }
+  if (kind === "minimize") {
+    return (
+      <svg viewBox="0 0 8 8" aria-hidden>
+        <path d="M1.5 4h5" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 8 8" aria-hidden>
+      <path d="m2 5.75 3.75-3.5M3.25 2.25h2.5v2.5M4.75 5.75h-2.5v-2.5" />
+    </svg>
   );
 }
 

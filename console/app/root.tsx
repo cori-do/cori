@@ -23,8 +23,14 @@ export const meta = () => [{ title: "Cori" }];
 
 export function HydrateFallback() {
   return (
-    <div className="boot">
-      <p>Loading Cori…</p>
+    <div className="boot" role="status" aria-label="Loading Cori">
+      <img
+        className="boot-mark"
+        src="/cori-mark.png"
+        alt=""
+        width={56}
+        height={56}
+      />
     </div>
   );
 }

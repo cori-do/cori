@@ -3,6 +3,8 @@
 // (system). Tooltip names the current choice.
 
 import { useEffect, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   type ThemeChoice,
   applyTheme,
@@ -21,7 +23,9 @@ export function ThemeIconButton() {
   const [choice, setChoiceState] = useState<ThemeChoice>("system");
 
   useEffect(() => {
-    setChoiceState(readChoice());
+    const saved = readChoice();
+    setChoiceState(saved);
+    syncNativeTheme(saved);
   }, []);
 
   // When in `system` mode, follow OS-level theme changes.
@@ -37,6 +41,7 @@ export function ThemeIconButton() {
     const next = nextChoice(choice);
     setChoice(next);
     setChoiceState(next);
+    syncNativeTheme(next);
   }
 
   return (
@@ -50,6 +55,11 @@ export function ThemeIconButton() {
       <ThemeGlyph choice={choice} />
     </button>
   );
+}
+
+function syncNativeTheme(choice: ThemeChoice) {
+  if (!isTauri()) return;
+  void getCurrentWindow().setTheme(choice === "system" ? null : choice);
 }
 
 function ThemeGlyph({ choice }: { choice: ThemeChoice }) {

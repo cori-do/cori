@@ -10,6 +10,10 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-set-theme",
     "core:window:allow-set-title",
     "core:webview:allow-create-webview-window",
     {

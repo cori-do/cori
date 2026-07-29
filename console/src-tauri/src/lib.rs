@@ -118,12 +118,21 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
-        // Window-state plugin persists size/position across restarts.
+        // Window-state plugin persists geometry across restarts. Decorations
+        // deliberately stay config-owned: restoring a pre-frameless saved
+        // value would put the OS title bar above the embedded launcher chrome.
         // The launcher is the only window we explicitly want restored;
         // disposable kinds (run-*, manage) get tracked but
         // their per-instance labels mean nothing ever reads back the
         // saved state — harmless, and avoids per-window opt-out plumbing.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         .setup(|app| {
             // Resolve identity synchronously up-front so AppState has a
             // stable value; everything else moves to async background tasks.
