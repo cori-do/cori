@@ -70,28 +70,14 @@ export default function Approvals({ loaderData }: { loaderData: InboxData }) {
 
       {loaderData.decided.length > 0 && (
         <>
-          <h4
-            style={{
-              margin: "20px 0 8px",
-              fontSize: 11,
-              textTransform: "uppercase",
-              color: "var(--muted)",
-              letterSpacing: "0.06em",
-            }}
-          >
-            Recently decided
-          </h4>
+          <h2>Recently decided</h2>
           {loaderData.decided.map((d) => (
-            <div
-              className="card"
-              key={`${d.nonce}-${d.decided_at}`}
-              style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px" }}
-            >
+            <div className="card decided-row" key={`${d.nonce}-${d.decided_at}`}>
               <span className={`pill ${d.decision === "approved" ? "ok" : "muted"}`}>
                 {d.decision}
               </span>
-              <code style={{ fontSize: 12, color: "var(--muted)" }}>{d.nonce}</code>
-              <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: "auto" }}>
+              <code>{d.nonce}</code>
+              <span className="decided-meta">
                 via {d.via} · {formatRelative(d.decided_at)}
               </span>
             </div>
@@ -118,15 +104,15 @@ function PendingCard({ approval: a }: { approval: ApprovalRequest }) {
 
   return (
     <div className="card approval-card">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div className="approval-head">
         <span className={`pill ${pillFor(a.kind)}`}>{kindLabel(a.kind)}</span>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>via {a.requested_by}</span>
-        <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: "auto" }}>
+        <span className="approval-from">via {a.requested_by}</span>
+        <span className="approval-from approval-when">
           {formatRelative(a.created_at)} · expires {formatRelative(a.expires_at)}
         </span>
       </div>
 
-      <p style={{ margin: "10px 0", fontSize: 13.5, lineHeight: 1.45 }}>{a.message}</p>
+      <p className="approval-message">{a.message}</p>
 
       {isAction && loginCommand && (
         <div className="approval-command">
@@ -144,7 +130,7 @@ function PendingCard({ approval: a }: { approval: ApprovalRequest }) {
 
       <FactsTable payload={a.payload} />
 
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+      <div className="approval-card-actions">
         {isAction ? (
           <button type="button" className="btn" disabled={busy} onClick={() => decide(false)}>
             Dismiss

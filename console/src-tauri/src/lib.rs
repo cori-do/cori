@@ -120,7 +120,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         // Window-state plugin persists size/position across restarts.
         // The launcher is the only window we explicitly want restored;
-        // disposable kinds (launch-*, run-*, manage) get tracked but
+        // disposable kinds (run-*, manage) get tracked but
         // their per-instance labels mean nothing ever reads back the
         // saved state — harmless, and avoids per-window opt-out plumbing.
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -139,7 +139,7 @@ pub fn run() {
             app.manage(app_state);
 
             // Intercept window close on the launcher only → hide to tray.
-            // Other windows (launch-*, run-*, manage) close normally.
+            // Other windows (run-*, manage) close normally.
             if let Some(window) = app.get_webview_window(LAUNCHER_LABEL) {
                 let w = window.clone();
                 window.on_window_event(move |ev| {

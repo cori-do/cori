@@ -327,7 +327,7 @@ function TimingFields({
   return (
     <>
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>When</label>
+        <label className="label" style={labelStyle}>When</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <select
             value={timing.mode}
@@ -431,7 +431,9 @@ function TimingFields({
       </div>
 
       <div style={{ marginBottom: 12 }}>
-        <label htmlFor="tzpick" style={labelStyle}>Timezone</label>
+        <label htmlFor="tzpick" className="label" style={labelStyle}>
+          Timezone
+        </label>
         <input
           id="tzpick"
           type="text"
@@ -493,12 +495,10 @@ function CreateModal({
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h2 style={{ textTransform: "none", color: "var(--fg)", fontSize: 18 }}>
-          New schedule
-        </h2>
+        <h2>New schedule</h2>
         <form onSubmit={submit}>
           <div style={{ marginBottom: 12 }}>
-            <label htmlFor="src" style={labelStyle}>
+            <label htmlFor="src" className="label" style={labelStyle}>
               Source (path or git ref)
             </label>
             <input
@@ -565,9 +565,7 @@ function EditModal({
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h2 style={{ textTransform: "none", color: "var(--fg)", fontSize: 18 }}>
-          Edit timing
-        </h2>
+        <h2>Edit timing</h2>
         <p className="hint" style={{ fontFamily: "var(--font-mono)" }}>{s.source}</p>
         <form onSubmit={submit}>
           <TimingFields timing={timing} onTiming={setTiming} tz={tz} onTz={setTz} />
@@ -588,21 +586,14 @@ function EditModal({
   );
 }
 
+// Field chrome now comes from `.label` / the global input styles; these
+// only carry what is per-field (block layout, intrinsic width).
 const labelStyle: React.CSSProperties = {
   display: "block",
-  fontSize: 13,
-  color: "var(--muted)",
-  marginBottom: 4,
+  marginBottom: 7,
 };
 
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "6px 8px",
-  border: "1px solid var(--rule)",
-  borderRadius: 6,
-  fontFamily: "var(--font-mono)",
-  fontSize: 13,
-};
+const inputStyle: React.CSSProperties = { width: "100%" };
 
 function formatErr(e: unknown): string {
   if (isIpcError(e)) return e.message;
