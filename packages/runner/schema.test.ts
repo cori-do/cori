@@ -4,8 +4,10 @@ import { z } from "zod";
 import {
   jsonSchemaFromZod,
   parseWithSchema,
+  renderBatchPrompts,
   SchemaValidationError,
   stubFromZod,
+  validatedStubFromZod,
 } from "./schema.ts";
 
 Deno.test("missing input fields produce path-aware diagnostics", async () => {
@@ -56,6 +58,7 @@ Deno.test("omitted schemas retain backward-compatible pass-through values", asyn
   const value = { legacy: true, nested: { untouched: true } };
   assert.equal(await parseWithSchema(undefined, value, "input"), value);
   assert.equal(await parseWithSchema(undefined, value, "output"), value);
+  assert.deepEqual(stubFromZod(undefined), {});
 });
 
 Deno.test("LLM stubs honor exact and minimum array cardinality", async () => {
@@ -96,4 +99,73 @@ Deno.test("Zod 4 JSON Schema preserves bounds, literals, enums, and strictness",
     priority: { type: "string", enum: ["P0", "P1", "P2"] },
   });
   assert.equal(jsonSchema.additionalProperties, false);
+});
+
+Deno.test("LLM JSON Schema describes the value accepted before transforms", async () => {
+  const schema = z.string()
+    .transform((value) => ({ summary: value }))
+    .pipe(z.object({ summary: z.string() }));
+
+  assert.deepEqual(jsonSchemaFromZod(schema), {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    type: "string",
+  });
+
+  const stub = stubFromZod(schema);
+  assert.equal(typeof stub, "string");
+  assert.deepEqual(await parseWithSchema(schema, stub, "output"), {
+    summary: "a",
+  });
+});
+
+Deno.test("LLM stubs satisfy common formats, patterns, and exclusive bounds", async () => {
+  const schema = z.object({
+    due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
+    contact: z.string().email(),
+    id: z.string().uuid(),
+    score: z.number().positive(),
+    ratio: z.number().gt(0).lt(0.5),
+    even: z.number().multipleOf(2).gt(3).lt(7),
+  });
+
+  const stub = stubFromZod(schema);
+  assert.deepEqual(await parseWithSchema(schema, stub, "output"), stub);
+});
+
+Deno.test("batch prompts retain transformed non-JSON values in memory", async () => {
+  const schema = z.object({
+    asOf: z.string().transform((value) => new Date(value)),
+    rows: z.array(z.number()),
+  });
+  const parsed = await parseWithSchema(
+    schema,
+    { asOf: "2026-07-28T00:00:00.000Z", rows: [1, 2, 3] },
+    "input",
+  );
+  const prompts = await renderBatchPrompts(
+    parsed,
+    { by: "rows", size: 2 },
+    (input) => {
+      const value = input as { asOf: Date; rows: number[] };
+      assert.ok(value.asOf instanceof Date);
+      return `${value.asOf.toISOString()}:${value.rows.join(",")}`;
+    },
+  );
+  assert.deepEqual(prompts, [
+    "2026-07-28T00:00:00.000Z:1,2",
+    "2026-07-28T00:00:00.000Z:3",
+  ]);
+});
+
+Deno.test("validated output stubs do not require or evaluate step input", async () => {
+  let inputEvaluations = 0;
+  const input = z.string().transform((value) => {
+    inputEvaluations += 1;
+    return value;
+  });
+  const output = z.object({ rows: z.array(z.string()).min(1) });
+
+  assert.deepEqual(await validatedStubFromZod(output), { rows: ["a"] });
+  assert.equal(inputEvaluations, 0);
+  assert.equal(input.safeParse("unused").success, true);
 });

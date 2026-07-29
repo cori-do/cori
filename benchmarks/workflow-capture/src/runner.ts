@@ -1,12 +1,17 @@
 import {
   access,
+  chmod,
+  copyFile,
   cp,
   mkdir,
+  mkdtemp,
   readdir,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,14 +19,24 @@ import {
   artifactPath,
   normalizedCsv,
   readJson,
+  resolveExistingRunDirectory,
   scorecard,
+  validateRunId,
   writeJson,
 } from "./artifacts.js";
 import { gradeExternalState } from "./grader.js";
-import { adapterFor, codexModel } from "./harness.js";
+import {
+  adapterFor,
+  codexModel,
+  executableFileIdentity,
+  resolveExecutablePath,
+} from "./harness.js";
 import type {
+  ExecutableFileIdentity,
   HarnessAdapter,
   HarnessExecutionOptions,
+  HarnessIdentity,
+  HarnessSandbox,
 } from "./harness.js";
 import {
   configuredBenchmarkCalendarId,
@@ -41,6 +56,7 @@ import {
 import {
   breakEvenRepetitions,
   mean,
+  MIN_PAIRED_TASKS,
   pairedDifferenceCi95,
   reuseAdvantage,
 } from "./statistics.js";
@@ -48,6 +64,7 @@ import { assertTaskCatalog, taskById, TASKS } from "./tasks.js";
 import { writeBenchmarkViewerForRun } from "./viewer.js";
 import type {
   BenchmarkProfile,
+  BenchmarkEnvironment,
   BenchmarkResultV2,
   Grade,
   HarnessName,
@@ -78,6 +95,16 @@ let coriBinarySource: "workspace_dev" | "override" = process.env
   ? "override"
   : "workspace_dev";
 let authorCoriIdentity: CoriIdentity | null = null;
+let harnessIdentity: HarnessIdentity | null = null;
+let gwsIdentity: (ExecutableFileIdentity & { version: string }) | null = null;
+let temporalIdentity: (ExecutableFileIdentity & { version: string }) | null = null;
+let denoIdentity: (ExecutableFileIdentity & { version: string }) | null = null;
+let nodeIdentity: ExecutableFileIdentity | null = null;
+let benchmarkSourceSha256: string | null = null;
+let captureSkillSha256: string | null = null;
+let subjectIsolationMechanism: string | null = null;
+let subjectIsolationIdentity: ExecutableFileIdentity | null = null;
+let workspaceAccountSha256: string | null = null;
 
 export interface CoriIdentity {
   path: string;
@@ -85,8 +112,14 @@ export interface CoriIdentity {
   sha256: string;
 }
 
-export interface CoriLoginShellProbe extends CoriIdentity {
+export interface CoriExecutableProbe extends CoriIdentity {
   help: string;
+}
+
+export interface BenchmarkSubject {
+  root: string;
+  agentRoot: string;
+  coriBinary: string;
 }
 
 export interface RunOptions {
@@ -137,6 +170,7 @@ interface CaptureWorkflowArgs {
   runId: string;
   runDir: string;
   agentRoot: string;
+  gws: GwsClient;
   driver: WorkspaceScenarioDriver;
   adapter: HarnessAdapter;
   registry: CleanupRegistry;
@@ -215,10 +249,12 @@ export async function preflight(
   const schemaHash = await sha256(JSON.stringify(schema));
   const calendar = await driver.verifyCalendar();
   const runTag = `cori-bench-preflight-${Date.now()}`;
+  const workspaceAccount = await gws.verifyAuthentication();
   await gws.canary(runTag);
   const report = {
     gwsVersion,
     schemaHash,
+    workspaceAccountSha256: workspaceAccount,
     calendarId: calendar.id,
     calendarSummary: calendar.summary,
     cori: await version(coriBinary()),
@@ -238,6 +274,11 @@ export async function runBenchmark(
 ): Promise<BenchmarkResultV2> {
   await validate();
   const tasks = selectTasks(options);
+  if (options.profile === "publication" && options.harness !== "codex") {
+    throw new Error(
+      "publication inference currently requires the Codex harness because Claude and Gemini model/config identities are not pinned by their adapters",
+    );
+  }
   const batchSuffix = options.batch
     ? `-b${options.batch.index}of${options.batch.count}`
     : "";
@@ -245,13 +286,10 @@ export async function runBenchmark(
     `workflow-capture-${
       new Date().toISOString().replace(/[:.]/gu, "-")
     }-${options.seed}${batchSuffix}`;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(runId)) {
-    throw new Error(
-      "run ID must contain only letters, numbers, dots, underscores, and hyphens",
-    );
-  }
+  validateRunId(runId);
   const runDir = join(options.artifactsRoot ?? defaultArtifactsRoot, runId);
-  const agentRoot = join(runDir, "agent-workspace");
+  let agentRoot = join(runDir, "uninitialized-agent-workspace");
+  let subject: BenchmarkSubject | undefined;
   await mkdir(runDir, { recursive: true });
   const calendarId = configuredBenchmarkCalendarId();
   const gws = new GwsClient();
@@ -309,21 +347,18 @@ export async function runBenchmark(
   const taskFailures: string[] = [];
   let globalError: string | undefined;
   authorCoriIdentity = null;
+  harnessIdentity = null;
+  gwsIdentity = null;
+  temporalIdentity = null;
+  denoIdentity = null;
+  nodeIdentity = null;
+  benchmarkSourceSha256 = null;
+  captureSkillSha256 = null;
+  subjectIsolationMechanism = null;
+  subjectIsolationIdentity = null;
+  workspaceAccountSha256 = null;
 
   try {
-    await publishProgress(
-      "environment_check",
-      process.env.CORI_BENCH_CORI
-        ? "checking the explicitly selected Cori executable and harness capabilities"
-        : "building the current workspace Cori development binary and checking harness capabilities",
-    );
-    await prepareCoriWorkflowCli();
-    const harnessEnvironment = await createBenchmarkHarnessEnvironment(
-      runDir,
-      coriBinary(),
-    );
-    const adapter = adapterFor(options.harness, harnessEnvironment);
-    await adapter.version();
     if (
       tasks.some((task) => task.runtimeTrack === "hybrid") &&
       !process.env.CORI_BENCH_LLM_MODEL
@@ -332,6 +367,55 @@ export async function runBenchmark(
         "CORI_BENCH_LLM_MODEL is required when the selected benchmark tasks include the hybrid runtime track",
       );
     }
+    if (
+      options.profile !== "smoke" &&
+      !configuredBenchmarkCalendarId()
+    ) {
+      throw new Error(
+        "CORI_BENCH_CALENDAR_ID is required for full and publication benchmark runs",
+      );
+    }
+    await publishProgress(
+      "environment_check",
+      process.env.CORI_BENCH_CORI
+        ? "checking the explicitly selected Cori executable and harness capabilities"
+        : "building the current workspace Cori development binary and checking harness capabilities",
+    );
+    await prepareCoriWorkflowCli();
+    subject = await createBenchmarkSubject(coriBinary());
+    agentRoot = subject.agentRoot;
+    let harnessSandbox = await createHarnessSandbox(subject);
+    if (!harnessSandbox && options.profile !== "smoke") {
+      throw new Error(
+        `${options.profile} benchmark runs require enforced subject isolation; install bwrap on Linux or run on macOS with /usr/bin/sandbox-exec`,
+      );
+    }
+    if (harnessSandbox) {
+      try {
+        await auditHarnessSandbox(harnessSandbox, subject);
+        subjectIsolationMechanism = harnessSandbox.mechanism;
+        subjectIsolationIdentity = await executableFileIdentity(
+          harnessSandbox.file,
+        );
+      } catch (error) {
+        if (options.profile !== "smoke") throw error;
+        harnessSandbox = null;
+        subjectIsolationMechanism = "advisory_temp_workspace";
+        subjectIsolationIdentity = null;
+      }
+    } else {
+      subjectIsolationMechanism = "advisory_temp_workspace";
+    }
+    const harnessEnvironment = await createBenchmarkHarnessEnvironment(
+      runDir,
+      subject.coriBinary,
+    );
+    const adapter = adapterFor(
+      options.harness,
+      harnessEnvironment,
+      harnessSandbox ?? undefined,
+    );
+    await collectInstrumentIdentities(adapter, gws, harnessEnvironment);
     await publishProgress(
       "environment_check",
       `using ${coriBinary()}${
@@ -341,17 +425,20 @@ export async function runBenchmark(
     await ensureCoriWorkflowCli();
     authorCoriIdentity = await probeHarnessCoriEnvironment(
       harnessEnvironment,
-      selectedCoriIdentity(),
+      {
+        ...selectedCoriIdentity(),
+        path: subject.coriBinary,
+      },
     );
     await publishProgress(
       "environment_check",
-      `login-shell author environment resolves ${authorCoriIdentity.path} (${authorCoriIdentity.version}, sha256 ${authorCoriIdentity.sha256.slice(0, 12)})`,
+      `isolated author environment resolves ${authorCoriIdentity.path} (${authorCoriIdentity.version}, sha256 ${authorCoriIdentity.sha256.slice(0, 12)})`,
     );
     await publishProgress(
       "environment_check",
       "verifying Google Workspace OAuth credentials with a read-only API call",
     );
-    await gws.verifyAuthentication();
+    workspaceAccountSha256 = await gws.verifyAuthentication();
     if (tasks.some((task) => task.runtimeTrack === "hybrid")) {
       await ensureCoriCapability(
         providerForModel(process.env.CORI_BENCH_LLM_MODEL ?? ""),
@@ -375,6 +462,7 @@ export async function runBenchmark(
           runId,
           runDir,
           agentRoot,
+          gws,
           driver,
           adapter,
           registry,
@@ -480,10 +568,13 @@ export async function runBenchmark(
             ),
             afterDirect,
           );
-          const directGrade = gradeExternalState(
-            directScenario,
-            beforeDirect,
-            afterDirect,
+          const directGrade = hardGateHarnessTrial(
+            gradeExternalState(
+              directScenario,
+              beforeDirect,
+              afterDirect,
+            ),
+            direct,
           );
           trials.push({
             taskId: task.id,
@@ -567,7 +658,7 @@ export async function runBenchmark(
             grade: replayGrade,
             tracePath,
             workflowHash: expectedHash,
-            runtime: traceUsage(trace),
+            runtime: replayRuntimeUsage(trace, replay.wallTimeMs),
           });
           completedPairs += 1;
           await publishProgress(
@@ -627,26 +718,34 @@ export async function runBenchmark(
     trials,
     runError,
   );
-  await writeArtifacts(runDir, result);
-  progress = { ...progress, status: runError ? "failed" : "succeeded" };
-  await publishProgress(
-    runError ? "failed" : "complete",
-    runError ?? "benchmark completed; trial scores are reported as measurements",
-  );
-  await writeBenchmarkViewerForRun(runDir);
-  if (runError) {
-    throw new Error(
-      `${runError}\nBenchmark artifacts were written to ${runDir}`,
+  try {
+    await writeArtifacts(runDir, result);
+    progress = { ...progress, status: runError ? "failed" : "succeeded" };
+    await publishProgress(
+      runError ? "failed" : "complete",
+      runError ?? "benchmark completed; trial scores are reported as measurements",
     );
+    await writeBenchmarkViewerForRun(runDir);
+    if (runError) {
+      throw new Error(
+        `${runError}\nBenchmark artifacts were written to ${runDir}`,
+      );
+    }
+    return result;
+  } finally {
+    if (subject) {
+      await rm(subject.root, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
   }
-  return result;
 }
 
 export async function cleanup(
   runId: string,
   artifactsRoot = defaultArtifactsRoot,
 ): Promise<void> {
-  const runDir = join(artifactsRoot, runId);
+  const runDir = await resolveExistingRunDirectory(artifactsRoot, runId);
   const registry = await readJson<CleanupRegistry>(
     join(runDir, "cleanup-registry.json"),
   );
@@ -687,15 +786,27 @@ export async function report(
   runId: string,
   artifactsRoot = defaultArtifactsRoot,
 ): Promise<BenchmarkResultV2> {
-  const runDir = join(artifactsRoot, runId);
+  const runDir = await resolveExistingRunDirectory(artifactsRoot, runId);
   const existing = await readJson<BenchmarkResultV2>(
     join(runDir, "result.json"),
   );
   const trials = await Promise.all(existing.trials.map(async (trial) => {
     if (trial.lane !== "replay" || !trial.tracePath) return trial;
     try {
-      const traceProcess = await readJson<{ stdout: string }>(trial.tracePath);
-      return { ...trial, runtime: traceUsage(parseTrace(traceProcess.stdout)) };
+      const traceProcess = await readJson<{
+        stdout: string;
+        wallTimeMs?: number;
+      }>(trial.tracePath);
+      const trace = parseTrace(traceProcess.stdout);
+      return {
+        ...trial,
+        runtime: replayRuntimeUsage(
+          trace,
+          typeof traceProcess.wallTimeMs === "number"
+            ? traceProcess.wallTimeMs
+            : traceUsage(trace).wallTimeMs,
+        ),
+      };
     } catch {
       return trial;
     }
@@ -714,6 +825,8 @@ export async function report(
     existing.capture,
     trials,
     runError,
+    existing.environment,
+    existing.summary.combinedResult === true,
   );
   const result = {
     ...summarized,
@@ -734,16 +847,33 @@ export async function combineRuns(
   if (runIds.length < 2) {
     throw new Error("combine requires at least two batch run IDs");
   }
-  const sources = await Promise.all(
+  for (const runId of runIds) validateRunId(runId, "source run ID");
+  if (requestedRunId !== undefined) {
+    validateRunId(requestedRunId, "combined run ID");
+  }
+  const sourceRunDirectories = await Promise.all(
     runIds.map((runId) =>
-      readJson<BenchmarkResultV2>(join(artifactsRoot, runId, "result.json"))
+      resolveExistingRunDirectory(artifactsRoot, runId, "source run ID")
+    ),
+  );
+  const sources = await Promise.all(
+    sourceRunDirectories.map((runDir) =>
+      readJson<BenchmarkResultV2>(join(runDir, "result.json"))
     ),
   );
   const first = sources[0]!;
-  const calendarIds = sources.flatMap((source) =>
-    typeof source.environment.calendar_id === "string"
-      ? [source.environment.calendar_id]
-      : []
+  const missingCalendar = sources.filter((source) =>
+    !source.environment.calendar_id
+  );
+  if (missingCalendar.length > 0) {
+    throw new Error(
+      `combined runs require CORI_BENCH_CALENDAR_ID evidence; missing from ${
+        missingCalendar.map((source) => source.runId).join(", ")
+      }`,
+    );
+  }
+  const calendarIds = sources.map((source) =>
+    source.environment.calendar_id!
   );
   if (new Set(calendarIds).size > 1) {
     throw new Error(
@@ -752,6 +882,7 @@ export async function combineRuns(
   }
   for (const source of sources) {
     assertResultCoriIdentity(source);
+    assertCompleteInstrumentIdentity(source);
     if (
       source.status !== "succeeded"
     ) {
@@ -766,20 +897,11 @@ export async function combineRuns(
       );
     }
     if (
-      source.environment.llm_model !== first.environment.llm_model ||
-      source.environment.author_model !== first.environment.author_model ||
-      source.environment.cori !== first.environment.cori ||
-      source.environment.cori_version !== first.environment.cori_version ||
-      source.environment.cori_sha256 !== first.environment.cori_sha256 ||
-      source.environment.author_cori_path !==
-        first.environment.author_cori_path ||
-      source.environment.author_cori_version !==
-        first.environment.author_cori_version ||
-      source.environment.author_cori_sha256 !==
-        first.environment.author_cori_sha256
+      JSON.stringify(stableInstrumentIdentity(source.environment)) !==
+        JSON.stringify(stableInstrumentIdentity(first.environment))
     ) {
       throw new Error(
-        "combined runs must use the same selected and author-side Cori executable identities, author model, and workflow LLM model",
+        "combined runs must use the same complete benchmark instrument identity",
       );
     }
   }
@@ -820,15 +942,22 @@ export async function combineRuns(
       }
     }
   }
+  const trialDesignFailure = exactTrialDesignError(
+    first.profile,
+    first.seed,
+    TASKS.map((task) => task.id),
+    trials,
+  );
+  if (trialDesignFailure) {
+    throw new Error(
+      `combined runs have an invalid paired trial design: ${trialDesignFailure}`,
+    );
+  }
   const runId = requestedRunId ??
     `workflow-capture-combined-${
       new Date().toISOString().replace(/[:.]/gu, "-")
     }-${first.seed}`;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(runId)) {
-    throw new Error(
-      "run ID must contain only letters, numbers, dots, underscores, and hyphens",
-    );
-  }
+  validateRunId(runId, "combined run ID");
   const startedAt = sources.map((source) => source.startedAt).sort()[0] ??
     new Date().toISOString();
   const result = {
@@ -839,6 +968,8 @@ export async function combineRuns(
       aggregateCaptures(captures),
       trials,
       trialIntegrityError(trials),
+      first.environment,
+      true,
     ),
     environment: {
       ...first.environment,
@@ -879,7 +1010,6 @@ export function assertResultCoriIdentity(
     );
   }
   if (
-    selected.path !== author.path ||
     selected.version !== author.version ||
     selected.sha256 !== author.sha256
   ) {
@@ -889,6 +1019,53 @@ export function assertResultCoriIdentity(
   }
 }
 
+export function assertCompleteInstrumentIdentity(
+  result: Pick<BenchmarkResultV2, "runId" | "environment">,
+): void {
+  const identity = stableInstrumentIdentity(result.environment);
+  const missing = Object.entries(identity)
+    .filter(([, value]) => typeof value !== "string" || value.length === 0)
+    .map(([key]) => key);
+  if (missing.length > 0) {
+    throw new Error(
+      `run ${result.runId} is missing complete benchmark instrument identity: ${
+        missing.join(", ")
+      }`,
+    );
+  }
+}
+
+function stableInstrumentIdentity(
+  environment: BenchmarkEnvironment,
+): Record<string, string | null> {
+  return {
+    cori_version: environment.cori_version,
+    cori_sha256: environment.cori_sha256,
+    author_cori_version: environment.author_cori_version,
+    author_cori_sha256: environment.author_cori_sha256,
+    harness_version: environment.harness_version,
+    harness_sha256: environment.harness_sha256,
+    gws_version: environment.gws_version,
+    gws_sha256: environment.gws_sha256,
+    temporal_version: environment.temporal_version,
+    temporal_sha256: environment.temporal_sha256,
+    deno_version: environment.deno_version,
+    deno_sha256: environment.deno_sha256,
+    node_version: environment.node_version,
+    node_sha256: environment.node_sha256,
+    subject_isolation: environment.subject_isolation,
+    subject_isolation_sha256: environment.subject_isolation_sha256,
+    benchmark_source_sha256: environment.benchmark_source_sha256,
+    capture_skill_sha256: environment.capture_skill_sha256,
+    workspace_account_sha256: environment.workspace_account_sha256,
+    author_model: environment.author_model,
+    llm_model: environment.llm_model,
+    os: environment.os,
+    arch: environment.arch,
+    timezone: environment.timezone,
+  };
+}
+
 function summarize(
   runId: string,
   options: RunOptions,
@@ -896,26 +1073,36 @@ function summarize(
   capture: BenchmarkResultV2["capture"],
   trials: readonly TrialResult[],
   runError?: string,
+  existingEnvironment?: BenchmarkEnvironment,
+  combinedResult = false,
 ): BenchmarkResultV2 {
   const direct = trials.filter((trial) => trial.lane === "direct");
   const replay = trials.filter((trial) => trial.lane === "replay");
   const directScore = mean(direct.map((trial) => trial.grade.score));
   const replayScore = mean(replay.map((trial) => trial.grade.score));
-  const paired = pairedDifferenceCi95(
-    direct.map((trial) => trial.grade.score),
-    replay.map((trial) => trial.grade.score),
-    options.seed,
+  const scorePairs = pairedScores(trials);
+  const taskScorePairs = pairedTaskScores(scorePairs);
+  const inferenceEligible = inferentiallyEligible(options.profile, capture, trials, {
+    isolationMechanism:
+      existingEnvironment?.subject_isolation ?? subjectIsolationMechanism,
+    harness: options.harness,
+    authorModel:
+      existingEnvironment?.author_model ?? authorModelIdentity(options.harness),
+    combinedResult,
+    seed: options.seed,
+  });
+  const paired = inferenceEligible
+    ? pairedDifferenceCi95(
+      taskScorePairs.map((pair) => pair.direct),
+      taskScorePairs.map((pair) => pair.replay),
+      options.seed,
+    )
+    : null;
+  const directTime = completeMean(
+    direct.map((trial) => trial.harness?.wallTimeMs ?? null),
   );
-  const directTime = mean(
-    direct.flatMap((trial) => trial.harness ? [trial.harness.wallTimeMs] : []),
-  );
-  const replayTime = mean(
-    replay.flatMap((trial) =>
-      trial.runtime?.wallTimeMs !== null &&
-        trial.runtime?.wallTimeMs !== undefined
-        ? [trial.runtime.wallTimeMs]
-        : []
-    ),
+  const replayTime = completeMean(
+    replay.map((trial) => trial.runtime?.wallTimeMs ?? null),
   );
   const designTokens = sumNullable(capture.tasks.flatMap((task) =>
     [task.outcomes.author, task.outcomes.capture].map((phase) =>
@@ -929,11 +1116,22 @@ function summarize(
     (sum, trial) => sum + trial.grade.safetyViolations.length,
     0,
   );
-  const designCost = capture.tasks.length > 0
+  const designWallTime = capture.tasks.length > 0
     ? capture.tasks.reduce((sum, task) =>
       sum + task.outcomes.author.wallTimeMs +
       task.outcomes.capture.wallTimeMs + task.outcomes.check.wallTimeMs, 0)
     : null;
+  const selectedTaskIds = capture.tasks.map((task) => task.taskId);
+  const directSuiteTime = suiteWallTime(
+    trials,
+    "direct",
+    selectedTaskIds,
+  );
+  const replaySuiteTime = suiteWallTime(
+    trials,
+    "replay",
+    selectedTaskIds,
+  );
   const runtimeInputTokens = sumNullable(
     replay.map((trial) => trial.runtime?.inputTokens ?? null),
   );
@@ -957,11 +1155,33 @@ function summarize(
       author_cori_path: authorCoriIdentity?.path ?? null,
       author_cori_version: authorCoriIdentity?.version ?? null,
       author_cori_sha256: authorCoriIdentity?.sha256 ?? null,
+      harness_path: harnessIdentity?.path ?? null,
+      harness_version: harnessIdentity?.version ?? null,
+      harness_sha256: harnessIdentity?.sha256 ?? null,
       gws: process.env.GWS_BIN ?? "gws",
+      gws_path: gwsIdentity?.path ?? null,
+      gws_version: gwsIdentity?.version ?? null,
+      gws_sha256: gwsIdentity?.sha256 ?? null,
+      temporal_path: temporalIdentity?.path ?? null,
+      temporal_version: temporalIdentity?.version ?? null,
+      temporal_sha256: temporalIdentity?.sha256 ?? null,
+      deno_path: denoIdentity?.path ?? null,
+      deno_version: denoIdentity?.version ?? null,
+      deno_sha256: denoIdentity?.sha256 ?? null,
+      node_path: nodeIdentity?.path ?? process.execPath,
+      node_version: process.version,
+      node_sha256: nodeIdentity?.sha256 ?? null,
+      subject_isolation: subjectIsolationMechanism,
+      subject_isolation_path: subjectIsolationIdentity?.path ?? null,
+      subject_isolation_sha256: subjectIsolationIdentity?.sha256 ?? null,
+      benchmark_source_sha256: benchmarkSourceSha256,
+      capture_skill_sha256: captureSkillSha256,
+      workspace_account_sha256: workspaceAccountSha256,
       calendar_id: configuredBenchmarkCalendarId() ?? null,
-      author_model: options.harness === "codex" ? codexModel() : null,
+      author_model: authorModelIdentity(options.harness),
       llm_model: process.env.CORI_BENCH_LLM_MODEL ?? null,
       os: process.platform,
+      arch: process.arch,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
     capture,
@@ -982,26 +1202,226 @@ function summarize(
       runtimeCostEur: sumNullable(
         replay.map((trial) => trial.runtime?.costEur ?? null),
       ),
+      designWallTimeMs: designWallTime,
+      directSuiteWallTimeMs: directSuiteTime,
+      replaySuiteWallTimeMs: replaySuiteTime,
       breakEvenRepetitions:
-        designCost !== null && directTime !== null && replayTime !== null
-          ? breakEvenRepetitions(designCost, directTime, replayTime)
+        designWallTime !== null && directSuiteTime !== null &&
+          replaySuiteTime !== null
+          ? breakEvenRepetitions(
+            designWallTime,
+            directSuiteTime,
+            replaySuiteTime,
+          )
           : null,
     },
     summary: {
       directScore,
       replayScore,
+      pairedSampleSize: taskScorePairs.length,
+      combinedResult,
+      inferenceEligible,
       pairedDifferenceCi95: paired,
       reuseAdvantageDemonstrated: reuseAdvantage(
         safetyViolations,
         paired,
-        designCost,
-        directTime,
-        replayTime,
+        designWallTime,
+        directSuiteTime,
+        replaySuiteTime,
+        taskScorePairs.length,
       ),
     },
     ...(runError ? { error: runError } : {}),
   };
   return result;
+}
+
+interface PairedScores {
+  key: string;
+  taskId: string;
+  direct: number;
+  replay: number;
+}
+
+function pairedScores(trials: readonly TrialResult[]): PairedScores[] {
+  const direct = new Map<string, number>();
+  const replay = new Map<string, number>();
+  for (const trial of trials) {
+    const key = `${trial.taskId}\u0000${trial.seed}`;
+    (trial.lane === "direct" ? direct : replay).set(key, trial.grade.score);
+  }
+  return [...direct.keys()]
+    .filter((key) => replay.has(key))
+    .sort()
+    .map((key) => ({
+      key,
+      taskId: key.split("\u0000", 1)[0]!,
+      direct: direct.get(key)!,
+      replay: replay.get(key)!,
+    }));
+}
+
+interface PairedTaskScores {
+  taskId: string;
+  direct: number;
+  replay: number;
+}
+
+/**
+ * Collapse repeated seeds within each task before inference. Tasks—not the
+ * three regenerated fixtures within a task—are the independent units in the
+ * benchmark design.
+ */
+function pairedTaskScores(pairs: readonly PairedScores[]): PairedTaskScores[] {
+  const grouped = new Map<string, { direct: number[]; replay: number[] }>();
+  for (const pair of pairs) {
+    const values = grouped.get(pair.taskId) ?? { direct: [], replay: [] };
+    values.direct.push(pair.direct);
+    values.replay.push(pair.replay);
+    grouped.set(pair.taskId, values);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([taskId, values]) => ({
+      taskId,
+      direct: mean(values.direct)!,
+      replay: mean(values.replay)!,
+    }));
+}
+
+export function inferentiallyEligible(
+  profile: BenchmarkProfile,
+  capture: BenchmarkResultV2["capture"],
+  trials: readonly TrialResult[],
+  evidence: {
+    isolationMechanism: string | null;
+    harness: HarnessName;
+    authorModel: string | null;
+    combinedResult: boolean;
+    seed: number;
+  },
+): boolean {
+  const {
+    isolationMechanism,
+    harness,
+    authorModel,
+    combinedResult,
+    seed,
+  } = evidence;
+  if (
+    profile !== "publication" ||
+    !combinedResult ||
+    harness !== "codex" ||
+    !authorModel?.trim() ||
+    !isolationMechanism ||
+    isolationMechanism === "advisory_temp_workspace"
+  ) return false;
+  const taskIds = capture.tasks.map((task) => task.taskId);
+  if (
+    taskIds.length !== TASKS.length ||
+    new Set(taskIds).size !== TASKS.length ||
+    TASKS.some((task) => !taskIds.includes(task.id)) ||
+    !capture.tasks.every(captureReady) ||
+    trials.some((trial) => trial.grade.safetyViolations.length > 0)
+  ) return false;
+  if (
+    exactTrialDesignError(
+      profile,
+      seed,
+      TASKS.map((task) => task.id),
+      trials,
+    )
+  ) return false;
+  return pairedTaskScores(pairedScores(trials)).length >= MIN_PAIRED_TASKS;
+}
+
+function exactTrialDesignError(
+  profile: BenchmarkProfile,
+  seed: number,
+  taskIds: readonly string[],
+  trials: readonly TrialResult[],
+): string | undefined {
+  const expectedSeeds = Array.from(
+    { length: profilePairs(profile) },
+    (_value, index) => seed + index + 1,
+  );
+  const expectedKeys = new Set(
+    taskIds.flatMap((taskId) =>
+      (["direct", "replay"] as const).flatMap((lane) =>
+        expectedSeeds.map((trialSeed) =>
+          trialDesignKey(taskId, lane, trialSeed)
+        )
+      )
+    ),
+  );
+  const actualKeys = trials.map((trial) =>
+    trialDesignKey(trial.taskId, trial.lane, trial.seed)
+  );
+  const seen = new Set<string>();
+  const duplicates = actualKeys.filter((key) => {
+    if (seen.has(key)) return true;
+    seen.add(key);
+    return false;
+  });
+  if (duplicates.length > 0) {
+    return `duplicate task/lane/seed trials: ${
+      [...new Set(duplicates)].join(", ")
+    }`;
+  }
+  const unexpected = actualKeys.filter((key) => !expectedKeys.has(key));
+  if (unexpected.length > 0) {
+    return `unexpected task/lane/seed trials: ${
+      [...new Set(unexpected)].join(", ")
+    }`;
+  }
+  const missing = [...expectedKeys].filter((key) => !seen.has(key));
+  if (missing.length > 0) {
+    return `missing task/lane/seed trials: ${missing.join(", ")}`;
+  }
+  if (actualKeys.length !== expectedKeys.size) {
+    return `found ${actualKeys.length} trials; expected ${expectedKeys.size}`;
+  }
+  return undefined;
+}
+
+function trialDesignKey(
+  taskId: string,
+  lane: TrialResult["lane"],
+  seed: number,
+): string {
+  return `${taskId}/${lane}/${seed}`;
+}
+
+function suiteWallTime(
+  trials: readonly TrialResult[],
+  lane: TrialResult["lane"],
+  taskIds: readonly string[],
+): number | null {
+  if (taskIds.length === 0) return null;
+  let total = 0;
+  for (const taskId of taskIds) {
+    const selected = trials.filter((trial) =>
+      trial.taskId === taskId && trial.lane === lane
+    );
+    const taskMean = completeMean(selected.map((trial) =>
+      lane === "direct"
+        ? trial.harness?.wallTimeMs ?? null
+        : trial.runtime?.wallTimeMs ?? null
+    ));
+    if (taskMean === null) return null;
+    total += taskMean;
+  }
+  return total;
+}
+
+function completeMean(values: readonly (number | null)[]): number | null {
+  if (values.length === 0 || values.some((value) => value === null)) return null;
+  return mean(values as readonly number[]);
+}
+
+function authorModelIdentity(harness: HarnessName): string | null {
+  if (harness === "codex") return codexModel();
+  return null;
 }
 
 async function writeArtifacts(
@@ -1041,6 +1461,7 @@ async function captureWorkflowForTask({
   runId,
   runDir,
   agentRoot,
+  gws,
   driver,
   adapter,
   registry,
@@ -1091,10 +1512,13 @@ async function captureWorkflowForTask({
     artifactPath(runDir, "snapshots", "authors", `${artifactStem}-after.json`),
     afterAuthor,
   );
-  const authorGrade = gradeExternalState(
-    authorScenario,
-    beforeAuthor,
-    afterAuthor,
+  const authorGrade = hardGateHarnessTrial(
+    gradeExternalState(
+      authorScenario,
+      beforeAuthor,
+      afterAuthor,
+    ),
+    directAuthor,
   );
   await writeJson(
     artifactPath(runDir, "author-grades", `${artifactStem}.json`),
@@ -1108,8 +1532,12 @@ async function captureWorkflowForTask({
     ? `author task violated benchmark safety: ${
       authorGrade.safetyViolations.join("; ")
     }`
+    : directAuthor.timedOut
+    ? "author harness timed out"
     : directAuthor.exitCode !== 0
     ? `author harness exited ${directAuthor.exitCode}`
+    : !authorGrade.passed
+    ? `author task scored ${authorGrade.score}; at least 90 is required before capture`
     : undefined;
   const authorOutcome = finishPhase(
     authorTimer,
@@ -1117,10 +1545,10 @@ async function captureWorkflowForTask({
     authorFailure,
     sessionUsage(directAuthor),
   );
-  if (authorGrade.safetyViolations.length > 0) {
-    const captureOutcome = skippedOutcome("author safety violation");
-    const checkOutcome = skippedOutcome("author safety violation");
-    const replayOutcome = skippedOutcome("author safety violation");
+  if (authorFailure) {
+    const captureOutcome = skippedOutcome("author task did not pass");
+    const checkOutcome = skippedOutcome("author task did not pass");
+    const replayOutcome = skippedOutcome("author task did not pass");
     return {
       capture: {
         taskId: task.id,
@@ -1136,6 +1564,7 @@ async function captureWorkflowForTask({
         skillCheckObserved: false,
         skillCheckSucceeded: false,
         benchmarkCheckSucceeded: false,
+        runtimeModelDataflowVerified: null,
         checkPassed: false,
         policy: null,
         workflowHash: null,
@@ -1149,11 +1578,19 @@ async function captureWorkflowForTask({
 
   await prepareCaptureWorkspace(authorWorkspace);
   const workflowDir = join(authorWorkspace, "captured-workflow");
+  const persistedWorkflowDir = artifactPath(
+    runDir,
+    "generated-workflows",
+    task.id,
+  );
   const captureTimer = startPhase();
   const absentBeforePreview = !(await containsWorkflowManifest(authorWorkspace)) &&
     !(await containsFiles(workflowDir));
+  const workspaceHashBeforePreview = await hashDirectory(authorWorkspace);
+  const gwsAuditBeforeCapture = gws.auditEvidence();
   let previewDidNotWrite = false;
   let previewPresented = false;
+  let captureDidNotMutateWorkspace = false;
   let preview: HarnessSession | undefined;
   let approval: HarnessSession | undefined;
   if (directAuthor.sessionId) {
@@ -1192,11 +1629,14 @@ async function captureWorkflowForTask({
         afterPreview: async (session) => {
           await writeJson(previewTranscriptPath, session);
           previewPresented = transcriptHasWorkflowPreview(session);
-          previewDidNotWrite = absentBeforePreview &&
-            !(await containsWorkflowManifest(authorWorkspace)) &&
-            !(await containsFiles(workflowDir)) &&
-            !transcriptExecutedCoriRun(session) &&
-            !transcriptExecutedCoriCheck(session);
+          previewDidNotWrite = previewHadNoSideEffects({
+            cleanStart: absentBeforePreview,
+            workspaceHashBefore: workspaceHashBeforePreview,
+            workspaceHashAfter: await hashDirectory(authorWorkspace),
+            auditBefore: gwsAuditBeforeCapture,
+            auditAfter: gws.auditEvidence(),
+            session,
+          });
           await onProgress(
             "capture_approval",
             previewDidNotWrite
@@ -1207,16 +1647,31 @@ async function captureWorkflowForTask({
       },
     ));
     await writeJson(approvalTranscriptPath, approval);
+    captureDidNotMutateWorkspace =
+      captureAuditHasNoMutations(
+        gwsAuditBeforeCapture,
+        gws.auditEvidence(),
+      ) &&
+      transcriptWorkspaceToolViolations(approval).length === 0;
   }
 
   const workflowExists = await exists(workflowDir);
   const captureFailures = [
     ...(!directAuthor.sessionId ? ["author harness did not return a resumable session"] : []),
     ...(!previewPresented ? ["skill did not present a complete workflow tree and manifest preview"] : []),
-    ...(!previewDidNotWrite ? ["preview gate detected workflow files or Cori execution before approval"] : []),
+    ...(!previewDidNotWrite
+      ? [
+        "preview gate detected local or Workspace side effects, or Cori execution, before approval",
+      ]
+      : []),
     ...(!approval ? ["approval turn was not recorded"] : []),
     ...(approval && approval.exitCode !== 0
       ? [`approval harness exited ${approval.exitCode}`]
+      : []),
+    ...(approval && !captureDidNotMutateWorkspace
+      ? [
+        "capture turns executed or obscured mutating Google Workspace commands",
+      ]
       : []),
     ...(!workflowExists ? ["approved skill session did not create captured-workflow"] : []),
   ];
@@ -1236,6 +1691,8 @@ async function captureWorkflowForTask({
     ? transcriptSuccessfulCoriCheck(approval)
     : false;
   let benchmarkCheckSucceeded = false;
+  let runtimeModelDataflowVerified: boolean | null =
+    task.requiresRuntimeModel === true ? false : null;
   const checkTimer = startPhase();
   let checkError: string | undefined = !skillCheckObserved
     ? "skill approval turn did not run cori check"
@@ -1262,7 +1719,7 @@ async function captureWorkflowForTask({
     );
     await copyWorkflow(
       workflowDir,
-      artifactPath(runDir, "generated-workflows", task.id),
+      persistedWorkflowDir,
     );
     await onProgress(
       "workflow_check",
@@ -1275,11 +1732,20 @@ async function captureWorkflowForTask({
     );
     benchmarkCheckSucceeded = checked.code === 0 &&
       isCanonicalCoriReadyOutput(`${checked.stdout}\n${checked.stderr}`);
+    if (task.requiresRuntimeModel === true) {
+      runtimeModelDataflowVerified = await workflowHasRuntimeModelDataflow(
+        workflowDir,
+      );
+    }
     checkPassed = policy.ok && skillCheckSucceeded &&
-      benchmarkCheckSucceeded;
+      benchmarkCheckSucceeded &&
+      runtimeModelDataflowVerified !== false;
     checkError = [
       checkError,
       formatWorkflowCheckFailure(checked, policy),
+      runtimeModelDataflowVerified === false
+        ? "hybrid workflow has no static LLM-result dataflow to a later CLI or MCP side effect"
+        : undefined,
     ].filter(Boolean).join("; ") || undefined;
   } else {
     checkError = [
@@ -1318,10 +1784,11 @@ async function captureWorkflowForTask({
       skillCheckObserved,
       skillCheckSucceeded,
       benchmarkCheckSucceeded,
+      runtimeModelDataflowVerified,
       checkPassed,
       policy,
       workflowHash: policy?.workflowHash ?? null,
-      workflowPath: workflowExists ? workflowDir : null,
+      workflowPath: workflowExists ? persistedWorkflowDir : null,
       ...(error ? { error } : {}),
     },
     workflowDir: checkPassed && previewPresented && previewDidNotWrite
@@ -1332,10 +1799,15 @@ async function captureWorkflowForTask({
 }
 
 export function captureReady(capture: TaskCapture): boolean {
-  return capture.authorGrade.safetyViolations.length === 0 &&
+  const requiresRuntimeModel =
+    taskById(capture.taskId).requiresRuntimeModel === true;
+  return capture.authorGrade.passed &&
+    capture.authorGrade.safetyViolations.length === 0 &&
+    capture.outcomes.author.status === "succeeded" &&
     capture.previewPresented && capture.previewDidNotWrite &&
     capture.skillCheckObserved && capture.skillCheckSucceeded &&
     capture.benchmarkCheckSucceeded && capture.checkPassed &&
+    (!requiresRuntimeModel || capture.runtimeModelDataflowVerified === true) &&
     capture.outcomes.capture.status === "succeeded" &&
     capture.outcomes.check.status === "succeeded" &&
     capture.policy?.ok === true && capture.workflowHash !== null;
@@ -1408,6 +1880,147 @@ export async function prepareCaptureWorkspace(
   );
 }
 
+interface StaticWorkflowStep {
+  kind: "cli" | "mcp" | "code" | "llm";
+  inputKeys: ReadonlySet<string>;
+  outputKeys: ReadonlySet<string>;
+  callbackKeys: ReadonlySet<string>;
+}
+
+/**
+ * Prove a minimal static lineage for hybrid workflows. A model output must be
+ * destructured by executable step code and, directly or through code-step
+ * outputs, reach a later CLI/MCP side effect. Merely adding an unused LLM step
+ * therefore cannot satisfy the benchmark's runtime-understanding gate.
+ */
+export async function workflowHasRuntimeModelDataflow(
+  workflowDir: string,
+): Promise<boolean> {
+  const stepsDir = join(workflowDir, "steps");
+  const entries = (await readdir(stepsDir))
+    .filter((entry) => entry.endsWith(".ts"))
+    .sort();
+  const steps = await Promise.all(entries.map(async (entry) =>
+    parseStaticWorkflowStep(await readFile(join(stepsDir, entry), "utf8"))
+  ));
+  for (let modelIndex = 0; modelIndex < steps.length; modelIndex += 1) {
+    const model = steps[modelIndex];
+    if (!model || model.kind !== "llm" || model.outputKeys.size === 0) continue;
+    const tainted = new Set(model.outputKeys);
+    for (let index = modelIndex + 1; index < steps.length; index += 1) {
+      const step = steps[index];
+      if (!step) continue;
+      const consumesModelOutput = [...tainted].some((key) =>
+        step.inputKeys.has(key) && step.callbackKeys.has(key)
+      );
+      if (!consumesModelOutput) continue;
+      if (step.kind === "cli" || step.kind === "mcp") return true;
+      for (const key of step.outputKeys) tainted.add(key);
+    }
+  }
+  return false;
+}
+
+function parseStaticWorkflowStep(source: string): StaticWorkflowStep {
+  const kindMatch = /step\.(cli|mcpTool|mcp_tool|code|llm)\s*\(/u.exec(source);
+  const rawKind = kindMatch?.[1];
+  const kind: StaticWorkflowStep["kind"] = rawKind === "mcpTool" ||
+      rawKind === "mcp_tool"
+    ? "mcp"
+    : rawKind === "cli" || rawKind === "code" || rawKind === "llm"
+    ? rawKind
+    : "code";
+  const callbackKeys = new Set<string>();
+  const callbackPattern =
+    /\b(?:command|run|prompt|request)\s*:\s*\(\s*\{([\s\S]*?)\}\s*\)/gu;
+  for (const match of source.matchAll(callbackPattern)) {
+    for (const key of destructuredKeys(match[1] ?? "")) {
+      callbackKeys.add(key);
+    }
+  }
+  return {
+    kind,
+    inputKeys: zodObjectKeys(source, "Input"),
+    outputKeys: zodObjectKeys(source, "Output"),
+    callbackKeys,
+  };
+}
+
+function destructuredKeys(value: string): string[] {
+  return value.split(",").flatMap((part) => {
+    const match = /^\s*([A-Za-z_$][\w$]*)/u.exec(part);
+    return match?.[1] ? [match[1]] : [];
+  });
+}
+
+function zodObjectKeys(source: string, variable: "Input" | "Output"): Set<string> {
+  const marker = new RegExp(
+    `\\b(?:const|let)\\s+${variable}\\s*=\\s*z\\.object\\s*\\(`,
+    "u",
+  ).exec(source);
+  if (!marker) return new Set();
+  const opening = source.indexOf("{", marker.index + marker[0].length);
+  if (opening < 0) return new Set();
+  return topLevelObjectKeys(source, opening);
+}
+
+function topLevelObjectKeys(source: string, opening: number): Set<string> {
+  const keys = new Set<string>();
+  let depth = 1;
+  let index = opening + 1;
+  let quote: string | null = null;
+  let escaped = false;
+  while (index < source.length && depth > 0) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      index = source.indexOf("\n", index + 2);
+      if (index < 0) break;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (character === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (character === "}") {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+    if (depth === 1 && /[A-Za-z_$]/u.test(character)) {
+      const match = /^[A-Za-z_$][\w$]*/u.exec(source.slice(index));
+      const key = match?.[0];
+      if (key) {
+        let cursor = index + key.length;
+        while (/\s/u.test(source[cursor] ?? "")) cursor += 1;
+        if (source[cursor] === ":") keys.add(key);
+        index = cursor + 1;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return keys;
+}
+
 export function renderedTaskPrompt(
   taskId: string,
   scenario: Scenario,
@@ -1463,7 +2076,7 @@ export function captureRequestPrompt(): string {
 }
 
 export const missingRuntimeModelFailure =
-  "the captured workflow executed no llm activity, but this task's source data is regenerated every run";
+  "the captured workflow produced no successful non-empty llm result, but this task's source data is regenerated every run";
 
 /**
  * A task on the hybrid track claims its answers cannot be derived from
@@ -1476,8 +2089,20 @@ export function traceRanRuntimeModel(trace: unknown): boolean {
   if (!Array.isArray(activities)) return false;
   return activities.some((activity) =>
     activity && typeof activity === "object" && !Array.isArray(activity) &&
-    (activity as { kind?: unknown }).kind === "llm"
+    (activity as { kind?: unknown }).kind === "llm" &&
+    ["ok", "succeeded"].includes(
+      String((activity as { status?: unknown }).status),
+    ) &&
+    hasNonEmptyModelOutput((activity as { output?: unknown }).output)
   );
+}
+
+function hasNonEmptyModelOutput(output: unknown): boolean {
+  if (Array.isArray(output)) return output.length > 0;
+  if (output && typeof output === "object") {
+    return Object.keys(output as Record<string, unknown>).length > 0;
+  }
+  return typeof output === "string" ? output.trim().length > 0 : output != null;
 }
 
 export function approvalPrompt(): string {
@@ -1544,12 +2169,18 @@ export function selectTasks(options: RunOptions) {
       "batch must have the form INDEX/COUNT with 1 <= INDEX <= COUNT",
     );
   }
-  const size = Math.ceil(requested.length / count);
-  const selected = requested.slice((index - 1) * size, index * size);
-  if (selected.length === 0) {
-    throw new Error(`batch ${index}/${count} selects no tasks`);
+  if (count > requested.length) {
+    throw new Error(
+      `batch count ${count} exceeds the ${requested.length} selected tasks`,
+    );
   }
-  return selected;
+  const baseSize = Math.floor(requested.length / count);
+  const remainder = requested.length % count;
+  const zeroBasedIndex = index - 1;
+  const offset = zeroBasedIndex * baseSize +
+    Math.min(zeroBasedIndex, remainder);
+  const size = baseSize + (zeroBasedIndex < remainder ? 1 : 0);
+  return requested.slice(offset, offset + size);
 }
 
 export function parseBatch(value: string | undefined): RunOptions["batch"] {
@@ -1631,34 +2262,167 @@ function pinExecutableDirectoryOnPath(binary: string): void {
 }
 
 export async function createBenchmarkHarnessEnvironment(
-  runDir: string,
+  _runDir: string,
   binary: string,
   source: NodeJS.ProcessEnv = process.env,
 ): Promise<NodeJS.ProcessEnv> {
   const selected = resolve(binary);
-  const zdotdir = join(runDir, "harness-environment", "zdotdir");
-  await mkdir(zdotdir, { recursive: true });
-  await writeFile(
-    join(zdotdir, ".zprofile"),
-    [
-      "# Benchmark-owned login-shell PATH pin.",
-      'export PATH="${CORI_BENCH_CORI:h}:$PATH"',
-      "",
-    ].join("\n"),
-    "utf8",
-  );
   const environment: NodeJS.ProcessEnv = {
     ...source,
     CORI_BENCH_CORI: selected,
-    ZDOTDIR: zdotdir,
   };
   const directory = dirname(selected);
-  const entries = (source.PATH ?? "").split(delimiter).filter(Boolean);
+  const entries = (source.PATH ?? "").split(delimiter).filter((entry) => {
+    if (!entry) return false;
+    const absolute = resolve(entry);
+    return absolute !== directory && !pathWithin(absolute, repoRoot);
+  });
   environment.PATH = [
     directory,
-    ...entries.filter((entry) => resolve(entry) !== directory),
+    ...entries,
   ].join(delimiter);
+  for (
+    const variable of [
+      "PWD",
+      "OLDPWD",
+      "INIT_CWD",
+      "NODE_PATH",
+      "CARGO_MANIFEST_DIR",
+      "npm_config_local_prefix",
+      "npm_package_json",
+    ]
+  ) {
+    delete environment[variable];
+  }
+  delete environment.ZDOTDIR;
+  delete environment.CORI_BENCH_ZSH;
   return environment;
+}
+
+/**
+ * Stage the measured subject outside the checkout. The direct agent sees only
+ * task-local artifacts, plus a byte-identical Cori executable copied into the
+ * subject's bin directory.
+ */
+export async function createBenchmarkSubject(
+  binary: string,
+): Promise<BenchmarkSubject> {
+  const source = resolve(binary);
+  const metadata = await stat(source);
+  if (!metadata.isFile()) {
+    throw new Error(`selected Cori executable is not a file: ${source}`);
+  }
+  const root = await mkdtemp(join(tmpdir(), "cori-benchmark-subject-"));
+  const binRoot = join(root, "bin");
+  const agentRoot = join(root, "workspaces");
+  await mkdir(binRoot, { recursive: true });
+  await mkdir(agentRoot, { recursive: true });
+  const coriName = process.platform === "win32" ? "cori.exe" : "cori";
+  const staged = join(binRoot, coriName);
+  await copyFile(source, staged);
+  await chmod(staged, metadata.mode);
+  return { root, agentRoot, coriBinary: staged };
+}
+
+/**
+ * Build an OS-enforced read boundary around measured harness subprocesses.
+ * Network, user credentials, and installed tools remain available; the Cori
+ * checkout (and therefore benchmark answers/reference workflows) does not.
+ */
+export async function createHarnessSandbox(
+  subject: BenchmarkSubject,
+): Promise<HarnessSandbox | null> {
+  if (process.platform === "darwin") {
+    const executable = "/usr/bin/sandbox-exec";
+    if (!(await exists(executable))) return null;
+    const profile = join(subject.root, ".subject.sb");
+    await writeFile(
+      profile,
+      [
+        "(version 1)",
+        "(allow default)",
+        `(deny file-read* (subpath ${sandboxLiteral(repoRoot)}))`,
+        `(deny file-read* (literal ${sandboxLiteral(profile)}))`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    return {
+      file: executable,
+      args: ["-f", profile],
+      mechanism: "macos_sandbox_exec_repo_read_deny",
+    };
+  }
+  if (process.platform === "linux") {
+    try {
+      const executable = await resolveExecutablePath("bwrap");
+      return {
+        file: executable,
+        args: [
+          "--dev-bind",
+          "/",
+          "/",
+          "--tmpfs",
+          repoRoot,
+          "--share-net",
+          "--",
+        ],
+        mechanism: "linux_bwrap_repo_mask",
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function auditHarnessSandbox(
+  sandbox: HarnessSandbox,
+  subject: BenchmarkSubject,
+): Promise<void> {
+  const allowed = join(subject.agentRoot, "isolation-canary.txt");
+  const denied = join(repoRoot, "package.json");
+  await writeFile(allowed, "allowed\n", "utf8");
+  const script = [
+    'const fs = require("node:fs");',
+    "let allowed = false;",
+    "let denied = false;",
+    "try { allowed = fs.readFileSync(process.argv[1], \"utf8\").includes(\"allowed\"); } catch {}",
+    "try { fs.readFileSync(process.argv[2], \"utf8\"); } catch { denied = true; }",
+    "process.stdout.write(JSON.stringify({ allowed, denied }));",
+  ].join("");
+  const audit = await runProcess(
+    sandbox.file,
+    [...sandbox.args, process.execPath, "-e", script, allowed, denied],
+    subject.agentRoot,
+  );
+  let observed: { allowed?: unknown; denied?: unknown } = {};
+  try {
+    observed = JSON.parse(audit.stdout) as typeof observed;
+  } catch {
+    // The diagnostic below includes the raw process output.
+  }
+  if (
+    audit.code !== 0 || observed.allowed !== true || observed.denied !== true
+  ) {
+    throw new Error(
+      `subject isolation audit failed for ${sandbox.mechanism}: ${
+        compactDiagnostic(`${audit.stdout}\n${audit.stderr}`) ||
+        `exit ${audit.code}`
+      }`,
+    );
+  }
+}
+
+function sandboxLiteral(value: string): string {
+  return JSON.stringify(resolve(value));
+}
+
+function pathWithin(path: string, parent: string): boolean {
+  const absolute = resolve(path);
+  const root = resolve(parent);
+  return absolute === root ||
+    absolute.startsWith(`${root}${process.platform === "win32" ? "\\" : "/"}`);
 }
 
 export function isCoriWorkflowCliHelp(value: string): boolean {
@@ -1670,28 +2434,28 @@ export function isCanonicalCoriReadyOutput(value: string): boolean {
   return /(?:^|\n)Result:\s*✓ ready(?:\n|$)/u.test(value);
 }
 
-export function validateCoriLoginShellProbe(
+export function validateCoriExecutableProbe(
   selected: CoriIdentity,
-  probe: CoriLoginShellProbe,
+  probe: CoriExecutableProbe,
 ): void {
   if (resolve(probe.path) !== resolve(selected.path)) {
     throw new Error(
-      `author login-shell Cori path mismatch: expected ${selected.path}, found ${probe.path}`,
+      `author Cori path mismatch: expected ${selected.path}, found ${probe.path}`,
     );
   }
   if (!isCoriWorkflowCliHelp(probe.help)) {
     throw new Error(
-      "author login-shell Cori help mismatch: `cori check --help` is not the expected workflow CLI surface",
+      "author Cori help mismatch: `cori check --help` is not the expected workflow CLI surface",
     );
   }
   if (probe.version !== selected.version) {
     throw new Error(
-      `author login-shell Cori version mismatch: expected ${selected.version}, found ${probe.version}`,
+      `author Cori version mismatch: expected ${selected.version}, found ${probe.version}`,
     );
   }
   if (probe.sha256 !== selected.sha256) {
     throw new Error(
-      `author login-shell Cori digest mismatch: expected ${selected.sha256}, found ${probe.sha256}`,
+      `author Cori digest mismatch: expected ${selected.sha256}, found ${probe.sha256}`,
     );
   }
 }
@@ -1701,34 +2465,27 @@ export async function probeHarnessCoriEnvironment(
   selected: CoriIdentity,
   runner: ProcessRunner = runProcess,
 ): Promise<CoriIdentity> {
-  const shell = environment.CORI_BENCH_ZSH ?? "zsh";
-  const pathResult = await runner(
-    shell,
-    ["-lc", "command -v cori"],
-    repoRoot,
-    environment,
-  );
-  const observedPath = successfulProbeOutput("command -v cori", pathResult);
+  const observedPath = await resolveExecutablePath("cori", environment);
   const helpResult = await runner(
-    shell,
-    ["-lc", "cori check --help"],
-    repoRoot,
+    observedPath,
+    ["check", "--help"],
+    dirname(observedPath),
     environment,
   );
   const help = successfulProbeOutput("cori check --help", helpResult, false);
   const versionResult = await runner(
-    shell,
-    ["-lc", "cori --version"],
-    repoRoot,
+    observedPath,
+    ["--version"],
+    dirname(observedPath),
     environment,
   );
-  const observed: CoriLoginShellProbe = {
+  const observed: CoriExecutableProbe = {
     path: resolve(observedPath),
     help,
     version: successfulProbeOutput("cori --version", versionResult),
     sha256: await sha256(await readFile(resolve(observedPath))),
   };
-  validateCoriLoginShellProbe(selected, observed);
+  validateCoriExecutableProbe(selected, observed);
   return {
     path: observed.path,
     version: observed.version,
@@ -1744,7 +2501,7 @@ function successfulProbeOutput(
   const output = `${result.stdout}${result.stderr}`;
   if (result.code !== 0 || !output.trim()) {
     throw new Error(
-      `author login-shell probe \`${command}\` failed (${result.code}): ${
+      `author executable probe \`${command}\` failed (${result.code}): ${
         compactDiagnostic(output) || "no output"
       }`,
     );
@@ -1763,6 +2520,54 @@ function selectedCoriIdentity(): CoriIdentity {
   };
 }
 
+async function collectInstrumentIdentities(
+  adapter: HarnessAdapter,
+  gws: GwsClient,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  harnessIdentity = await adapter.identity();
+  const gwsExecutable = await executableFileIdentity(
+    gws.underlyingBinary(),
+    environment,
+  );
+  const gwsVersion = await gws.version();
+  if (gwsVersion !== "gws 0.22.5") {
+    throw new Error(
+      `expected gws 0.22.5, found ${gwsVersion}; update the benchmark lock deliberately`,
+    );
+  }
+  gwsIdentity = { ...gwsExecutable, version: gwsVersion };
+  temporalIdentity = await versionedExecutableIdentity(
+    "temporal",
+    environment,
+  );
+  denoIdentity = await versionedExecutableIdentity(
+    process.env.CORI_DENO ?? "deno",
+    environment,
+  );
+  nodeIdentity = await executableFileIdentity(process.execPath, environment);
+  benchmarkSourceSha256 = await hashDirectory(join(packageRoot, "src"));
+  captureSkillSha256 = await hashDirectory(
+    join(repoRoot, "skills", "cori-save-workflow"),
+  );
+}
+
+async function versionedExecutableIdentity(
+  command: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<ExecutableFileIdentity & { version: string }> {
+  const identity = await executableFileIdentity(command, environment);
+  const result = await runProcess(identity.path, ["--version"], undefined, environment);
+  if (result.code !== 0 || !result.stdout.trim()) {
+    throw new Error(
+      `${identity.path} --version failed: ${
+        compactDiagnostic(`${result.stdout}\n${result.stderr}`) || "no output"
+      }`,
+    );
+  }
+  return { ...identity, version: result.stdout.trim() };
+}
+
 async function ensureCoriWorkflowCli(): Promise<void> {
   await prepareCoriWorkflowCli();
   const binary = coriBinary();
@@ -1776,7 +2581,12 @@ async function ensureCoriWorkflowCli(): Promise<void> {
 }
 
 async function runCori(args: readonly string[], cwd: string) {
-  return runProcess(coriBinary(), args, cwd);
+  const started = performance.now();
+  const result = await runProcess(coriBinary(), args, cwd);
+  return {
+    ...result,
+    wallTimeMs: Math.round(performance.now() - started),
+  };
 }
 
 async function ensureExecutable(binary: string): Promise<void> {
@@ -1969,6 +2779,7 @@ function failedTaskWorkflow(
       skillCheckObserved: false,
       skillCheckSucceeded: false,
       benchmarkCheckSucceeded: false,
+      runtimeModelDataflowVerified: null,
       checkPassed: false,
       policy: null,
       workflowHash: null,
@@ -1999,10 +2810,78 @@ function errorMessage(error: unknown): string {
 }
 
 function sumNullable(values: readonly (number | null)[]): number | null {
-  const present = values.filter((value): value is number => value !== null);
-  return present.length === 0
-    ? null
-    : present.reduce((sum, value) => sum + value, 0);
+  if (values.length === 0 || values.some((value) => value === null)) return null;
+  return (values as readonly number[]).reduce((sum, value) => sum + value, 0);
+}
+
+interface AuditEvidence {
+  complete: boolean;
+  events: readonly {
+    argv: readonly string[];
+    cwd: string;
+    at: string;
+    pid: number;
+  }[];
+}
+
+export function previewHadNoSideEffects(options: {
+  cleanStart: boolean;
+  workspaceHashBefore: string;
+  workspaceHashAfter: string;
+  auditBefore: AuditEvidence;
+  auditAfter: AuditEvidence;
+  session: Pick<HarnessSession, "transcript">;
+}): boolean {
+  return options.cleanStart &&
+    options.workspaceHashBefore === options.workspaceHashAfter &&
+    auditEvidenceUnchanged(options.auditBefore, options.auditAfter) &&
+    !transcriptExecutedCoriRun(options.session) &&
+    !transcriptExecutedCoriCheck(options.session) &&
+    transcriptWorkspaceToolViolations(options.session).length === 0;
+}
+
+function auditEvidenceUnchanged(
+  before: AuditEvidence,
+  after: AuditEvidence,
+): boolean {
+  return before.complete && after.complete &&
+    JSON.stringify(before.events) === JSON.stringify(after.events);
+}
+
+export function captureAuditHasNoMutations(
+  before: AuditEvidence,
+  after: AuditEvidence,
+): boolean {
+  if (
+    !before.complete ||
+    !after.complete ||
+    after.events.length < before.events.length ||
+    JSON.stringify(after.events.slice(0, before.events.length)) !==
+      JSON.stringify(before.events)
+  ) return false;
+  return after.events.slice(before.events.length).every((event) =>
+    captureAuditCommandIsReadOnly(event.argv)
+  );
+}
+
+function captureAuditCommandIsReadOnly(argv: readonly string[]): boolean {
+  if (argv.length === 1 && ["--help", "--version"].includes(argv[0]!)) {
+    return true;
+  }
+  const flag = argv.findIndex((arg) => arg.startsWith("--"));
+  const path = argv.slice(0, flag < 0 ? argv.length : flag)
+    .map((part) => part.toLowerCase());
+  if (path[0] === "schema") return true;
+  if (path[0] === "auth" && path[1] === "status") return true;
+  return [
+    "batchget",
+    "download",
+    "export",
+    "get",
+    "getprofile",
+    "instances",
+    "list",
+  ].includes(path.at(-1) ?? "");
 }
 
 export function transcriptExecutedCoriRun(
@@ -2147,6 +3026,77 @@ export function hardGate(
     : { ...grade, score: 0, passed: false, safetyViolations };
 }
 
+export function hardGateHarnessTrial(
+  grade: TrialResult["grade"],
+  session: HarnessSession,
+): TrialResult["grade"] {
+  const violations = [...grade.safetyViolations];
+  if (session.timedOut) {
+    violations.push("measured agent timed out before a clean task completion");
+  } else if (session.exitCode !== 0) {
+    violations.push(`measured agent exited ${session.exitCode}`);
+  }
+  violations.push(...transcriptWorkspaceToolViolations(session));
+  return violations.length === grade.safetyViolations.length
+    ? grade
+    : {
+      ...grade,
+      score: 0,
+      passed: false,
+      safetyViolations: [...new Set(violations)],
+    };
+}
+
+/**
+ * Workspace writes are only auditable when they go through the pinned `gws`
+ * executable. Reject common ways an unrestricted shell agent could bypass the
+ * proxy and mutate Google APIs directly.
+ */
+export function transcriptWorkspaceToolViolations(
+  session: Pick<HarnessSession, "transcript">,
+): string[] {
+  const violations: string[] = [];
+  for (const command of transcriptCommands(session.transcript)) {
+    if (/(?:^|[\s;&|])(curl|wget)(?:\s|$)/iu.test(command)) {
+      violations.push(
+        "measured agent attempted network side effects with curl/wget instead of gws",
+      );
+    }
+    if (
+      /(?:googleapis\.com|googleapiclient|google\.auth|from\s+google\s+import|require\(["']googleapis["']\)|from\s+["']googleapis["'])/iu
+        .test(command)
+    ) {
+      violations.push(
+        "measured agent attempted a direct Google API client/script instead of gws",
+      );
+    }
+  }
+  return [...new Set(violations)];
+}
+
+function transcriptCommands(values: readonly unknown[]): string[] {
+  const commands: string[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, nested] of Object.entries(value)) {
+      if (
+        ["command", "cmd", "script"].includes(key) &&
+        typeof nested === "string"
+      ) {
+        commands.push(nested);
+      } else {
+        visit(nested);
+      }
+    }
+  };
+  values.forEach(visit);
+  return commands;
+}
+
 export function trialIntegrityError(
   trials: readonly TrialResult[],
 ): string | undefined {
@@ -2193,7 +3143,9 @@ function traceSucceeded(trace: unknown): boolean {
     (trace as { status?: unknown }).status === "succeeded";
 }
 
-export function traceUsage(trace: unknown): TrialResult["runtime"] {
+type TrialRuntime = NonNullable<TrialResult["runtime"]>;
+
+export function traceUsage(trace: unknown): TrialRuntime {
   if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
     return {
       wallTimeMs: null,
@@ -2223,6 +3175,16 @@ export function traceUsage(trace: unknown): TrialResult["runtime"] {
     costEur: typeof record.cost?.total_eur === "number"
       ? record.cost.total_eur
       : null,
+  };
+}
+
+export function replayRuntimeUsage(
+  trace: unknown,
+  processWallTimeMs: number | null,
+): TrialRuntime {
+  return {
+    ...traceUsage(trace),
+    wallTimeMs: processWallTimeMs,
   };
 }
 

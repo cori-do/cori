@@ -1,17 +1,28 @@
 import { SeededRandom } from "./scenario.js";
 
+/**
+ * The ten benchmark tasks are the independent paired units. Publication runs
+ * repeat each task over three regenerated fixtures, average those seeds within
+ * task, and bootstrap the ten task-level differences. Treating all thirty
+ * task/seed pairs as independent would understate uncertainty.
+ */
+export const MIN_PAIRED_TASKS = 10;
+
 export function mean(values: readonly number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-/** Percentile bootstrap CI for replay minus direct scores; deterministic by seed. */
+/** Percentile bootstrap CI over task-level replay-minus-direct scores. */
 export function pairedDifferenceCi95(
   direct: readonly number[],
   replay: readonly number[],
   seed = 1,
   samples = 10_000,
 ): readonly [number, number] | null {
-  if (direct.length === 0 || direct.length !== replay.length) return null;
+  if (
+    direct.length < MIN_PAIRED_TASKS ||
+    direct.length !== replay.length
+  ) return null;
   const deltas = direct.map((value, index) => replay[index]! - value);
   const random = new SeededRandom(seed);
   const means: number[] = [];
@@ -36,8 +47,14 @@ export function reuseAdvantage(
   designCost: number | null,
   directPerRun: number | null,
   replayPerRun: number | null,
+  pairedTasks: number,
 ): boolean {
-  if (safetyViolations > 0 || !pairedCi || pairedCi[0] < -5) return false;
+  if (
+    pairedTasks < MIN_PAIRED_TASKS ||
+    safetyViolations > 0 ||
+    !pairedCi ||
+    pairedCi[0] < -5
+  ) return false;
   if (designCost === null || directPerRun === null || replayPerRun === null) return false;
   return 5 * replayPerRun + designCost < 5 * directPerRun;
 }

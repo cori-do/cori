@@ -31,6 +31,8 @@ pub struct BrokerCtx {
     pub llm_opts: LlmOptions,
     /// Absolute path to the registered workflow directory.
     pub source_root: PathBuf,
+    /// Worker-local content-addressed source cache.
+    pub source_cache_dir: PathBuf,
     /// `~/.cori/credentials/` — token-store backing directory used by
     /// the OAuth subsystem for the encrypted-file fallback and the
     /// non-secret `index.json` metadata file.

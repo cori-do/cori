@@ -18,20 +18,21 @@
 //! without blocking the Temporal worker's poll thread.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use temporalio_sdk::error::ApplicationFailure;
 
 use cori_broker::{
     ActivityOutcome, ActivityStatus, BrokerError, TokenUsage, cli as cli_broker, code, dry_run,
-    llm, mcp,
+    llm, mcp, source_bundle,
 };
-use cori_protocol::StepKind;
+use cori_protocol::{SourceBundle, StepKind};
 
 use crate::broker_ctx::broker_ctx;
 
@@ -47,6 +48,23 @@ pub struct NeedsReauthDetails {
     pub user_id: String,
     pub auth_kind: String,
     pub hint: String,
+}
+
+/// Immutable compile-time facts copied from [`cori_protocol::CompiledStep`].
+///
+/// Keeping these facts in the activity payload makes the Temporal history the
+/// source of truth. An activity must never infer its authorization boundary
+/// from a mutable workflow file on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrozenStep {
+    pub source_sha256: String,
+    /// Digest of the complete workflow tree, including imported helpers.
+    /// Optional only for replaying histories created before tree-boundary
+    /// enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_content_hash: Option<String>,
+    #[serde(default)]
+    pub metadata: JsonMap<String, JsonValue>,
 }
 
 /// Per-activity input. The workflow builds this from its in-memory step
@@ -83,6 +101,14 @@ pub struct ActivityInput {
     /// empty (legacy traces / smoke-test in-memory DAGs).
     #[serde(default)]
     pub source_root: String,
+    /// Immutable workflow source for cross-machine dispatch. When present the
+    /// worker materializes and verifies it before resolving `source_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bundle: Option<SourceBundle>,
+    /// Compile-time source digest and metadata. Missing only for Temporal
+    /// histories created before source-boundary enforcement was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_step: Option<FrozenStep>,
 }
 
 /// Per-activity output. Mirrors what the in-process executor previously
@@ -91,7 +117,8 @@ pub struct ActivityInput {
 pub struct ActivityOutput {
     /// Status string: `"ok"` | `"failed"` | `"skipped"`.
     pub status: String,
-    /// The activity's decoded JSON output (or `Null` when failed/skipped).
+    /// The activity's decoded JSON output. Dry-run activities use
+    /// schema-valid stubs even though their status is `skipped`.
     pub output: JsonValue,
     /// Captured stderr from the broker subprocess (truncated upstream).
     pub stderr: String,
@@ -173,18 +200,30 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
     } else {
         std::path::PathBuf::from(&input.source_root)
     };
-    let absolute_path = workflow_root.join(&input.source_path);
     let dry_run = input.dry_run;
     let step_input = input.input.clone();
     let user_id = input.user_id.clone();
+    let frozen_step = input.frozen_step.clone();
+    let bundled_source = input.source_bundle.clone();
+    let source_path = input.source_path.clone();
+    let source_cache_dir = ctx.source_cache_dir.clone();
     let credentials_dir = ctx.credentials_dir.clone();
     let started_at = Utc::now();
+    let activity_started = Instant::now();
 
-    let outcome: Result<ActivityOutcome, BrokerError> =
-        tokio::task::spawn_blocking(move || match (kind, dry_run) {
+    let outcome: Result<ActivityOutcome, BrokerError> = tokio::task::spawn_blocking(move || {
+        let workflow_root = resolve_activity_source_root(
+            workflow_root,
+            bundled_source.as_ref(),
+            &source_cache_dir,
+            frozen_step.as_ref(),
+        )?;
+        let absolute_path = workflow_root.join(&source_path);
+        verify_source_boundary(&workflow_root, &absolute_path, frozen_step.as_ref())?;
+        match (kind, dry_run) {
             (BrokerKind::Code, _) => code::run(&ctx.runtime, &absolute_path, &step_input),
             (BrokerKind::Cli, false) => {
-                let expected_binary = expected_cli_binary(&absolute_path)?;
+                let expected_binary = expected_cli_binary(&absolute_path, frozen_step.as_ref())?;
                 cli_broker::run(
                     &ctx.runtime,
                     &ctx.caps,
@@ -195,7 +234,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                 )
             }
             (BrokerKind::Cli, true) => {
-                let expected_binary = expected_cli_binary(&absolute_path)?;
+                let expected_binary = expected_cli_binary(&absolute_path, frozen_step.as_ref())?;
                 dry_run::cli(
                     &ctx.runtime,
                     &absolute_path,
@@ -203,36 +242,168 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     Some(&expected_binary),
                 )
             }
-            (BrokerKind::Mcp, false) => mcp::run(
-                &ctx.runtime,
-                &ctx.caps,
-                &absolute_path,
-                &step_input,
-                &user_id,
-                &credentials_dir,
-            ),
-            (BrokerKind::Mcp, true) => dry_run::mcp(&ctx.runtime, &absolute_path, &step_input),
-            (BrokerKind::Llm, false) => {
-                llm::run(&ctx.runtime, &absolute_path, &step_input, &ctx.llm_opts)
+            (BrokerKind::Mcp, false) => {
+                let expected_server =
+                    expected_metadata_string(frozen_step.as_ref(), "server", "MCP server")?;
+                let expected_tool =
+                    expected_metadata_string(frozen_step.as_ref(), "tool", "MCP tool")?;
+                let expected_target = expected_server.as_deref().zip(expected_tool.as_deref());
+                mcp::run(
+                    &ctx.runtime,
+                    &ctx.caps,
+                    &absolute_path,
+                    &step_input,
+                    &user_id,
+                    &credentials_dir,
+                    expected_target,
+                )
             }
-            (BrokerKind::Llm, true) => dry_run::llm(&ctx.runtime, &absolute_path, &step_input),
-        })
-        .await
-        .map_err(|join_err| {
-            // A panic inside the broker is non-retryable — re-raising won't
-            // help and Temporal would otherwise loop forever.
-            ActivityError::application(ApplicationFailure::non_retryable(anyhow!(
-                "broker task panicked: {join_err}"
-            )))
-        })?;
+            (BrokerKind::Mcp, true) => {
+                let expected_server =
+                    expected_metadata_string(frozen_step.as_ref(), "server", "MCP server")?;
+                let expected_tool =
+                    expected_metadata_string(frozen_step.as_ref(), "tool", "MCP tool")?;
+                dry_run::mcp(
+                    &ctx.runtime,
+                    &absolute_path,
+                    &step_input,
+                    expected_server.as_deref(),
+                    expected_tool.as_deref(),
+                )
+            }
+            (BrokerKind::Llm, false) => {
+                let expected_model =
+                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
+                llm::run(
+                    &ctx.runtime,
+                    &absolute_path,
+                    &step_input,
+                    &ctx.llm_opts,
+                    expected_model.as_deref(),
+                )
+            }
+            (BrokerKind::Llm, true) => {
+                let expected_model =
+                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
+                dry_run::llm(
+                    &ctx.runtime,
+                    &absolute_path,
+                    &step_input,
+                    expected_model.as_deref(),
+                )
+            }
+        }
+    })
+    .await
+    .map_err(|join_err| {
+        // A panic inside the broker is non-retryable — re-raising won't
+        // help and Temporal would otherwise loop forever.
+        ActivityError::application(ApplicationFailure::non_retryable(anyhow!(
+            "broker task panicked: {join_err}"
+        )))
+    })?;
 
     match outcome {
-        Ok(o) => Ok(map_outcome(o, dry_run, started_at)),
+        Ok(mut outcome) => {
+            // Include source-integrity verification and blocking-pool queue
+            // time in the activity wall clock, not only the inner broker call.
+            outcome.duration = activity_started.elapsed();
+            Ok(map_outcome(outcome, dry_run, started_at))
+        }
         Err(err) => Err(broker_error_to_activity_error(err)),
     }
 }
 
-fn expected_cli_binary(step_path: &std::path::Path) -> Result<String, BrokerError> {
+fn resolve_activity_source_root(
+    legacy_root: PathBuf,
+    bundle: Option<&SourceBundle>,
+    source_cache_dir: &std::path::Path,
+    frozen: Option<&FrozenStep>,
+) -> Result<PathBuf, BrokerError> {
+    let Some(bundle) = bundle else {
+        return Ok(legacy_root);
+    };
+    if let Some(expected) = frozen.and_then(|frozen| frozen.workflow_content_hash.as_deref())
+        && bundle.content_sha256 != expected
+    {
+        return Err(BrokerError::SourceBundle {
+            message: format!(
+                "bundle content digest {} does not match workflow history digest {expected}",
+                bundle.content_sha256
+            ),
+        });
+    }
+    source_bundle::materialize(bundle, source_cache_dir)
+}
+
+fn verify_source_boundary(
+    workflow_root: &std::path::Path,
+    step_path: &std::path::Path,
+    frozen: Option<&FrozenStep>,
+) -> Result<(), BrokerError> {
+    let Some(frozen) = frozen else {
+        return Ok(());
+    };
+    let source = std::fs::read(step_path).map_err(BrokerError::Io)?;
+    let actual = cori_compiler::source_sha256(&source);
+    if actual != frozen.source_sha256 {
+        return Err(BrokerError::StepFailed {
+            message: format!(
+                "step source changed after compilation for `{}` (expected sha256 {}, got {})",
+                step_path.display(),
+                frozen.source_sha256,
+                actual,
+            ),
+            stack: None,
+        });
+    }
+
+    if let Some(expected) = frozen.workflow_content_hash.as_deref() {
+        let actual = cori_compiler::workflow_content_hash(workflow_root).map_err(|error| {
+            BrokerError::StepFailed {
+                message: format!(
+                    "could not verify frozen workflow tree `{}`: {error}",
+                    workflow_root.display()
+                ),
+                stack: None,
+            }
+        })?;
+        if actual != expected {
+            return Err(BrokerError::StepFailed {
+                message: format!(
+                    "workflow files changed after compilation under `{}` (expected content hash {}, got {})",
+                    workflow_root.display(),
+                    expected,
+                    actual,
+                ),
+                stack: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn expected_cli_binary(
+    step_path: &std::path::Path,
+    frozen: Option<&FrozenStep>,
+) -> Result<String, BrokerError> {
+    if let Some(frozen) = frozen {
+        return frozen
+            .metadata
+            .get("binary")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| BrokerError::StepFailed {
+                message: format!(
+                    "compiled CLI metadata for `{}` is missing its frozen `binary`",
+                    step_path.display()
+                ),
+                stack: None,
+            });
+    }
+
+    // Compatibility only for Temporal histories produced before FrozenStep
+    // existed. New runs always use the compiled metadata above.
     let source = std::fs::read_to_string(step_path).map_err(BrokerError::Io)?;
     cori_compiler::cli_binary_from_source(&source).map_err(|message| BrokerError::StepFailed {
         message: format!(
@@ -241,6 +412,27 @@ fn expected_cli_binary(step_path: &std::path::Path) -> Result<String, BrokerErro
         ),
         stack: None,
     })
+}
+
+fn expected_metadata_string(
+    frozen: Option<&FrozenStep>,
+    key: &str,
+    label: &str,
+) -> Result<Option<String>, BrokerError> {
+    let Some(frozen) = frozen else {
+        return Ok(None);
+    };
+    frozen
+        .metadata
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| BrokerError::StepFailed {
+            message: format!(
+                "compiled activity metadata is missing the required `{key}` {label} boundary"
+            ),
+            stack: None,
+        })
 }
 
 fn map_outcome(o: ActivityOutcome, dry_run: bool, started_at: DateTime<Utc>) -> ActivityOutput {
@@ -253,6 +445,10 @@ fn map_outcome(o: ActivityOutcome, dry_run: bool, started_at: DateTime<Utc>) -> 
     let duration_ms = u64::try_from(o.duration.as_millis()).unwrap_or(u64::MAX);
     let ended_at =
         started_at + chrono::Duration::milliseconds(duration_ms.min(i64::MAX as u64) as i64);
+    let mut notes = o.notes;
+    if mocked {
+        notes.push("mocked by --dry-run".to_string());
+    }
     ActivityOutput {
         status: status.to_string(),
         output: o.output,
@@ -262,11 +458,7 @@ fn map_outcome(o: ActivityOutcome, dry_run: bool, started_at: DateTime<Utc>) -> 
         ended_at: Some(ended_at),
         cost_eur: o.cost_eur,
         usage: o.usage,
-        notes: if mocked {
-            vec!["mocked by --dry-run".to_string()]
-        } else {
-            Vec::new()
-        },
+        notes,
     }
 }
 
@@ -345,6 +537,9 @@ fn classify(err: &BrokerError) -> Category {
         RuntimeUnavailable(_) => Category::NonRetryable {
             type_name: "RuntimeUnavailableError",
         },
+        SourceBundle { .. } => Category::NonRetryable {
+            type_name: "SourceBundleError",
+        },
         StepFailed { .. } => Category::NonRetryable {
             type_name: "StepFailedError",
         },
@@ -365,11 +560,29 @@ fn classify(err: &BrokerError) -> Category {
         LlmHttp(_) => Category::Retryable {
             type_name: "LlmHttpError",
         },
-        // 4xx (auth/perm) won't recover; 5xx + 429 may. Without finer
-        // detail in the error we treat as retryable; the per-step retry
-        // cap bounds the damage.
-        LlmProviderError { .. } => Category::Retryable {
+        LlmProviderError {
+            status: 401 | 403, ..
+        } => Category::NonRetryable {
+            type_name: "AuthenticationError",
+        },
+        LlmProviderError {
+            status: 408 | 429, ..
+        }
+        | LlmProviderError {
+            status: 500..=599, ..
+        } => Category::Retryable {
             type_name: "LlmProviderError",
+        },
+        LlmProviderError {
+            status: 400..=499, ..
+        } => Category::NonRetryable {
+            type_name: "LlmProviderRequestError",
+        },
+        // A malformed success envelope can be transient provider behavior.
+        // Redirects and other unexpected statuses are bounded by the step's
+        // validated retry policy.
+        LlmProviderError { .. } => Category::Retryable {
+            type_name: "LlmProviderProtocolError",
         },
     }
 }
@@ -377,6 +590,7 @@ fn classify(err: &BrokerError) -> Category {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn runner_schema_validation_is_non_retryable() {
@@ -390,5 +604,111 @@ mod tests {
                 type_name: "SchemaValidationError"
             }
         ));
+    }
+
+    #[test]
+    fn llm_http_statuses_follow_retry_taxonomy() {
+        let provider_error = |status| BrokerError::LlmProviderError {
+            provider: "openai",
+            status,
+            body: "fixture".to_string(),
+        };
+        for status in [408, 429, 500, 503] {
+            assert!(matches!(
+                classify(&provider_error(status)),
+                Category::Retryable { .. }
+            ));
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(matches!(
+                classify(&provider_error(status)),
+                Category::NonRetryable { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn frozen_cli_metadata_does_not_reparse_mutable_source() {
+        let temp = tempdir().expect("temporary workflow");
+        let step = temp.path().join("01_cli.ts");
+        std::fs::write(
+            &step,
+            "export default step.cli({ command: () => [\"unexpected\"] });",
+        )
+        .expect("step source");
+        let frozen = FrozenStep {
+            source_sha256: "not needed by metadata lookup".to_string(),
+            workflow_content_hash: None,
+            metadata: JsonMap::from_iter([(
+                "binary".to_string(),
+                JsonValue::String("approved".to_string()),
+            )]),
+        };
+
+        assert_eq!(
+            expected_cli_binary(&step, Some(&frozen)).expect("frozen binary"),
+            "approved"
+        );
+    }
+
+    #[test]
+    fn source_boundary_detects_step_and_imported_helper_drift() {
+        let temp = tempdir().expect("temporary workflow");
+        let steps = temp.path().join("steps");
+        std::fs::create_dir(&steps).expect("steps directory");
+        let step = steps.join("01_code.ts");
+        std::fs::write(&step, "export default { kind: \"code\" };\n").expect("step source");
+        let helper = temp.path().join("types.ts");
+        std::fs::write(&helper, "export type Row = { id: string };\n").expect("helper");
+
+        let source = std::fs::read(&step).expect("step bytes");
+        let frozen = FrozenStep {
+            source_sha256: cori_compiler::source_sha256(&source),
+            workflow_content_hash: Some(
+                cori_compiler::workflow_content_hash(temp.path()).expect("workflow hash"),
+            ),
+            metadata: JsonMap::new(),
+        };
+        verify_source_boundary(temp.path(), &step, Some(&frozen))
+            .expect("unchanged workflow should pass");
+
+        std::fs::write(&helper, "export type Row = { id: number };\n").expect("mutate helper");
+        let helper_error = verify_source_boundary(temp.path(), &step, Some(&frozen))
+            .expect_err("helper drift must fail");
+        assert!(helper_error.to_string().contains("workflow files changed"));
+
+        std::fs::write(&step, "export default { kind: \"llm\" };\n").expect("mutate step");
+        let step_error = verify_source_boundary(temp.path(), &step, Some(&frozen))
+            .expect_err("step drift must fail");
+        assert!(step_error.to_string().contains("step source changed"));
+    }
+
+    #[test]
+    fn bundled_source_materializes_when_trigger_path_is_unavailable() {
+        let source = tempdir().expect("source workflow");
+        let cache = tempdir().expect("worker source cache");
+        std::fs::create_dir(source.path().join("steps")).expect("steps");
+        let step = source.path().join("steps/01_code.ts");
+        std::fs::write(&step, "export default { kind: \"code\" };\n").expect("step");
+        std::fs::write(source.path().join("manifest.md"), "source transport\n").expect("manifest");
+        let tree_hash = cori_compiler::workflow_content_hash(source.path()).expect("workflow hash");
+        let bundle =
+            cori_broker::source_bundle::build(source.path(), &tree_hash).expect("source bundle");
+        let frozen = FrozenStep {
+            source_sha256: cori_compiler::source_sha256(&std::fs::read(&step).expect("step bytes")),
+            workflow_content_hash: Some(tree_hash),
+            metadata: JsonMap::new(),
+        };
+
+        let resolved = resolve_activity_source_root(
+            PathBuf::from("/trigger/path/not/available/on/worker"),
+            Some(&bundle),
+            cache.path(),
+            Some(&frozen),
+        )
+        .expect("worker materialization");
+        assert!(resolved.join("steps/01_code.ts").is_file());
+        verify_source_boundary(&resolved, &resolved.join("steps/01_code.ts"), Some(&frozen))
+            .expect("materialized bytes match workflow history");
     }
 }

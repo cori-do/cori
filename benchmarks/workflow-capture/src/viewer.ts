@@ -1,10 +1,11 @@
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
 
 import {
   INPUT_TOKEN_PRICE_PER_MILLION_USD,
   OUTPUT_TOKEN_PRICE_PER_MILLION_USD,
   readJson,
+  resolveExistingRunDirectory,
 } from "./artifacts.js";
 import type { BenchmarkResultV2 } from "./types.js";
 
@@ -1163,7 +1164,9 @@ export async function writeBenchmarkViewer(
   runId: string,
   artifactsRoot = "artifacts",
 ): Promise<string> {
-  return writeBenchmarkViewerForRun(resolve(artifactsRoot, runId));
+  return writeBenchmarkViewerForRun(
+    await resolveExistingRunDirectory(artifactsRoot, runId),
+  );
 }
 
 /** Regenerate the review page after any command changes a run's artifacts. */

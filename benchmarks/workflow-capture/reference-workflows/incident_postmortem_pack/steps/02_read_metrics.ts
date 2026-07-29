@@ -8,6 +8,6 @@ export default step.cli({
   description: "Read the incident timestamps",
   input: Input,
   output: Output,
-  command: ({ metrics_spreadsheet_id }) => ["gws", "sheets", "spreadsheets", "values", "get", "--params", JSON.stringify({ spreadsheetId: metrics_spreadsheet_id, range: "Source!A1:C10" })],
+  command: ({ metrics_spreadsheet_id }) => ["gws", "sheets", "spreadsheets", "values", "get", "--params", JSON.stringify({ spreadsheetId: metrics_spreadsheet_id, range: "Source!A1:C10" }), "--format", "json"],
   parse: (stdout) => ({ values: (JSON.parse(stdout) as { values?: string[][] }).values ?? [] }),
 });

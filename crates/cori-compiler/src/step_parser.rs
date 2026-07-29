@@ -25,7 +25,7 @@
 use regex::Regex;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use cori_protocol::StepKind;
+use cori_protocol::{MAX_ACTIVITY_ATTEMPTS, MAX_ACTIVITY_TIMEOUT_MS, StepKind};
 
 #[derive(Debug, Clone)]
 pub struct ParsedStep {
@@ -143,8 +143,19 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
     // 5. Kind-agnostic scalar metadata shared by every step kind
     //    (`BaseStepOpts` in the SDK).
     let mut metadata = JsonMap::new();
-    if let Some(retries) = extract_retries_field(args_span) {
-        metadata.insert("retries".into(), JsonValue::Object(retries));
+    match extract_retries_field(args_span) {
+        Ok(Some(retries)) => {
+            metadata.insert("retries".into(), JsonValue::Object(retries));
+        }
+        Ok(None) => {}
+        Err(error) => errors.push(error),
+    }
+    match extract_timeout_field(args_span) {
+        Ok(Some(timeout_ms)) => {
+            metadata.insert("timeout_ms".into(), JsonValue::Number(timeout_ms.into()));
+        }
+        Ok(None) => {}
+        Err(error) => errors.push(error),
     }
 
     // 6. Kind-specific scalar metadata.
@@ -319,6 +330,10 @@ fn extract_balanced(s: &str, open_at: usize, open: char, close: char) -> Option<
             i += 1;
             continue;
         }
+        if b == b'/' && regex_can_start(bytes, i, start) {
+            i = skip_regex_literal(bytes, i)?;
+            continue;
+        }
         match b as char {
             '"' | '\'' | '`' => in_str = Some(b),
             c if c == open => depth += 1,
@@ -335,6 +350,82 @@ fn extract_balanced(s: &str, open_at: usize, open: char, close: char) -> Option<
     None
 }
 
+fn regex_can_start(bytes: &[u8], slash_at: usize, span_start: usize) -> bool {
+    let mut cursor = slash_at;
+    while cursor > span_start && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor == span_start {
+        return true;
+    }
+    let previous = bytes[cursor - 1];
+    if matches!(
+        previous,
+        b'(' | b'['
+            | b'{'
+            | b','
+            | b':'
+            | b';'
+            | b'='
+            | b'!'
+            | b'?'
+            | b'&'
+            | b'|'
+            | b'+'
+            | b'-'
+            | b'*'
+            | b'%'
+            | b'^'
+            | b'~'
+            | b'<'
+            | b'>'
+    ) {
+        return true;
+    }
+    if previous.is_ascii_alphanumeric() || matches!(previous, b'_' | b'$') {
+        let end = cursor;
+        while cursor > span_start
+            && (bytes[cursor - 1].is_ascii_alphanumeric()
+                || matches!(bytes[cursor - 1], b'_' | b'$'))
+        {
+            cursor -= 1;
+        }
+        return matches!(
+            &bytes[cursor..end],
+            b"return" | b"throw" | b"case" | b"delete" | b"void" | b"typeof" | b"yield"
+        );
+    }
+    false
+}
+
+fn skip_regex_literal(bytes: &[u8], slash_at: usize) -> Option<usize> {
+    let mut cursor = slash_at + 1;
+    let mut in_class = false;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' if cursor + 1 < bytes.len() => cursor += 2,
+            b'[' if !in_class => {
+                in_class = true;
+                cursor += 1;
+            }
+            b']' if in_class => {
+                in_class = false;
+                cursor += 1;
+            }
+            b'/' if !in_class => {
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
+                    cursor += 1;
+                }
+                return Some(cursor);
+            }
+            b'\n' | b'\r' => return None,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
 /// Validate the SDK contract for the optional second `parse` argument.
 /// CLI parsing happens after the command has completed and receives only
 /// `{ stderr, exitCode }`; workflow input is deliberately not re-injected.
@@ -345,8 +436,10 @@ fn validate_cli_parse_context(body: &str, line_offset: usize) -> Vec<ParseError>
     )
     .expect("static regex");
     if let Some(captures) = named_context.captures(body) {
-        let signature = captures.get(0).expect("whole regex match");
-        let context_name = captures.get(1).expect("parse context capture").as_str();
+        let (Some(signature), Some(context_name)) = (captures.get(0), captures.get(1)) else {
+            return errors;
+        };
+        let context_name = context_name.as_str();
         let callback_body = &body[signature.end()..];
         let mut reported = Vec::new();
         for (property, offset) in member_properties(callback_body, context_name) {
@@ -369,8 +462,10 @@ fn validate_cli_parse_context(body: &str, line_offset: usize) -> Vec<ParseError>
         Regex::new(r"parse\s*:\s*(?:async\s*)?\(\s*[^,()]+\s*,\s*\{([^{}]*)\}\s*\)\s*=>")
             .expect("static regex");
     if let Some(captures) = destructured_context.captures(body) {
-        let signature = captures.get(0).expect("whole regex match");
-        let bindings = captures.get(1).expect("parse context bindings").as_str();
+        let (Some(signature), Some(bindings)) = (captures.get(0), captures.get(1)) else {
+            return errors;
+        };
+        let bindings = bindings.as_str();
         let line = line_offset
             + body[..signature.start()]
                 .bytes()
@@ -755,22 +850,85 @@ fn extract_batch_field(body: &str) -> Option<(u64, String)> {
 /// `max` is required for the field to be recognised; `backoff` is optional.
 /// The emitted metadata mirrors the SDK field names so the worker can read
 /// `retries.max` / `retries.backoff` directly.
-fn extract_retries_field(body: &str) -> Option<JsonMap<String, JsonValue>> {
+fn extract_retries_field(body: &str) -> Result<Option<JsonMap<String, JsonValue>>, ParseError> {
     let key_re = Regex::new(r"(?m)(^|[\s,{])\s*retries\s*:\s*\{").expect("static regex");
-    let m = key_re.find(body)?;
-    let brace_at = body[..m.end()].rfind('{')?;
-    let inner = extract_balanced(body, brace_at, '{', '}')?;
-    let max_re = Regex::new(r#"(?m)(^|[\s,{])\s*max\s*:\s*(\d+)"#).expect("static regex");
+    let Some(m) = key_re.find(body) else {
+        return Ok(None);
+    };
+    let brace_at = body[..m.end()]
+        .rfind('{')
+        .ok_or_else(|| ParseError::new("invalid `retries` object").field("retries"))?;
+    let inner = extract_balanced(body, brace_at, '{', '}')
+        .ok_or_else(|| ParseError::new("unbalanced `retries` object").field("retries"))?;
+    let max_re = Regex::new(r#"(?m)(^|[\s,{])\s*max\s*:\s*(-?\d+)"#).expect("static regex");
     let max = max_re
         .captures(inner)
         .and_then(|c| c.get(2))
-        .and_then(|m| m.as_str().parse::<u64>().ok())?;
+        .ok_or_else(|| {
+            ParseError::new(format!(
+                "`retries.max` must be an integer from 1 through {MAX_ACTIVITY_ATTEMPTS}"
+            ))
+            .field("retries.max")
+        })?
+        .as_str()
+        .parse::<u64>()
+        .map_err(|_| {
+            ParseError::new(format!(
+                "`retries.max` must be an integer from 1 through {MAX_ACTIVITY_ATTEMPTS}"
+            ))
+            .field("retries.max")
+        })?;
+    if !(1..=u64::from(MAX_ACTIVITY_ATTEMPTS)).contains(&max) {
+        return Err(
+            ParseError::new(format!(
+                "`retries.max` must be from 1 through {MAX_ACTIVITY_ATTEMPTS}; Temporal treats 0 as unlimited"
+            ))
+            .field("retries.max"),
+        );
+    }
     let mut out = JsonMap::new();
     out.insert("max".into(), JsonValue::Number(max.into()));
     if let Some(backoff) = extract_string_field(inner, "backoff") {
+        if !matches!(backoff.as_str(), "exponential" | "linear") {
+            return Err(ParseError::new(
+                "`retries.backoff` must be either `\"exponential\"` or `\"linear\"`",
+            )
+            .field("retries.backoff"));
+        }
         out.insert("backoff".into(), JsonValue::String(backoff));
     }
-    Some(out)
+    Ok(Some(out))
+}
+
+fn extract_timeout_field(body: &str) -> Result<Option<u64>, ParseError> {
+    let key_re = Regex::new(r"(?m)(^|[\s,{])\s*timeout_ms\s*:").expect("static regex");
+    let Some(key) = key_re.find(body) else {
+        return Ok(None);
+    };
+    let value = &body[key.end()..];
+    let literal_re = Regex::new(r"^\s*(-?\d+)").expect("static regex");
+    let literal = literal_re
+        .captures(value)
+        .and_then(|captures| captures.get(1))
+        .ok_or_else(|| {
+            ParseError::new(format!(
+                "`timeout_ms` must be an integer from 1 through {MAX_ACTIVITY_TIMEOUT_MS}"
+            ))
+            .field("timeout_ms")
+        })?;
+    let timeout_ms = literal.as_str().parse::<u64>().map_err(|_| {
+        ParseError::new(format!(
+            "`timeout_ms` must be an integer from 1 through {MAX_ACTIVITY_TIMEOUT_MS}"
+        ))
+        .field("timeout_ms")
+    })?;
+    if !(1..=MAX_ACTIVITY_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(ParseError::new(format!(
+            "`timeout_ms` must be from 1 through {MAX_ACTIVITY_TIMEOUT_MS}"
+        ))
+        .field("timeout_ms"));
+    }
+    Ok(Some(timeout_ms))
 }
 
 #[cfg(test)]
@@ -873,6 +1031,22 @@ export default step.code({
         let parsed = parse(src).unwrap();
         assert_eq!(parsed.kind, StepKind::Code);
         assert_eq!(parsed.description, "encode");
+    }
+
+    #[test]
+    fn regex_with_escaped_balancing_delimiters_does_not_close_the_step_call() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.code({
+  description: "match delimiters",
+  run: ({ value }) => ({
+    parenthesis: /\)/u.test(value),
+    bracket: /\]/u.test(value),
+    brace: /\}/u.test(value),
+  }),
+});"#;
+        let parsed = parse(src).expect("regex delimiters stay inside the step body");
+        assert_eq!(parsed.kind, StepKind::Code);
+        assert_eq!(parsed.description, "match delimiters");
     }
 
     #[test]
@@ -985,6 +1159,45 @@ export default step.code({
         let retries = p.metadata.get("retries").unwrap().as_object().unwrap();
         assert_eq!(retries.get("max").unwrap(), 2);
         assert!(retries.get("backoff").is_none());
+    }
+
+    #[test]
+    fn retries_must_be_finite_and_bounded() {
+        for max in ["0", "-1", "11", "999999999999999999999999999"] {
+            let src = format!(
+                "import {{ step }} from \"@cori-do/sdk\";\nexport default step.code({{ description: \"x\", retries: {{ max: {max} }}, run: (x) => x }});"
+            );
+            let errors = parse(&src).expect_err("unsafe retry count must fail");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.field.as_deref() == Some("retries.max")),
+                "{max}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_is_extracted_and_bounded() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", timeout_ms: 2500, run: (x) => x });";
+        let parsed = parse(src).expect("literal timeout");
+        assert_eq!(
+            parsed.metadata.get("timeout_ms"),
+            Some(&JsonValue::from(2500))
+        );
+
+        for timeout in ["0", "-1", "3600001", "timeout"] {
+            let src = format!(
+                "import {{ step }} from \"@cori-do/sdk\";\nexport default step.code({{ description: \"x\", timeout_ms: {timeout}, run: (x) => x }});"
+            );
+            let errors = parse(&src).expect_err("unsafe timeout must fail");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.field.as_deref() == Some("timeout_ms")),
+                "{timeout}: {errors:?}"
+            );
+        }
     }
 
     #[test]

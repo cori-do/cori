@@ -21,7 +21,7 @@ use tracing::debug;
 
 use crate::BrokerError;
 use crate::process::hide_console_window;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, apply_module_resolution_flags};
 
 pub const ENVELOPE_PREFIX: &str = "\u{001E}CORI_RUNNER\u{001E}";
 
@@ -42,6 +42,7 @@ pub enum RunnerMode {
     McpArgs,
     LlmPrompt,
     LlmStub,
+    OutputStub,
     ValidateOutput,
 }
 
@@ -54,6 +55,7 @@ impl RunnerMode {
             RunnerMode::McpArgs => "mcp_args",
             RunnerMode::LlmPrompt => "llm_prompt",
             RunnerMode::LlmStub => "llm_stub",
+            RunnerMode::OutputStub => "output_stub",
             RunnerMode::ValidateOutput => "validate_output",
         }
     }
@@ -98,10 +100,24 @@ pub fn invoke(
     cmd.arg("run")
         .arg("--quiet")
         .arg("--no-prompt")
-        .arg("--sloppy-imports")
-        .arg("--allow-read")
-        .arg("--allow-env")
-        .arg("--allow-net=registry.npmjs.org,esm.sh,jsr.io")
+        .arg("--cached-only");
+    apply_module_resolution_flags(&mut cmd);
+    let step_parent = step_file_path.parent().unwrap_or_else(|| Path::new("."));
+    let workflow_root = if step_parent.file_name().and_then(|name| name.to_str()) == Some("steps") {
+        step_parent.parent().unwrap_or(step_parent)
+    } else {
+        step_parent
+    };
+    let runtime_root = runtime
+        .config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    cmd.arg(format!("--allow-read={}", workflow_root.display()))
+        .arg(format!("--allow-read={}", runtime_root.display()))
+        .arg("--no-remote")
+        .arg("--lock")
+        .arg(&runtime.lock_path)
+        .arg("--frozen")
         .arg("--config")
         .arg(&runtime.config_path)
         .arg(&runtime.runner_script)

@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { BenchmarkResultV2 } from "./types.js";
 
@@ -21,6 +29,56 @@ export async function writeJson(path: string, value: unknown): Promise<void> {
 
 export async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+const runIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
+
+export function validateRunId(runId: string, label = "run ID"): string {
+  if (!runIdPattern.test(runId)) {
+    throw new Error(
+      `${label} must contain only letters, numbers, dots, underscores, and hyphens`,
+    );
+  }
+  return runId;
+}
+
+/**
+ * Resolve an existing run only after validating its opaque ID, then verify the
+ * canonical target remains beneath the canonical artifacts root. This rejects
+ * both lexical traversal and a valid-looking ID that names an escaping symlink.
+ */
+export async function resolveExistingRunDirectory(
+  artifactsRoot: string,
+  runId: string,
+  label = "run ID",
+): Promise<string> {
+  validateRunId(runId, label);
+  const canonicalRoot = await realpath(resolve(artifactsRoot));
+  const candidate = resolve(canonicalRoot, runId);
+  assertContainedRunDirectory(canonicalRoot, candidate, label);
+  const canonicalRunDirectory = await realpath(candidate);
+  assertContainedRunDirectory(canonicalRoot, canonicalRunDirectory, label);
+  const metadata = await stat(canonicalRunDirectory);
+  if (!metadata.isDirectory()) {
+    throw new Error(`${label} does not identify an artifact run directory`);
+  }
+  return canonicalRunDirectory;
+}
+
+function assertContainedRunDirectory(
+  canonicalRoot: string,
+  candidate: string,
+  label: string,
+): void {
+  const pathFromRoot = relative(canonicalRoot, candidate);
+  if (
+    pathFromRoot === "" ||
+    pathFromRoot === ".." ||
+    pathFromRoot.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromRoot)
+  ) {
+    throw new Error(`${label} resolves outside the artifacts root`);
+  }
 }
 
 export function scorecard(result: BenchmarkResultV2): string {

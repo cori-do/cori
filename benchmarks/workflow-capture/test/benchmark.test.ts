@@ -3,9 +3,18 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   codexAutomationArgs,
@@ -23,6 +32,7 @@ import {
   gmailFixtureReady,
   GwsClient,
   messageIsUnread,
+  parseGwsAuditLog,
   requireBenchmarkCalendarId,
   WorkspaceScenarioDriver,
 } from "../src/gws.js";
@@ -37,6 +47,7 @@ import {
   aggregateCaptures,
   approvalPrompt,
   assertResultCoriIdentity,
+  captureAuditHasNoMutations,
   captureConversationTurns,
   captureReady,
   captureRequestPrompt,
@@ -46,6 +57,7 @@ import {
   failedTraceDiagnostic,
   formatWorkflowCheckFailure,
   hardGate,
+  inferentiallyEligible,
   isCanonicalCoriReadyOutput,
   isCoriWorkflowCliHelp,
   missingRuntimeModelFailure,
@@ -53,6 +65,7 @@ import {
   profilePairs,
   prepareCaptureWorkspace,
   prepareDirectWorkspace,
+  previewHadNoSideEffects,
   probeHarnessCoriEnvironment,
   renderedTaskPrompt,
   report,
@@ -65,7 +78,7 @@ import {
   transcriptExecutedCoriCheck,
   transcriptHasWorkflowPreview,
   transcriptSuccessfulCoriCheck,
-  validateCoriLoginShellProbe,
+  validateCoriExecutableProbe,
   workspaceCoriBinary,
 } from "../src/runner.js";
 import {
@@ -78,12 +91,16 @@ import {
 } from "../src/scenario.js";
 import { pairedDifferenceCi95, reuseAdvantage } from "../src/statistics.js";
 import { assertTaskCatalog, TASKS } from "../src/tasks.js";
-import { benchmarkViewerDocument } from "../src/viewer.js";
+import {
+  benchmarkViewerDocument,
+  writeBenchmarkViewer,
+} from "../src/viewer.js";
 import type {
   BenchmarkResultV2,
   Grade,
   Json,
   Scenario,
+  TaskCapture,
   TrialResult,
   WorkspaceSnapshot,
 } from "../src/types.js";
@@ -289,6 +306,12 @@ test("capture resumes one conversation for task, preview, and approval", async (
   });
   const adapter: HarnessAdapter = {
     name: "codex",
+    identity: async () => ({
+      command: "codex",
+      path: "/tmp/codex",
+      sha256: "a".repeat(64),
+      version: "test",
+    }),
     version: async () => "test",
     start: async (prompt) => session("author-session", prompt),
     resume: async (sessionId, prompt) => {
@@ -514,6 +537,54 @@ test("an interrupted run remains readable and can clean up without result.json",
   }
 });
 
+test("artifact commands reject traversal run IDs before reading run data", async () => {
+  const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-run-id-traversal-"));
+  try {
+    const attempts = [
+      () => cleanup("../outside", artifactsRoot),
+      () => report("../outside", artifactsRoot),
+      () => writeBenchmarkViewer("../outside", artifactsRoot),
+      () =>
+        combineRuns(
+          ["missing-valid-run", "../outside"],
+          artifactsRoot,
+        ),
+    ];
+    for (const attempt of attempts) {
+      await assert.rejects(
+        attempt(),
+        /run ID must contain only letters, numbers, dots, underscores, and hyphens/u,
+      );
+    }
+  } finally {
+    await rm(artifactsRoot, { recursive: true, force: true });
+  }
+});
+
+test("artifact commands reject valid-looking run IDs that symlink outside the artifacts root", async () => {
+  const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-run-id-root-"));
+  const outside = await mkdtemp(join(tmpdir(), "cori-run-id-outside-"));
+  const runId = "linked-run";
+  try {
+    await symlink(outside, join(artifactsRoot, runId), "dir");
+    const attempts = [
+      () => cleanup(runId, artifactsRoot),
+      () => report(runId, artifactsRoot),
+      () => writeBenchmarkViewer(runId, artifactsRoot),
+      () => combineRuns([runId, runId], artifactsRoot),
+    ];
+    for (const attempt of attempts) {
+      await assert.rejects(
+        attempt(),
+        /run ID resolves outside the artifacts root/u,
+      );
+    }
+  } finally {
+    await rm(artifactsRoot, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("GWS version ignores the CLI disclaimer line", async () => {
   const gws = new GwsClient(async () => ({
     code: 0,
@@ -539,11 +610,7 @@ test("Cori environment validation rejects an unrelated binary with the same name
 });
 
 test(
-  "benchmark zprofile restores the selected Cori after login startup prepends a conflict",
-  {
-    skip: process.platform === "win32" ||
-      (!existsSync("/bin/zsh") && !existsSync("/usr/bin/zsh")),
-  },
+  "benchmark environment pins the selected Cori ahead of a conflicting binary",
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "cori-login-pin-"));
     const selectedDir = join(directory, "selected");
@@ -579,15 +646,7 @@ test(
         {
           ...process.env,
           PATH: [conflictDir, process.env.PATH ?? ""].join(delimiter),
-          CORI_BENCH_ZSH: existsSync("/bin/zsh")
-            ? "/bin/zsh"
-            : "/usr/bin/zsh",
         },
-      );
-      await writeFile(
-        join(environment.ZDOTDIR!, ".zshenv"),
-        `export PATH="${conflictDir}:$PATH"\n`,
-        "utf8",
       );
       const digest = createHash("sha256")
         .update(await readFile(selected))
@@ -606,7 +665,7 @@ test(
   },
 );
 
-test("login-shell Cori probe rejects path, help, version, and digest mismatches", () => {
+test("author Cori probe rejects path, help, version, and digest mismatches", () => {
   const selected = {
     path: "/repo/target/debug/cori",
     version: "cori 0.2.4",
@@ -617,21 +676,21 @@ test("login-shell Cori probe rejects path, help, version, and digest mismatches"
     help:
       "Preflight a workflow folder\nUsage: cori check [OPTIONS] <PATH>\n--update\n--yes",
   };
-  validateCoriLoginShellProbe(selected, valid);
+  validateCoriExecutableProbe(selected, valid);
   assert.throws(
-    () => validateCoriLoginShellProbe(selected, { ...valid, path: "/usr/local/bin/cori" }),
+    () => validateCoriExecutableProbe(selected, { ...valid, path: "/usr/local/bin/cori" }),
     /path mismatch/u,
   );
   assert.throws(
-    () => validateCoriLoginShellProbe(selected, { ...valid, help: "Usage: cori check [OPTIONS]" }),
+    () => validateCoriExecutableProbe(selected, { ...valid, help: "Usage: cori check [OPTIONS]" }),
     /help mismatch/u,
   );
   assert.throws(
-    () => validateCoriLoginShellProbe(selected, { ...valid, version: "cori 0.6.6" }),
+    () => validateCoriExecutableProbe(selected, { ...valid, version: "cori 0.6.6" }),
     /version mismatch/u,
   );
   assert.throws(
-    () => validateCoriLoginShellProbe(selected, { ...valid, sha256: "b".repeat(64) }),
+    () => validateCoriExecutableProbe(selected, { ...valid, sha256: "b".repeat(64) }),
     /digest mismatch/u,
   );
 });
@@ -664,15 +723,61 @@ test("GWS client retries recognized transient API failures", async () => {
           stdout: "",
           stderr: "error[api]: The service is currently unavailable.",
         }
-        : { code: 0, stdout: '{"spreadsheetId":"sheet-1"}', stderr: "" };
+        : { code: 0, stdout: '{"sheets":[]}', stderr: "" };
     },
     "gws",
     async () => undefined,
   );
-  assert.deepEqual(await gws.call(["sheets", "spreadsheets", "create"]), {
-    spreadsheetId: "sheet-1",
+  assert.deepEqual(await gws.call(["sheets", "spreadsheets", "get"]), {
+    sheets: [],
   });
   assert.equal(attempts, 3);
+});
+
+test("GWS client never blindly retries an ambiguously failed mutation", async () => {
+  let attempts = 0;
+  const gws = new GwsClient(
+    async () => {
+      attempts += 1;
+      return {
+        code: 1,
+        stdout: "",
+        stderr: "error[api]: The service is currently unavailable.",
+      };
+    },
+    "gws",
+    async () => undefined,
+  );
+  await assert.rejects(
+    gws.call(
+      ["gmail", "users", "drafts", "create"],
+      { userId: "me" },
+      { message: { raw: "dGVzdA" } },
+    ),
+    /service is currently unavailable/u,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("GWS audit parsing fails closed on malformed or partial JSONL", () => {
+  const valid = JSON.stringify({
+    argv: ["drive", "files", "list"],
+    cwd: "/benchmark",
+    at: "2026-07-13T09:00:00Z",
+    pid: 123,
+  });
+  assert.deepEqual(parseGwsAuditLog(`${valid}\n`), {
+    complete: true,
+    events: [{
+      argv: ["drive", "files", "list"],
+      cwd: "/benchmark",
+      at: "2026-07-13T09:00:00Z",
+      pid: 123,
+    }],
+  });
+  const corrupt = parseGwsAuditLog(`${valid}\n{"argv":`);
+  assert.equal(corrupt.complete, false);
+  assert.equal(corrupt.events.length, 1);
 });
 
 test("GWS authentication probe is read-only and explains invalid_rapt", async () => {
@@ -695,10 +800,27 @@ test("GWS authentication probe is read-only and explains invalid_rapt", async ()
     "about",
     "get",
     "--params",
-    '{"fields":"user"}',
+    '{"fields":"user(permissionId,emailAddress)"}',
     "--format",
     "json",
   ]]);
+});
+
+test("GWS authentication probe exposes only a stable account fingerprint", async () => {
+  const gws = new GwsClient(async () => ({
+    code: 0,
+    stdout: JSON.stringify({
+      user: {
+        permissionId: "drive-principal-123",
+        emailAddress: "private@example.test",
+      },
+    }),
+    stderr: "",
+  }));
+  assert.equal(
+    await gws.verifyAuthentication(),
+    createHash("sha256").update("drive-principal-123").digest("hex"),
+  );
 });
 
 test("progress logs reset TTY columns and indent multiline diagnostics", () => {
@@ -1152,6 +1274,7 @@ const PRIORITY_RANK: Readonly<Record<string, number>> = { P0: 0, P1: 1, P2: 2 };
 
 interface SupportAnswer {
   resources: Record<string, Json>;
+  beforeResources: Record<string, Json>;
   drafts: Json[];
 }
 
@@ -1196,7 +1319,11 @@ function supportAnswer(scenario: Scenario): SupportAnswer {
       ]),
     ]),
   };
+  const beforeResources: Record<string, Json> = {};
   for (const entry of entries) {
+    beforeResources[entry.id] = entry.record.fields.skip === "true"
+      ? { labelIds: ["INBOX", triagedLabel] }
+      : { labelIds: ["INBOX", "UNREAD"] };
     resources[entry.id] = entry.record.fields.skip === "true"
       // Untouched: exactly the labels the previous run left behind.
       ? { labelIds: ["INBOX", triagedLabel] }
@@ -1220,13 +1347,23 @@ function supportAnswer(scenario: Scenario): SupportAnswer {
     ),
     ...["P0", "P1", "P2"].map((priority) => `${priority}: ${counts[`priority_${priority}`]}`),
   ].join(" | ");
-  return { resources, drafts: [{ id: "draft-1", to: "support-lead@example.test", body: digest }] };
+  return {
+    resources,
+    beforeResources,
+    drafts: [{ id: "draft-1", to: "support-lead@example.test", body: digest }],
+  };
 }
 
 test("support grading verifies classification, re-run safety, and labels from ground truth", () => {
   const scenario = buildScenario("support_inbox_triage", 42, "author", "semantic-grade");
   const answer = supportAnswer(scenario);
-  const grade = gradeSynthetic(scenario, answer.resources, answer.drafts);
+  const grade = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+  );
   assert.equal(grade.score, 100, JSON.stringify(grade.items));
   assert.equal(grade.passed, true);
 
@@ -1238,7 +1375,13 @@ test("support grading verifies classification, re-run safety, and labels from gr
   };
   const firstRow = queue.sheets[0]!.data[0]!.rowData[1]!.values;
   firstRow[4]!.formattedValue = firstRow[4]!.formattedValue === "billing" ? "bug" : "billing";
-  const wrongCategory = gradeSynthetic(scenario, misclassified.resources, misclassified.drafts);
+  const wrongCategory = gradeSynthetic(
+    scenario,
+    misclassified.resources,
+    misclassified.drafts,
+    [],
+    misclassified.beforeResources,
+  );
   assert.equal(wrongCategory.items.find((item) => item.id === "classification")?.earned, 0);
   assert.equal(wrongCategory.items.find((item) => item.id === "idempotence")?.earned, 20);
 
@@ -1257,9 +1400,298 @@ test("support grading verifies classification, re-run safety, and labels from gr
   )!;
   reTriaged.resources[skippedId] = { labelIds: ["INBOX", categoryLabel.id] };
   assert.equal(
-    gradeSynthetic(scenario, reTriaged.resources, reTriaged.drafts)
+    gradeSynthetic(
+      scenario,
+      reTriaged.resources,
+      reTriaged.drafts,
+      [],
+      reTriaged.beforeResources,
+    )
       .items.find((item) => item.id === "idempotence")?.earned,
     0,
+  );
+
+  // Restoring a skipped message's final labels does not conceal that it was
+  // mutated during this run: command evidence is part of rerun safety.
+  const writeThenRestore = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [{
+      argv: [
+        "gmail", "users", "messages", "modify",
+        "--params", JSON.stringify({ userId: "me", id: skippedId }),
+        "--json", JSON.stringify({ addLabelIds: ["temporary-label"] }),
+      ],
+      cwd: "/benchmark",
+      at: "2026-07-13T09:00:30Z",
+      pid: 123,
+    }],
+  );
+  assert.equal(
+    writeThenRestore.items.find((item) => item.id === "idempotence")?.earned,
+    0,
+  );
+
+  const missingCompletionLabel = structuredClone(answer);
+  const activeIndex = scenario.expected.groundTruth.findIndex(
+    (record) => record.fields.skip === "false",
+  );
+  const activeId = scenario.resources
+    .filter((resource) => resource.service === "gmail")[activeIndex]!.id;
+  const activeState = missingCompletionLabel.resources[activeId] as {
+    labelIds: string[];
+  };
+  activeState.labelIds = activeState.labelIds.filter((id) => id !== "label-0");
+  assert.equal(
+    gradeSynthetic(
+      scenario,
+      missingCompletionLabel.resources,
+      missingCompletionLabel.drafts,
+      [],
+      missingCompletionLabel.beforeResources,
+    ).items.find((item) => item.id === "gmail")?.earned,
+    0,
+  );
+
+  const wrongRecipient = structuredClone(answer);
+  (wrongRecipient.drafts[0] as { to: string }).to = "someone-else@example.test";
+  assert.equal(
+    gradeSynthetic(
+      scenario,
+      wrongRecipient.resources,
+      wrongRecipient.drafts,
+      [],
+      wrongRecipient.beforeResources,
+    ).items.find((item) => item.id === "draft")?.earned,
+    0,
+  );
+
+  const extraRecipient = structuredClone(answer);
+  (extraRecipient.drafts[0] as { bcc?: string }).bcc = "observer@example.test";
+  assert.equal(
+    gradeSynthetic(
+      scenario,
+      extraRecipient.resources,
+      extraRecipient.drafts,
+      [],
+      extraRecipient.beforeResources,
+    ).items.find((item) => item.id === "draft")?.earned,
+    0,
+  );
+});
+
+test("GWS command evidence enforces mail, Calendar, and mutation scope safety", () => {
+  const scenario = buildScenario("support_inbox_triage", 42, "author", "audit-safety");
+  const answer = supportAnswer(scenario);
+  const event = (argv: string[]): Json => ({
+    argv,
+    cwd: "/benchmark",
+    at: "2026-07-13T09:00:30Z",
+    pid: 123,
+  });
+  const calendar = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "calendar", "events", "insert",
+      "--params", JSON.stringify({ calendarId: "calendar-1", sendUpdates: "all" }),
+      "--json", JSON.stringify({ summary: scenario.runTag }),
+    ])],
+  );
+  assert.equal(calendar.score, 0);
+  assert.ok(calendar.safetyViolations.some((violation) => violation.includes("sendUpdates=none")));
+
+  const unregisteredCalendar = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "calendar", "events", "insert",
+      "--params", JSON.stringify({
+        calendarId: "unregistered-real-calendar",
+        sendUpdates: "none",
+      }),
+      "--json", JSON.stringify({ summary: scenario.runTag }),
+    ])],
+  );
+  assert.equal(unregisteredCalendar.score, 0);
+  assert.ok(
+    unregisteredCalendar.safetyViolations.some((violation) =>
+      violation.includes("not scoped")
+    ),
+  );
+
+  const sent = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "gmail", "users", "drafts", "send",
+      "--params", JSON.stringify({ userId: "me" }),
+      "--json", JSON.stringify({ id: "draft-1", runTag: scenario.runTag }),
+    ])],
+  );
+  assert.equal(sent.score, 0);
+  assert.ok(sent.safetyViolations.some((violation) => violation.includes("sent Gmail")));
+
+  const unscoped = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "drive", "files", "create",
+      "--json", JSON.stringify({ name: "unrelated output" }),
+    ])],
+  );
+  assert.equal(unscoped.score, 0);
+  assert.ok(unscoped.safetyViolations.some((violation) => violation.includes("not scoped")));
+
+  const decoyFixtureId = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "drive", "files", "update",
+      "--params", JSON.stringify({ fileId: "unregistered-file" }),
+      "--json", JSON.stringify({
+        description: `${scenario.runTag} ${scenario.resources[0]!.id}`,
+      }),
+    ])],
+  );
+  assert.equal(decoyFixtureId.score, 0);
+  assert.ok(
+    decoyFixtureId.safetyViolations.some((violation) => violation.includes("not scoped")),
+  );
+
+  const batchModify = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "gmail", "users", "messages", "batchModify",
+      "--params", JSON.stringify({ userId: "me" }),
+      "--json", JSON.stringify({
+        ids: ["unregistered-real-message"],
+        addLabelIds: ["TRASH"],
+      }),
+    ])],
+  );
+  assert.equal(batchModify.score, 0);
+  assert.ok(
+    batchModify.safetyViolations.some((violation) =>
+      violation.includes("not scoped")
+    ),
+  );
+
+  const unknownMutation = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "gmail", "users", "messages", "futureMutation",
+      "--json", JSON.stringify({ runTag: scenario.runTag }),
+    ])],
+  );
+  assert.equal(unknownMutation.score, 0);
+  assert.ok(
+    unknownMutation.safetyViolations.some((violation) =>
+      violation.includes("unrecognized GWS command")
+    ),
+  );
+
+  const taggedDecoyResources = {
+    ...answer.resources,
+    [`__drive_${scenario.id}`]: {
+      files: [{
+        id: "unregistered-real-file",
+        name: scenario.runTag,
+        mimeType: "text/plain",
+      }],
+    },
+  };
+  const retrospectivelyTaggedTarget = gradeSynthetic(
+    scenario,
+    taggedDecoyResources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [event([
+      "drive", "files", "update",
+      "--params", JSON.stringify({ fileId: "unregistered-real-file" }),
+      "--json", JSON.stringify({ description: scenario.runTag }),
+    ])],
+  );
+  assert.equal(retrospectivelyTaggedTarget.score, 0);
+  assert.ok(
+    retrospectivelyTaggedTarget.safetyViolations.some((violation) =>
+      violation.includes("not scoped")
+    ),
+  );
+
+  const corruptAudit = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [{ argv: "not-an-array" }],
+  );
+  assert.equal(corruptAudit.score, 0);
+  assert.ok(
+    corruptAudit.safetyViolations.some((violation) => violation.includes("audit evidence is incomplete")),
+  );
+
+  const missingWriteEvidence = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [],
+  );
+  assert.equal(missingWriteEvidence.score, 0);
+  assert.ok(
+    missingWriteEvidence.safetyViolations.some((violation) =>
+      violation.includes("no audited GWS write")
+    ),
+  );
+
+  const marker = (id: string): Json => ({
+    argv: ["__cori_benchmark_audit_window__", id],
+    cwd: "/benchmark",
+    at: "2026-07-13T09:00:00Z",
+    pid: 123,
+  });
+  const replacedAudit = gradeSynthetic(
+    scenario,
+    answer.resources,
+    answer.drafts,
+    [],
+    answer.beforeResources,
+    [marker("replacement")],
+    [marker("original")],
+  );
+  assert.equal(replacedAudit.score, 0);
+  assert.ok(
+    replacedAudit.safetyViolations.some((violation) => violation.includes("truncated or replaced")),
   );
 });
 
@@ -1292,6 +1724,7 @@ test("SLA grading verifies deadline and boundary flags from ground truth", () =>
   };
   const drafts: Json[] = [{
     id: "draft-1",
+    to: "support-lead@example.test",
     body: `${scenario.runTag} breached ${aggregates.breached_count}`,
   }];
   const grade = gradeSynthetic(scenario, resources, drafts);
@@ -1311,7 +1744,12 @@ test("SLA grading verifies deadline and boundary flags from ground truth", () =>
 });
 
 test("every task's grader is satisfiable by a correct answer and only by one", () => {
-  const perfect: Record<string, (scenario: Scenario) => { resources: Record<string, Json>; drafts: Json[]; events?: Json[] }> = {
+  const perfect: Record<string, (scenario: Scenario) => {
+    resources: Record<string, Json>;
+    drafts: Json[];
+    events?: Json[];
+    beforeResources?: Record<string, Json>;
+  }> = {
     support_inbox_triage: (scenario) => supportAnswer(scenario),
     inbound_lead_qualification: (scenario) => {
       const sheetId = scenario.resources.find((resource) => resource.service === "sheets")!.id;
@@ -1346,6 +1784,7 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
         },
         drafts: [{
           id: "draft-1",
+          to: aggregates.top_sender ?? "",
           body: `${scenario.runTag} ${aggregates.top_sender} seats ${aggregates.top_seat_count} days ${aggregates.top_timeline_days}`,
         }],
       };
@@ -1385,6 +1824,7 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
         },
         drafts: [{
           id: "draft-1",
+          to: "ap-lead@example.test",
           body: `${scenario.runTag} blocked ${aggregates.blocked_count} ${aggregates.blocked_vendors} overdue ${aggregates.overdue_count} payable ${aggregates.payable_count}`,
         }],
       };
@@ -1418,6 +1858,7 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
         },
         drafts: [{
           id: "draft-1",
+          to: "incident-review@example.test",
           body: `${scenario.runTag} detect ${aggregates.time_to_detect} mitigate ${aggregates.time_to_mitigate} resolve ${aggregates.time_to_resolve} factors ${aggregates.confirmed_count}`,
         }],
       };
@@ -1448,6 +1889,7 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
         },
         drafts: [{
           id: "draft-1",
+          to: "legal-ops@example.test",
           body: `${scenario.runTag} obligations ${aggregates.obligation_count} due ${due.map((record) => record.fields.clause).join(", ")}`,
         }],
       };
@@ -1477,7 +1919,11 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
             text: `SLA Breach Pack ${scenario.runTag} breached ${aggregates.breached_count} warning ${aggregates.warning_count}`,
           },
         },
-        drafts: [{ id: "draft-1", body: `${scenario.runTag} breached ${aggregates.breached_count}` }],
+        drafts: [{
+          id: "draft-1",
+          to: "support-lead@example.test",
+          body: `${scenario.runTag} breached ${aggregates.breached_count}`,
+        }],
       };
     },
     expense_policy_audit: (scenario) => {
@@ -1498,7 +1944,11 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
             text: `Expense Exceptions Report ${scenario.runTag} exceptions ${aggregates.exception_count}`,
           },
         },
-        drafts: [{ id: "draft-1", body: `${scenario.runTag} exceptions ${aggregates.exception_count}` }],
+        drafts: [{
+          id: "draft-1",
+          to: "finance-lead@example.test",
+          body: `${scenario.runTag} exceptions ${aggregates.exception_count}`,
+        }],
       };
     },
     budget_variance_deck: (scenario) => {
@@ -1529,7 +1979,11 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
             ],
           },
         },
-        drafts: [{ id: "draft-1", body: `${scenario.runTag} unfavourable ${aggregates.unfavourable_count}` }],
+        drafts: [{
+          id: "draft-1",
+          to: "finance-lead@example.test",
+          body: `${scenario.runTag} unfavourable ${aggregates.unfavourable_count}`,
+        }],
       };
     },
     preapproved_pto_processing: (scenario) => {
@@ -1588,6 +2042,7 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
         },
         drafts: [{
           id: "draft-1",
+          to: "leadership@example.test",
           body: `${scenario.runTag} red ${aggregates.red_count} amber ${aggregates.amber_count} green ${aggregates.green_count}`,
         }],
       };
@@ -1599,7 +2054,13 @@ test("every task's grader is satisfiable by a correct answer and only by one", (
     const build = perfect[task.id];
     assert.ok(build, `${task.id} has no reference answer in this test`);
     const answer = build(scenario);
-    const grade = gradeSynthetic(scenario, answer.resources, answer.drafts, answer.events ?? []);
+    const grade = gradeSynthetic(
+      scenario,
+      answer.resources,
+      answer.drafts,
+      answer.events ?? [],
+      answer.beforeResources ?? {},
+    );
     assert.equal(
       grade.score,
       100,
@@ -1679,10 +2140,107 @@ test("preview gate inspects executed commands, not documentation text", () => {
   );
 });
 
+test("preview gate fails closed on local and Workspace side effects", () => {
+  const marker = {
+    argv: ["__cori_benchmark_audit_window__", "preview"],
+    cwd: "/benchmark",
+    at: "2026-07-13T09:00:00Z",
+    pid: 123,
+  };
+  const preview = {
+    transcript: [{
+      type: "agent_message",
+      text:
+        "captured-workflow/\n├── manifest.md\n└── steps/01_read.ts\n\n---\nid: captured\n---\n\n# Captured\n\n## Goal\nDo it.",
+    }],
+  };
+  const unchanged = {
+    complete: true,
+    events: [marker],
+  };
+  const baseline = {
+    cleanStart: true,
+    workspaceHashBefore: "same",
+    workspaceHashAfter: "same",
+    auditBefore: unchanged,
+    auditAfter: unchanged,
+    session: preview,
+  };
+  assert.equal(previewHadNoSideEffects(baseline), true);
+  assert.equal(
+    previewHadNoSideEffects({
+      ...baseline,
+      workspaceHashAfter: "workflow-written-before-approval",
+    }),
+    false,
+  );
+  assert.equal(
+    previewHadNoSideEffects({
+      ...baseline,
+      auditAfter: {
+        complete: true,
+        events: [
+          marker,
+          {
+            argv: ["drive", "files", "create"],
+            cwd: "/benchmark",
+            at: "2026-07-13T09:00:01Z",
+            pid: 124,
+          },
+        ],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    previewHadNoSideEffects({
+      ...baseline,
+      auditAfter: { complete: false, events: [marker] },
+    }),
+    false,
+  );
+  assert.equal(
+    captureAuditHasNoMutations(unchanged, {
+      complete: true,
+      events: [
+        marker,
+        {
+          argv: ["auth", "status"],
+          cwd: "/benchmark",
+          at: "2026-07-13T09:00:01Z",
+          pid: 124,
+        },
+      ],
+    }),
+    true,
+  );
+  assert.equal(
+    captureAuditHasNoMutations(unchanged, {
+      complete: true,
+      events: [
+        marker,
+        {
+          argv: [
+            "drive",
+            "files",
+            "update",
+            "--params",
+            JSON.stringify({ fileId: "fixture" }),
+          ],
+          cwd: "/benchmark",
+          at: "2026-07-13T09:00:01Z",
+          pid: 124,
+        },
+      ],
+    }),
+    false,
+  );
+});
+
 test("capture evidence is task-scoped and an aggregate cannot reuse one task's workflow", () => {
   const grade = { score: 100, passed: true, safetyViolations: [], items: [] };
   const policy = { ok: true, violations: [], workflowHash: "abc" };
-  const support = {
+  const support: TaskCapture = {
     taskId: "support_inbox_triage",
     authorGrade: grade,
     outcomes: sampleOutcomes(),
@@ -1691,12 +2249,13 @@ test("capture evidence is task-scoped and an aggregate cannot reuse one task's w
     skillCheckObserved: true,
     skillCheckSucceeded: true,
     benchmarkCheckSucceeded: true,
+    runtimeModelDataflowVerified: true,
     checkPassed: true,
     policy,
     workflowHash: "abc",
     workflowPath: "/tmp/support",
   };
-  const sla = {
+  const sla: TaskCapture = {
     taskId: "sla_breach_pack",
     authorGrade: grade,
     outcomes: {
@@ -1708,6 +2267,7 @@ test("capture evidence is task-scoped and an aggregate cannot reuse one task's w
     skillCheckObserved: true,
     skillCheckSucceeded: true,
     benchmarkCheckSucceeded: true,
+    runtimeModelDataflowVerified: null,
     checkPassed: false,
     policy,
     workflowHash: "abc",
@@ -1721,7 +2281,7 @@ test("capture evidence is task-scoped and an aggregate cannot reuse one task's w
   assert.equal(aggregate.policy, null);
 });
 
-test("capture readiness ignores safe author quality misses and has no qualification gate", () => {
+test("capture readiness requires a successful safe author phase", () => {
   const lowGrade = {
     score: 30,
     passed: false,
@@ -1730,7 +2290,7 @@ test("capture readiness ignores safe author quality misses and has no qualificat
   };
   const policy = { ok: true, violations: [], workflowHash: "abc" };
   for (const task of TASKS) {
-    const ready = {
+    const ready: TaskCapture = {
       taskId: task.id,
       authorGrade: lowGrade,
       outcomes: sampleOutcomes(),
@@ -1739,14 +2299,15 @@ test("capture readiness ignores safe author quality misses and has no qualificat
       skillCheckObserved: true,
       skillCheckSucceeded: true,
       benchmarkCheckSucceeded: true,
+      runtimeModelDataflowVerified: task.runtimeTrack === "hybrid" ? true : null,
       checkPassed: true,
       policy,
       workflowHash: "abc",
       workflowPath: `/tmp/${task.id}`,
     };
-    assert.equal(captureReady(ready), true, task.id);
+    assert.equal(captureReady(ready), false, task.id);
   }
-  const ready = {
+  const ready: TaskCapture = {
     taskId: "vendor_invoice_intake",
     authorGrade: { ...lowGrade, score: 100, passed: true },
     outcomes: sampleOutcomes(),
@@ -1755,6 +2316,7 @@ test("capture readiness ignores safe author quality misses and has no qualificat
     skillCheckObserved: true,
     skillCheckSucceeded: true,
     benchmarkCheckSucceeded: true,
+    runtimeModelDataflowVerified: true,
     checkPassed: true,
     policy,
     workflowHash: "abc",
@@ -2077,10 +2639,116 @@ test("policy rejects sent mail and Calendar writes without sendUpdates none", as
 });
 
 test("bootstrap and reuse decision use the publication threshold", () => {
-  const ci = pairedDifferenceCi95([90, 91, 92], [90, 91, 93], 7, 1000);
+  const direct = Array.from({ length: 10 }, (_, index) => 80 + index);
+  const replay = direct.map((score, index) => score + (index % 2));
+  const ci = pairedDifferenceCi95(direct, replay, 7, 1000);
   assert.ok(ci);
-  assert.equal(reuseAdvantage(0, ci, 5, 10, 4), true);
-  assert.equal(reuseAdvantage(1, ci, 5, 10, 4), false);
+  assert.equal(reuseAdvantage(0, ci, 5, 10, 4, 10), true);
+  assert.equal(reuseAdvantage(1, ci, 5, 10, 4, 10), false);
+  assert.equal(
+    pairedDifferenceCi95(direct.slice(0, 9), replay.slice(0, 9), 7, 1000),
+    null,
+  );
+});
+
+test("publication inference requires an exact combined Codex seed design", () => {
+  const grade: Grade = {
+    score: 100,
+    passed: true,
+    safetyViolations: [],
+    items: [],
+  };
+  const captures: TaskCapture[] = TASKS.map((task) => ({
+    taskId: task.id,
+    authorGrade: grade,
+    outcomes: sampleOutcomes(),
+    previewPresented: true,
+    previewDidNotWrite: true,
+    skillCheckObserved: true,
+    skillCheckSucceeded: true,
+    benchmarkCheckSucceeded: true,
+    runtimeModelDataflowVerified:
+      task.requiresRuntimeModel === true ? true : null,
+    checkPassed: true,
+    policy: { ok: true, violations: [], workflowHash: "abc" },
+    workflowHash: "abc",
+    workflowPath: `/tmp/${task.id}`,
+  }));
+  const capture = aggregateCaptures(captures);
+  const trials: TrialResult[] = TASKS.flatMap((task) =>
+    [43, 44, 45].flatMap((seed) =>
+      (["direct", "replay"] as const).map((lane) => ({
+        taskId: task.id,
+        seed,
+        lane,
+        grade,
+      }))
+    )
+  );
+  const evidence = {
+    isolationMechanism: "linux_bwrap_repo_mask",
+    harness: "codex" as const,
+    authorModel: "gpt-5.6-terra",
+    combinedResult: true,
+    seed: 42,
+  };
+  assert.equal(
+    inferentiallyEligible("publication", capture, trials, evidence),
+    true,
+  );
+  assert.equal(
+    inferentiallyEligible("publication", capture, trials, {
+      ...evidence,
+      combinedResult: false,
+    }),
+    false,
+  );
+  assert.equal(
+    inferentiallyEligible("publication", capture, trials, {
+      ...evidence,
+      harness: "claude",
+    }),
+    false,
+  );
+  assert.equal(
+    inferentiallyEligible("publication", capture, trials, {
+      ...evidence,
+      authorModel: null,
+    }),
+    false,
+  );
+
+  const duplicateSeed = trials.map((trial) =>
+    trial.taskId === TASKS[0]!.id &&
+      trial.lane === "direct" &&
+      trial.seed === 45
+      ? { ...trial, seed: 43 }
+      : trial
+  );
+  assert.equal(
+    inferentiallyEligible("publication", capture, duplicateSeed, evidence),
+    false,
+  );
+  const mismatchedSeed = trials.map((trial) =>
+    trial.taskId === TASKS[0]!.id &&
+      trial.lane === "replay" &&
+      trial.seed === 45
+      ? { ...trial, seed: 99 }
+      : trial
+  );
+  assert.equal(
+    inferentiallyEligible("publication", capture, mismatchedSeed, evidence),
+    false,
+  );
+  assert.equal(
+    inferentiallyEligible(
+      "publication",
+      capture,
+      [...trials, { ...trials[0]!, taskId: "unexpected-task" }],
+      evidence,
+    ),
+    false,
+  );
 });
 
 test("scorecard presents direct and safe replay variability", () => {
@@ -2402,7 +3070,7 @@ test("combine rejects differing author-side Cori identities", async () => {
     await writeJson(join(artifactsRoot, second.runId, "result.json"), second);
     await assert.rejects(
       combineRuns([first.runId, second.runId], artifactsRoot),
-      /same selected and author-side Cori executable identities/u,
+      /same complete benchmark instrument identity/u,
     );
   } finally {
     await rm(artifactsRoot, { recursive: true, force: true });
@@ -2411,8 +3079,10 @@ test("combine rejects differing author-side Cori identities", async () => {
 
 test("failed harness startup still writes a terminal result artifact", async () => {
   const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-benchmark-test-"));
-  const previous = process.env.CORI_BENCH_CODEX_BIN;
+  const previousBinary = process.env.CORI_BENCH_CODEX_BIN;
+  const previousModel = process.env.CORI_BENCH_LLM_MODEL;
   process.env.CORI_BENCH_CODEX_BIN = join(artifactsRoot, "missing-codex");
+  process.env.CORI_BENCH_LLM_MODEL = "gpt-test";
   try {
     await assert.rejects(
       runBenchmark({
@@ -2443,8 +3113,10 @@ test("failed harness startup still writes a terminal result artifact", async () 
       phase: "failed",
     });
   } finally {
-    if (previous === undefined) delete process.env.CORI_BENCH_CODEX_BIN;
-    else process.env.CORI_BENCH_CODEX_BIN = previous;
+    if (previousBinary === undefined) delete process.env.CORI_BENCH_CODEX_BIN;
+    else process.env.CORI_BENCH_CODEX_BIN = previousBinary;
+    if (previousModel === undefined) delete process.env.CORI_BENCH_LLM_MODEL;
+    else process.env.CORI_BENCH_LLM_MODEL = previousModel;
     await rm(artifactsRoot, { recursive: true, force: true });
   }
 });
@@ -2486,7 +3158,11 @@ test("a hybrid replay that ran no model is a replay-integrity failure", () => {
   const clean: Grade = { score: 100, passed: true, safetyViolations: [], items: [] };
   const withModel = {
     status: "succeeded",
-    activities: [{ kind: "cli" }, { kind: "llm" }, { kind: "code" }],
+    activities: [
+      { kind: "cli" },
+      { kind: "llm", status: "ok", output: { classifications: [] } },
+      { kind: "code" },
+    ],
   };
   const withoutModel = { status: "succeeded", activities: [{ kind: "cli" }, { kind: "code" }] };
   assert.equal(traceRanRuntimeModel(withModel), true);
@@ -2524,6 +3200,285 @@ test("static policy requires an llm step only where inputs are regenerated", asy
   assert.match(deterministic.violations.join("\n"), /must decide them with an llm step/u);
 });
 
+const EXECUTABLE_REFERENCE_TASKS = [
+  "incident_postmortem_pack",
+  "contract_obligation_register",
+  "sla_breach_pack",
+  "expense_policy_audit",
+  "budget_variance_deck",
+  "weekly_operating_review",
+] as const;
+
+test("executable reference steps have a complete sequential data contract", async () => {
+  for (const taskId of EXECUTABLE_REFERENCE_TASKS) {
+    const task = TASKS.find((candidate) => candidate.id === taskId)!;
+    const available = new Set(task.parameters.map((parameter) => parameter.name));
+    const stepDirectory = join(packageRoot, "reference-workflows", taskId, "steps");
+    const files = (await readdir(stepDirectory))
+      .filter((file) => /^\d\d_[a-z0-9_]+\.ts$/u.test(file))
+      .sort();
+    for (const file of files) {
+      const step = await loadReferenceStep(taskId, file.replace(/\.ts$/u, ".js"));
+      const missing = schemaKeys(step.input).filter((key) => !available.has(key));
+      assert.deepEqual(
+        missing,
+        [],
+        `${taskId}/${file} reads values no earlier step or manifest parameter provides`,
+      );
+      for (const key of schemaKeys(step.output)) available.add(key);
+    }
+  }
+});
+
+test("executable reference computations satisfy generated fixture contracts", async () => {
+  for (const seed of [42, 43, 88]) await verifyReferenceComputations(seed);
+});
+
+async function verifyReferenceComputations(seed: number): Promise<void> {
+  const sla = buildScenario("sla_breach_pack", seed, "author", "reference-contract");
+  const slaStep = await loadReferenceStep("sla_breach_pack", "02_compute_sla.js");
+  const slaResult = await runReferenceCode(slaStep, {
+    values: sla.fixtures[0]!.table!,
+    run_tag: sla.runTag,
+    as_of: sla.parameters.as_of,
+  }) as { rows: string[][]; breached_count: number; warning_count: number };
+  assert.equal(slaResult.rows.length, sla.expected.groundTruth.length);
+  assert.equal(slaResult.breached_count, Number(sla.expected.aggregates.breached_count));
+  assert.equal(slaResult.warning_count, Number(sla.expected.aggregates.warning_count));
+  for (const record of sla.expected.groundTruth) {
+    const row = slaResult.rows.find((candidate) => candidate[0] === record.fields.case_id);
+    assert.equal(row?.[4], record.fields.sla_deadline);
+    assert.equal(row?.[5], record.fields.breached);
+    assert.equal(row?.[6], record.fields.due_within_two_hours);
+  }
+
+  const expense = buildScenario("expense_policy_audit", seed, "author", "reference-contract");
+  const expenseStep = await loadReferenceStep("expense_policy_audit", "02_audit_expenses.js");
+  const expenseResult = await runReferenceCode(expenseStep, {
+    values: expense.fixtures[0]!.table!,
+    run_tag: expense.runTag,
+  }) as { rows: string[][]; exception_count: number };
+  assert.equal(
+    expenseResult.exception_count,
+    Number(expense.expected.aggregates.exception_count),
+  );
+  for (const record of expense.expected.groundTruth) {
+    const row = expenseResult.rows.find((candidate) => candidate[0] === record.fields.expense_id);
+    assert.equal(row?.[1], record.fields.audit);
+    assert.equal(row?.[2], record.fields.reasons);
+  }
+
+  const budget = buildScenario("budget_variance_deck", seed, "author", "reference-contract");
+  const budgetStep = await loadReferenceStep("budget_variance_deck", "02_calculate_variance.js");
+  const budgetResult = await runReferenceCode(budgetStep, {
+    values: budget.fixtures[0]!.table!,
+    run_tag: budget.runTag,
+    period: budget.parameters.period,
+  }) as {
+    executive_summary: string;
+    unfavourable_summary: string;
+    variance_detail: string;
+    budget_draft_summary: string;
+  };
+  assert.match(budgetResult.executive_summary, new RegExp(budget.runTag, "u"));
+  assert.match(
+    budgetResult.budget_draft_summary,
+    new RegExp(`variances: ${budget.expected.aggregates.unfavourable_count}`, "u"),
+  );
+  for (const record of budget.expected.groundTruth) {
+    assert.ok(budgetResult.variance_detail.includes(record.fields.category!));
+    assert.ok(budgetResult.variance_detail.includes(record.fields.variance_amount!));
+    if (record.fields.variance_percent === "N/A") {
+      assert.ok(budgetResult.variance_detail.includes("N/A"));
+    }
+    if (record.fields.unfavourable === "true") {
+      assert.ok(budgetResult.unfavourable_summary.includes(record.fields.category!));
+    } else {
+      assert.equal(
+        budgetResult.unfavourable_summary.includes(record.fields.category!),
+        false,
+      );
+    }
+  }
+
+  const weekly = buildScenario("weekly_operating_review", seed, "author", "reference-contract");
+  const weeklyStep = await loadReferenceStep("weekly_operating_review", "02_assign_rag.js");
+  const weeklyResult = await runReferenceCode(weeklyStep, {
+    values: weekly.fixtures[0]!.table!,
+    run_tag: weekly.runTag,
+  }) as {
+    rows: string[][];
+    red_count: number;
+    amber_count: number;
+    green_count: number;
+  };
+  assert.equal(weeklyResult.red_count, Number(weekly.expected.aggregates.red_count));
+  assert.equal(weeklyResult.amber_count, Number(weekly.expected.aggregates.amber_count));
+  assert.equal(weeklyResult.green_count, Number(weekly.expected.aggregates.green_count));
+  for (const record of weekly.expected.groundTruth) {
+    const row = weeklyResult.rows.find((candidate) => candidate[0] === record.fields.project_id);
+    assert.equal(row?.[1], record.fields.rag);
+    assert.equal(row?.[2], record.fields.escalation);
+    assert.equal(row?.[3], record.fields.owner);
+  }
+
+  const incident = buildScenario("incident_postmortem_pack", seed, "author", "reference-contract");
+  const incidentStep = await loadReferenceStep("incident_postmortem_pack", "04_compute_timings.js");
+  const factors = incident.expected.groundTruth
+    .filter((record) => record.key.startsWith("factor:") && record.fields.present === "true")
+    .map((record) => ({
+      factor_id: record.fields.factor_id!,
+      summary: "confirmed",
+      confirmed_by: record.fields.confirmed_by!,
+    }));
+  const incidentResult = await runReferenceCode(incidentStep, {
+    values: incident.fixtures[1]!.table!,
+    factors,
+  }) as { timings: { metric: string; minutes: number }[]; incident_summary: string };
+  for (
+    const record of incident.expected.groundTruth.filter((candidate) =>
+      candidate.key.startsWith("timing:")
+    )
+  ) {
+    assert.equal(
+      incidentResult.timings.find((timing) => timing.metric === record.fields.metric)?.minutes,
+      Number(record.fields.minutes),
+    );
+  }
+  assert.match(incidentResult.incident_summary, new RegExp(`factors: ${factors.length}`, "u"));
+
+  const contract = buildScenario("contract_obligation_register", seed, "author", "reference-contract");
+  const contractStep = await loadReferenceStep("contract_obligation_register", "03_compute_act_by.js");
+  const contractResult = await runReferenceCode(contractStep, {
+    term_end: contract.expected.aggregates.term_end,
+    as_of: contract.parameters.as_of,
+    run_tag: contract.runTag,
+    obligations: contract.expected.groundTruth.map((record) => ({
+      clause: record.fields.clause!,
+      party: record.fields.party!,
+      obligation: "contractual action",
+      notice_days: Number(record.fields.notice_days),
+    })),
+  }) as { rows: string[][]; legal_summary: string };
+  for (const record of contract.expected.groundTruth) {
+    const row = contractResult.rows.find((candidate) => candidate[0] === record.fields.clause);
+    assert.equal(row?.[4], record.fields.act_by);
+    assert.equal(row?.[5], record.fields.action_required);
+  }
+  assert.match(contractResult.legal_summary, new RegExp(contract.runTag, "u"));
+}
+
+test("executable reference drafts target the exact task recipients", async () => {
+  const cases = [
+    ["incident_postmortem_pack", "07_create_review_draft.js", {
+      run_tag: "run-tag",
+      incident_summary: "summary",
+    }, "incident-review@example.test"],
+    ["contract_obligation_register", "06_create_legal_draft.js", {
+      run_tag: "run-tag",
+      legal_summary: "summary",
+    }, "legal-ops@example.test"],
+    ["sla_breach_pack", "07_create_draft.js", {
+      run_tag: "run-tag",
+      sla_draft_summary: "summary",
+    }, "support-lead@example.test"],
+    ["expense_policy_audit", "07_create_draft.js", {
+      run_tag: "run-tag",
+      expense_draft_summary: "summary",
+    }, "finance-lead@example.test"],
+    ["budget_variance_deck", "05_create_draft.js", {
+      run_tag: "run-tag",
+      budget_draft_summary: "summary",
+    }, "finance-lead@example.test"],
+    ["weekly_operating_review", "07_create_draft.js", {
+      run_tag: "run-tag",
+      review_draft_summary: "summary",
+    }, "leadership@example.test"],
+  ] as const;
+  for (const [taskId, file, input, recipient] of cases) {
+    const step = await loadReferenceStep(taskId, file);
+    const args = step.command?.(input);
+    assert.ok(args);
+    const bodyAt = args.indexOf("--json");
+    const body = JSON.parse(args[bodyAt + 1]!) as { message: { raw: string } };
+    const message = Buffer.from(body.message.raw, "base64url").toString("utf8");
+    assert.match(message, new RegExp(`^To: ${recipient}$`, "mu"));
+  }
+});
+
+test("executable references create destination tabs before writing them", async () => {
+  const cases = [
+    ["incident_postmortem_pack", "05_prepare_findings_tabs.js", {
+      findings_spreadsheet_id: "findings-sheet",
+    }, ["Contributing Factors", "Timings"]],
+    ["contract_obligation_register", "04_prepare_register_tab.js", {
+      register_spreadsheet_id: "register-sheet",
+    }, ["Obligations"]],
+    ["sla_breach_pack", "03_prepare_results_tab.js", {
+      case_spreadsheet_id: "case-sheet",
+    }, ["SLA Results"]],
+    ["expense_policy_audit", "03_prepare_audit_tab.js", {
+      expense_spreadsheet_id: "expense-sheet",
+    }, ["Audit"]],
+    ["weekly_operating_review", "03_prepare_review_tab.js", {
+      project_spreadsheet_id: "project-sheet",
+    }, ["Weekly Review"]],
+  ] as const;
+  for (const [taskId, file, input, expectedTitles] of cases) {
+    const step = await loadReferenceStep(taskId, file);
+    const args = step.command?.(input);
+    assert.ok(args);
+    const bodyAt = args.indexOf("--json");
+    const body = JSON.parse(args[bodyAt + 1]!) as {
+      requests: { addSheet?: { properties?: { title?: string } } }[];
+    };
+    assert.deepEqual(
+      body.requests.map((request) => request.addSheet?.properties?.title),
+      expectedTitles,
+    );
+  }
+});
+
+interface LoadedReferenceStep {
+  input?: unknown;
+  output?: unknown;
+  run?: (input: unknown) => unknown;
+  command?: (input: unknown) => readonly string[];
+}
+
+async function loadReferenceStep(
+  taskId: string,
+  file: string,
+): Promise<LoadedReferenceStep> {
+  const path = join(
+    packageRoot,
+    "dist",
+    "reference-workflows",
+    taskId,
+    "steps",
+    file,
+  );
+  const module = await import(pathToFileURL(path).href) as {
+    default?: LoadedReferenceStep;
+  };
+  assert.ok(module.default, `${taskId}/${file} has no default step export`);
+  return module.default;
+}
+
+function schemaKeys(schema: unknown): readonly string[] {
+  if (!schema || typeof schema !== "object" || !("shape" in schema)) return [];
+  const shape = (schema as { shape?: unknown }).shape;
+  return shape && typeof shape === "object" ? Object.keys(shape) : [];
+}
+
+async function runReferenceCode(
+  step: LoadedReferenceStep,
+  input: unknown,
+): Promise<unknown> {
+  assert.ok(step.run, "reference code step has no run callback");
+  return await step.run(input);
+}
+
 function samplePhase(status: "succeeded" | "failed" | "skipped") {
   return {
     status,
@@ -2551,13 +3506,33 @@ function gradeSynthetic(
   resources: Record<string, Json>,
   drafts: Json[] = [],
   calendarEvents: Json[] = [],
+  beforeResources: Record<string, Json> = {},
+  auditEvents?: Json[],
+  beforeAuditEvents: Json[] = [],
 ) {
+  const effectiveAuditEvents = auditEvents ?? [{
+    argv: [
+      "drive",
+      "files",
+      "update",
+      "--params",
+      JSON.stringify({ fileId: scenario.resources[0]?.id ?? scenario.runTag }),
+    ],
+    cwd: "/benchmark",
+    at: "2026-07-13T09:00:30Z",
+    pid: 123,
+  }];
   const before: WorkspaceSnapshot = {
     capturedAt: "2026-07-13T09:00:00Z",
     resources: {
       baseline: { value: "before" },
+      ...beforeResources,
       [`__drafts_${scenario.id}`]: {},
       [`__sent_${scenario.id}`]: {},
+      [`__gws_audit_${scenario.id}`]: {
+        complete: true,
+        events: beforeAuditEvents,
+      },
     },
     drafts: [],
     calendarEvents: [],
@@ -2570,6 +3545,10 @@ function gradeSynthetic(
         ? { drafts: drafts.map((_, index) => ({ id: `draft-${index}` })) }
         : {},
       [`__sent_${scenario.id}`]: {},
+      [`__gws_audit_${scenario.id}`]: {
+        complete: true,
+        events: effectiveAuditEvents,
+      },
     },
     drafts,
     calendarEvents,
@@ -2609,10 +3588,33 @@ function sampleBenchmarkResult(
       author_cori_path: "/repo/target/debug/cori",
       author_cori_version: "cori 0.2.4",
       author_cori_sha256: "a".repeat(64),
+      harness_path: "/usr/local/bin/codex",
+      harness_version: "codex-cli 1.0.0",
+      harness_sha256: "b".repeat(64),
       gws: "gws",
+      gws_path: "/usr/local/bin/gws",
+      gws_version: "gws 0.22.5",
+      gws_sha256: "c".repeat(64),
+      temporal_path: "/usr/local/bin/temporal",
+      temporal_version: "temporal version 1.7.2 (Server 1.31.1, UI 2.49.1)",
+      temporal_sha256: "d".repeat(64),
+      deno_path: "/usr/local/bin/deno",
+      deno_version: "deno 2.8.1",
+      deno_sha256: "e".repeat(64),
+      node_path: process.execPath,
+      node_version: process.version,
+      node_sha256: "f".repeat(64),
+      subject_isolation: "macos_sandbox_exec_repo_read_deny",
+      subject_isolation_path: "/usr/bin/sandbox-exec",
+      subject_isolation_sha256: "1".repeat(64),
+      benchmark_source_sha256: "2".repeat(64),
+      capture_skill_sha256: "3".repeat(64),
+      workspace_account_sha256: "4".repeat(64),
+      calendar_id: "benchmark@example.com",
       author_model: "gpt-5.6-terra",
       llm_model: "gpt-5.4",
       os: "darwin",
+      arch: "arm64",
       timezone: "Europe/Paris",
     },
     capture: {
@@ -2628,6 +3630,7 @@ function sampleBenchmarkResult(
         skillCheckObserved: true,
         skillCheckSucceeded: true,
         benchmarkCheckSucceeded: true,
+        runtimeModelDataflowVerified: true,
         checkPassed: true,
         policy: { ok: true, violations: [], workflowHash: "abc" },
         workflowHash: "abc",
@@ -2647,11 +3650,17 @@ function sampleBenchmarkResult(
       designTokens: 479_569,
       runtimeTokens: 0,
       runtimeCostEur: 0,
+      designWallTimeMs: 3_500,
+      directSuiteWallTimeMs: 60_584,
+      replaySuiteWallTimeMs: 12_499,
       breakEvenRepetitions: 2,
     },
     summary: {
       directScore: mean(direct.map((trial) => trial.grade.score)),
       replayScore: mean(replay.map((trial) => trial.grade.score)),
+      pairedSampleSize: Math.min(direct.length, replay.length),
+      combinedResult: false,
+      inferenceEligible: false,
       pairedDifferenceCi95: [0, 30],
       reuseAdvantageDemonstrated: true,
     },

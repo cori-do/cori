@@ -84,7 +84,14 @@ function formatPath(
   return out;
 }
 
-/** Convert a Zod output contract to JSON Schema for structured-output LLMs. */
+/**
+ * Convert a Zod output contract to the JSON shape accepted by its parser.
+ *
+ * Providers return the value that is subsequently passed to `safeParse`, so
+ * transforms and pipelines must be described from their input side. Advertising
+ * Zod's output side would ask the provider for a post-transform value and then
+ * reject that same value when parsing it.
+ */
 export function jsonSchemaFromZod(schema: Schema): Record<string, unknown> {
   if (!isZodSchema(schema)) return {};
 
@@ -93,7 +100,12 @@ export function jsonSchemaFromZod(schema: Schema): Record<string, unknown> {
   // object unknown-key policy without relying on private check internals.
   if (schema._zod?.def && typeof schema.toJSONSchema === "function") {
     try {
-      return schema.toJSONSchema();
+      return schema.toJSONSchema({
+        io: "input",
+        // Preserve as much of a mixed schema as Zod can represent. Runtime
+        // parsing remains the final authority for unsupported transform nodes.
+        unrepresentable: "any",
+      });
     } catch {
       // Some unrepresentable transforms cannot be converted. Fall through to
       // the compatibility walker so the provider still receives the closest
@@ -106,8 +118,54 @@ export function jsonSchemaFromZod(schema: Schema): Record<string, unknown> {
 
 /** Produce a minimal value satisfying the declared output cardinality. */
 export function stubFromZod(schema: Schema): unknown {
-  if (!isZodSchema(schema)) return { mocked: true };
+  // With no declared contract there is no honest data shape to invent.
+  // Returning an empty object keeps dry-run trace annotations out of the
+  // workflow accumulator while preserving legacy no-schema workflows.
+  if (!isZodSchema(schema)) return {};
   return defaultFromJsonSchema(jsonSchemaFromZod(schema));
+}
+
+/** Build and validate a dry-run output without evaluating a step's input. */
+export async function validatedStubFromZod(schema: Schema): Promise<unknown> {
+  const stub = stubFromZod(schema);
+  return await parseWithSchema(schema, stub, "output");
+}
+
+/**
+ * Render every oversized LLM batch inside the same process that parsed the
+ * input. Keeping transformed values in memory matters for valid Zod outputs
+ * such as Date, Map, and class instances, which cannot cross a JSON envelope
+ * without changing type.
+ */
+export async function renderBatchPrompts(
+  input: unknown,
+  batch: unknown,
+  render: (chunkInput: unknown) => unknown | Promise<unknown>,
+): Promise<string[]> {
+  if (!batch || typeof batch !== "object" || Array.isArray(batch)) return [];
+  const { by, size } = batch as Record<string, unknown>;
+  if (typeof by !== "string" || by.length === 0) {
+    throw new Error("LLM batch.by must be a non-empty string");
+  }
+  if (
+    typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0
+  ) {
+    throw new Error("LLM batch.size must be a positive integer");
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+
+  const values = (input as Record<string, unknown>)[by];
+  if (!Array.isArray(values) || values.length <= size) return [];
+
+  const prompts: string[] = [];
+  for (let offset = 0; offset < values.length; offset += size) {
+    const chunkInput = {
+      ...(input as Record<string, unknown>),
+      [by]: values.slice(offset, offset + size),
+    };
+    prompts.push(String(await render(chunkInput) ?? ""));
+  }
+  return prompts;
 }
 
 function isZodSchema(schema: Schema | undefined): boolean {
@@ -164,20 +222,211 @@ function defaultFromJsonSchema(schema: unknown): unknown {
       );
     }
     case "string": {
-      if (def.format === "date-time") return new Date(0).toISOString();
-      const min = nonNegativeInteger(def.minLength) ?? 0;
-      const max = nonNegativeInteger(def.maxLength);
-      return "x".repeat(max === undefined ? min : Math.min(min, max));
+      return stringDefault(def);
     }
     case "integer":
     case "number":
-      return typeof def.minimum === "number" ? def.minimum : 0;
+      return numberDefault(def, type === "integer");
     case "boolean":
       return false;
     case "null":
     default:
       return null;
   }
+}
+
+function stringDefault(def: Record<string, unknown>): string {
+  const min = nonNegativeInteger(def.minLength) ?? 0;
+  const max = nonNegativeInteger(def.maxLength);
+  const preferred = stringFormatDefault(def.format);
+  const patternText = typeof def.pattern === "string" ? def.pattern : undefined;
+  const seeds = [
+    preferred,
+    "a",
+    "0",
+    "x".repeat(Math.max(1, min)),
+    ...(patternText
+      ? [
+        "1970-01-01",
+        "cori@example.com",
+        "00000000-0000-4000-8000-000000000000",
+        "https://example.com",
+        "127.0.0.1",
+      ]
+      : []),
+  ].filter((value): value is string => typeof value === "string");
+
+  const pattern = patternText ? compilePattern(patternText) : undefined;
+  for (const seed of seeds) {
+    const candidate = fitStringLength(seed, min, max);
+    if (candidate !== undefined && (!pattern || pattern.test(candidate))) {
+      return candidate;
+    }
+  }
+
+  // Unknown regular expressions cannot be generated safely without a regex
+  // synthesiser. Return the closest structural value; `llm_stub` immediately
+  // validates it and reports the precise unsupported constraint.
+  return fitStringLength("x".repeat(Math.max(1, min)), min, max) ?? "";
+}
+
+function stringFormatDefault(format: unknown): string | undefined {
+  switch (format) {
+    case "date":
+      return "1970-01-01";
+    case "date-time":
+      return new Date(0).toISOString();
+    case "time":
+      return "00:00:00Z";
+    case "email":
+      return "cori@example.com";
+    case "uuid":
+      return "00000000-0000-4000-8000-000000000000";
+    case "uri":
+    case "url":
+      return "https://example.com";
+    case "hostname":
+      return "example.com";
+    case "ipv4":
+      return "127.0.0.1";
+    case "ipv6":
+      return "::1";
+    default:
+      return undefined;
+  }
+}
+
+function fitStringLength(
+  seed: string,
+  min: number,
+  max: number | undefined,
+): string | undefined {
+  if (max !== undefined && min > max) return undefined;
+  let value = seed;
+  if (value.length < min) value += "x".repeat(min - value.length);
+  if (max !== undefined && value.length > max) return undefined;
+  return value;
+}
+
+function compilePattern(pattern: string): RegExp | undefined {
+  try {
+    return new RegExp(pattern, "u");
+  } catch {
+    return undefined;
+  }
+}
+
+function numberDefault(
+  def: Record<string, unknown>,
+  integer: boolean,
+): number {
+  const minimum = finiteNumber(def.minimum);
+  const exclusiveMinimum = finiteNumber(def.exclusiveMinimum);
+  const maximum = finiteNumber(def.maximum);
+  const exclusiveMaximum = finiteNumber(def.exclusiveMaximum);
+  const multipleOf = finiteNumber(def.multipleOf);
+  const lower = exclusiveMinimum ?? minimum;
+  const lowerExclusive = exclusiveMinimum !== undefined;
+  const upper = exclusiveMaximum ?? maximum;
+  const upperExclusive = exclusiveMaximum !== undefined;
+
+  const candidates: number[] = [0, 1, -1];
+  if (minimum !== undefined) candidates.push(minimum);
+  if (maximum !== undefined) candidates.push(maximum);
+
+  if (multipleOf !== undefined && multipleOf > 0) {
+    let first = lower === undefined ? 0 : Math.ceil(lower / multipleOf);
+    if (
+      lower !== undefined && lowerExclusive &&
+      isMultipleOf(lower, multipleOf)
+    ) {
+      first += 1;
+    }
+    let last = upper === undefined ? 0 : Math.floor(upper / multipleOf);
+    if (
+      upper !== undefined && upperExclusive &&
+      isMultipleOf(upper, multipleOf)
+    ) {
+      last -= 1;
+    }
+    if (lower === undefined && upper !== undefined) first = Math.min(0, last);
+    if (upper === undefined && lower !== undefined) last = Math.max(0, first);
+    if (first <= last) {
+      const index = first <= 0 && last >= 0 ? 0 : first;
+      candidates.unshift(index * multipleOf);
+    }
+  } else if (integer) {
+    const first = lower === undefined
+      ? Number.MIN_SAFE_INTEGER
+      : lowerExclusive
+      ? Math.floor(lower) + 1
+      : Math.ceil(lower);
+    const last = upper === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : upperExclusive
+      ? Math.ceil(upper) - 1
+      : Math.floor(upper);
+    if (first <= last) {
+      candidates.unshift(Math.min(Math.max(0, first), last));
+    }
+  } else {
+    if (lower !== undefined && upper !== undefined && lower < upper) {
+      candidates.unshift(lower + (upper - lower) / 2);
+    } else if (lower !== undefined) {
+      candidates.unshift(
+        lowerExclusive ? adjacentInteriorNumber(lower, 1) : lower,
+      );
+    } else if (upper !== undefined) {
+      candidates.unshift(
+        upperExclusive ? adjacentInteriorNumber(upper, -1) : upper,
+      );
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (numberSatisfies(candidate, def, integer)) return candidate;
+  }
+
+  // An impossible numeric schema will still be rejected by the immediate
+  // output validation, producing a path-aware diagnostic.
+  return 0;
+}
+
+function adjacentInteriorNumber(boundary: number, direction: 1 | -1): number {
+  const step = Math.max(1, Math.abs(boundary)) * 1e-6;
+  return boundary + direction * step;
+}
+
+function numberSatisfies(
+  candidate: number,
+  def: Record<string, unknown>,
+  integer: boolean,
+): boolean {
+  const minimum = finiteNumber(def.minimum);
+  const exclusiveMinimum = finiteNumber(def.exclusiveMinimum);
+  const maximum = finiteNumber(def.maximum);
+  const exclusiveMaximum = finiteNumber(def.exclusiveMaximum);
+  const multipleOf = finiteNumber(def.multipleOf);
+  return Number.isFinite(candidate) &&
+    (!integer || Number.isInteger(candidate)) &&
+    (minimum === undefined || candidate >= minimum) &&
+    (exclusiveMinimum === undefined || candidate > exclusiveMinimum) &&
+    (maximum === undefined || candidate <= maximum) &&
+    (exclusiveMaximum === undefined || candidate < exclusiveMaximum) &&
+    (multipleOf === undefined ||
+      multipleOf <= 0 ||
+      isMultipleOf(candidate, multipleOf));
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function isMultipleOf(value: number, divisor: number): boolean {
+  const quotient = value / divisor;
+  return Math.abs(quotient - Math.round(quotient)) < 1e-9;
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
@@ -234,7 +483,7 @@ function jsonSchemaFromZodV3(schema: Schema): Record<string, unknown> {
     case "ZodEffects":
       return jsonSchemaFromZodV3(def.schema);
     case "ZodPipeline":
-      return jsonSchemaFromZodV3(def.out ?? def.in);
+      return jsonSchemaFromZodV3(def.in ?? def.out);
     case "ZodLazy":
       try {
         return jsonSchemaFromZodV3(def.getter?.());

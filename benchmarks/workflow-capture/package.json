@@ -8,12 +8,14 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node --test dist/test/benchmark.test.js",
+    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 dist/test/benchmark.test.js",
     "benchmark": "tsc -p tsconfig.json && node dist/src/cli.js"
   },
   "devDependencies": {
+    "@cori-do/sdk": "workspace:*",
     "@types/node": "^22.19.19",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "zod": "^4.4.3"
   },
   "engines": {
     "node": ">=20"

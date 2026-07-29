@@ -8,12 +8,13 @@
     "runner.ts",
     "schema.ts",
     "deno.json",
+    "deno.lock",
     "README.md"
   ],
   "scripts": {
-    "build": "echo \"no build step — runner.ts ships as source\"",
-    "lint": "echo \"no lint — Deno typechecks at run time\"",
-    "typecheck": "echo \"no typecheck — Deno typechecks at run time\"",
-    "test": "deno test --config deno.json schema.test.ts"
+    "build": "deno check --config deno.json --lock deno.lock --frozen runner.ts schema.ts",
+    "lint": "deno fmt --check runner.ts schema.ts schema.test.ts runner.test.ts",
+    "typecheck": "deno check --config deno.json --lock deno.lock --frozen runner.ts schema.ts runner.test.ts",
+    "test": "deno test --config deno.json --lock deno.lock --frozen --allow-read --allow-write --allow-run schema.test.ts runner.test.ts"
   }
 }

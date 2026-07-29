@@ -1,8 +1,11 @@
 {
   "imports": {
     "@cori-do/sdk": "./sdk/index.ts",
-    "zod": "npm:zod@^4.4.3"
+    "zod": "npm:zod@4.4.3"
   },
-  "lock": false,
+  "lock": {
+    "path": "./deno.lock",
+    "frozen": true
+  },
   "nodeModulesDir": "auto"
 }

@@ -14,12 +14,18 @@ importers:
 
   benchmarks/workflow-capture:
     devDependencies:
+      '@cori-do/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@types/node':
         specifier: ^22.19.19
         version: 22.19.19
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/runner: {}
 

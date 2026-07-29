@@ -16,6 +16,8 @@
 //                  { model, prompt, batch, outputSchema, hasOutputSchema }.
 //   validate_output — parse payload.output through the declared output schema.
 //   llm_stub     — return a cardinality-correct dry-run output.
+//   output_stub  — return a schema-shaped output for any dry-run step without
+//                  evaluating its input or step implementation.
 //
 // Protocol (every mode):
 //   stdin  : JSON object — `{ "input": <value>, ... mode-specific extras }`.
@@ -33,7 +35,9 @@ import {
   isSchemaValidationError,
   jsonSchemaFromZod,
   parseWithSchema,
+  renderBatchPrompts,
   stubFromZod,
+  validatedStubFromZod,
 } from "./schema.ts";
 
 const ENVELOPE_PREFIX = "\u001ECORI_RUNNER\u001E";
@@ -219,7 +223,14 @@ try {
         payload.input,
         "input",
       );
-      const prompt = await stepDef.prompt(input);
+      const batchPrompts = await renderBatchPrompts(
+        input,
+        stepDef.batch,
+        (chunkInput) => stepDef.prompt(chunkInput),
+      );
+      const prompt = batchPrompts.length === 0
+        ? String(await stepDef.prompt(input) ?? "")
+        : "";
       const schema = stepDef.output;
       const hasSchema = !!(
         schema && typeof schema === "object" &&
@@ -232,7 +243,7 @@ try {
           model: stepDef.model,
           prompt: String(prompt ?? ""),
           batch: stepDef.batch ?? null,
-          parsedInput: input,
+          batchPrompts,
           outputSchema: hasSchema ? jsonSchemaFromZod(schema) : null,
           hasOutputSchema: hasSchema,
         },
@@ -246,6 +257,12 @@ try {
         payload.output,
         "output",
       );
+      emit({ ok: true, output: output ?? null });
+      break;
+    }
+
+    case "output_stub": {
+      const output = await validatedStubFromZod(stepDef.output);
       emit({ ok: true, output: output ?? null });
       break;
     }

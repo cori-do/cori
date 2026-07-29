@@ -1,7 +1,7 @@
 ---
 id: support_inbox_triage
 name: Support Inbox Triage
-description: Classify synthetic support inbox messages, batch-write a priority queue, and create an internal digest draft.
+description: Illustrative support triage structure; dynamic per-message execution requires v1 builtin support.
 created: 2026-07-13
 version: 1
 parameters:
@@ -19,9 +19,13 @@ parameters:
     description: Deterministic evaluation timestamp
 tools_required: [gws]
 mcp_servers: []
-tags: [benchmark, support, hybrid]
+tags: [benchmark, support, hybrid, structural-example]
 ---
 
 # Support Inbox Triage
 
-Uses a typed runtime classification and fixed batch GWS calls. It creates a draft only and never sends email.
+> Structural example only — not an executable benchmark oracle in Cori v1.
+> Dynamic fetch and mutation over every returned message requires
+> `map`/`for_each`, which v1 deliberately defers.
+
+It creates a draft only and never sends email.

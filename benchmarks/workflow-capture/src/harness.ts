@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { constants, existsSync } from "node:fs";
+import { access, readFile } from "node:fs/promises";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 
 import type { HarnessName, HarnessSession, HarnessUsage, Json } from "./types.js";
 
@@ -11,6 +14,7 @@ export function codexModel(): string {
 
 export interface HarnessAdapter {
   readonly name: HarnessName;
+  identity(): Promise<HarnessIdentity>;
   version(): Promise<string>;
   start(
     prompt: string,
@@ -23,6 +27,26 @@ export interface HarnessAdapter {
     cwd: string,
     options?: HarnessExecutionOptions,
   ): Promise<HarnessSession>;
+}
+
+export interface ExecutableFileIdentity {
+  command: string;
+  path: string;
+  sha256: string;
+}
+
+export interface HarnessIdentity extends ExecutableFileIdentity {
+  version: string;
+}
+
+/**
+ * Prefix applied only to measured harness turns. Identity probes stay outside
+ * the sandbox so the benchmark can record the real harness executable.
+ */
+export interface HarnessSandbox {
+  file: string;
+  args: readonly string[];
+  mechanism: string;
 }
 
 export interface HarnessProgress {
@@ -47,35 +71,46 @@ export interface HarnessCommand {
 
 abstract class JsonlAdapter implements HarnessAdapter {
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly sandbox?: HarnessSandbox;
 
-  constructor(environment: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    environment: NodeJS.ProcessEnv = process.env,
+    sandbox?: HarnessSandbox,
+  ) {
     this.environment = { ...environment };
+    this.sandbox = sandbox;
   }
 
   abstract readonly name: HarnessName;
   protected abstract startCommand(prompt: string): HarnessCommand;
   protected abstract resumeCommand(sessionId: string, prompt: string): HarnessCommand;
 
-  async version(): Promise<string> {
-    let result: { code: number; stdout: string; stderr: string };
+  async identity(): Promise<HarnessIdentity> {
+    const command = this.binary();
+    let executable: ExecutableFileIdentity;
     try {
-      result = await exec(
-        this.binary(),
-        ["--version"],
-        undefined,
-        undefined,
-        undefined,
-        this.environment,
-      );
+      executable = await executableFileIdentity(command, this.environment);
     } catch (error) {
       if (isMissingExecutable(error)) {
         const variable = `CORI_BENCH_${this.name.toUpperCase()}_BIN`;
-        throw new Error(`cannot find ${this.name} harness executable \`${this.binary()}\`; install it or set ${variable} to its absolute path`);
+        throw new Error(`cannot find ${this.name} harness executable \`${command}\`; install it or set ${variable} to its absolute path`);
       }
       throw error;
     }
+    const result = await exec(
+      executable.path,
+      ["--version"],
+      undefined,
+      undefined,
+      undefined,
+      this.environment,
+    );
     if (result.code !== 0) throw new Error(`${this.name} --version failed: ${result.stderr}`);
-    return result.stdout.trim();
+    return { ...executable, version: result.stdout.trim() };
+  }
+
+  async version(): Promise<string> {
+    return (await this.identity()).version;
   }
 
   async start(
@@ -138,6 +173,7 @@ abstract class JsonlAdapter implements HarnessAdapter {
           });
         },
         this.environment,
+        this.sandbox,
       );
     } catch (error) {
       if (isMissingExecutable(error)) {
@@ -163,6 +199,70 @@ abstract class JsonlAdapter implements HarnessAdapter {
 
 function isMissingExecutable(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT";
+}
+
+/**
+ * Resolve an executable without invoking a shell. This keeps benchmark
+ * identity checks portable and ensures the same PATH that the harness receives
+ * is the one being measured.
+ */
+export async function resolveExecutablePath(
+  command: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const hasDirectory = isAbsolute(command) ||
+    command.includes("/") ||
+    command.includes("\\");
+  const candidates = hasDirectory
+    ? [resolve(command)]
+    : executableCandidates(command, environment);
+  for (const candidate of candidates) {
+    try {
+      await access(
+        candidate,
+        process.platform === "win32" ? constants.F_OK : constants.X_OK,
+      );
+      return resolve(candidate);
+    } catch {
+      // Try the next PATH/PATHEXT candidate.
+    }
+  }
+  const error = new Error(`cannot find executable ${command}`) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  throw error;
+}
+
+export async function executableFileIdentity(
+  command: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<ExecutableFileIdentity> {
+  const path = await resolveExecutablePath(command, environment);
+  return {
+    command,
+    path,
+    sha256: createHash("sha256").update(await readFile(path)).digest("hex"),
+  };
+}
+
+function executableCandidates(
+  command: string,
+  environment: NodeJS.ProcessEnv,
+): string[] {
+  const directories = (environment.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? (environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .filter(Boolean)
+    : [""];
+  const hasExtension = process.platform === "win32" &&
+    extensions.some((extension) => command.toLowerCase().endsWith(extension.toLowerCase()));
+  return directories.flatMap((directory) =>
+    hasExtension
+      ? [join(directory, command)]
+      : extensions.map((extension) => join(directory, `${command}${extension}`))
+  );
 }
 
 export class CodexAdapter extends JsonlAdapter {
@@ -219,10 +319,11 @@ export class GeminiAdapter extends JsonlAdapter {
 export function adapterFor(
   name: HarnessName,
   environment: NodeJS.ProcessEnv = process.env,
+  sandbox?: HarnessSandbox,
 ): HarnessAdapter {
-  if (name === "codex") return new CodexAdapter(environment);
-  if (name === "claude") return new ClaudeAdapter(environment);
-  return new GeminiAdapter(environment);
+  if (name === "codex") return new CodexAdapter(environment, sandbox);
+  if (name === "claude") return new ClaudeAdapter(environment, sandbox);
+  return new GeminiAdapter(environment, sandbox);
 }
 
 export function parseJsonl(stdout: string): readonly Json[] {
@@ -304,15 +405,20 @@ async function exec(
   timeoutMs?: number,
   onProgress?: (stdout: string, stderr: string) => void | Promise<void>,
   environment: NodeJS.ProcessEnv = process.env,
+  sandbox?: HarnessSandbox,
 ): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, [...args], {
+    const child = spawn(
+      sandbox?.file ?? file,
+      sandbox ? [...sandbox.args, file, ...args] : [...args],
+      {
       cwd,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       env: environment,
-    });
+      },
+    );
     let stdout = "";
     let stderr = "";
     let timedOut = false;

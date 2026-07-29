@@ -10,9 +10,10 @@ pub mod pins;
 pub mod refspec;
 pub mod trust;
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::paths;
@@ -90,12 +91,12 @@ fn resolve_remote(spec: RemoteRef, update: bool) -> Result<Resolved> {
         newly_pinned,
     } = resolve_remote_to_checkout(&spec, update)?;
 
-    let workflow_dir = if spec.subpath.is_empty() {
-        checkout.clone()
-    } else {
-        checkout.join(&spec.subpath)
-    };
-    if !workflow_dir.join("manifest.md").is_file() {
+    let workflow_dir = secure_workflow_subpath(&checkout, &spec.subpath)?;
+    let manifest_path = workflow_dir.join("manifest.md");
+    let manifest_is_regular = std::fs::symlink_metadata(&manifest_path)
+        .map(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !manifest_is_regular {
         bail!(
             "no manifest.md at {}/{}{}@{} (resolved sha {}). Check the path inside the \
              repo, or try a different ref.",
@@ -126,6 +127,58 @@ fn resolve_remote(spec: RemoteRef, update: bool) -> Result<Resolved> {
             newly_pinned,
         }),
     })
+}
+
+/// Resolve an in-checkout workflow path without ever following a repository
+/// symlink or allowing path traversal to escape the fetched tree.
+fn secure_workflow_subpath(checkout: &Path, subpath: &str) -> Result<PathBuf> {
+    let canonical_checkout = checkout
+        .canonicalize()
+        .with_context(|| format!("resolving remote checkout `{}`", checkout.display()))?;
+    let candidate = if subpath.is_empty() {
+        checkout.to_path_buf()
+    } else {
+        checkout.join(subpath)
+    };
+
+    let mut cursor = checkout.to_path_buf();
+    for component in Path::new(subpath).components() {
+        let Component::Normal(component) = component else {
+            bail!(
+                "remote workflow subpath `{subpath}` must be relative and cannot contain `.` or `..`"
+            );
+        };
+        cursor.push(component);
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "remote workflow subpath `{subpath}` traverses symlink `{}`; repository symlinks cannot select executable workflow source",
+                    cursor.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspecting remote workflow path `{}`", cursor.display())
+                });
+            }
+        }
+    }
+
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+    let canonical_candidate = candidate
+        .canonicalize()
+        .with_context(|| format!("resolving remote workflow path `{}`", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_checkout) {
+        bail!(
+            "remote workflow subpath `{subpath}` resolves outside checkout `{}`",
+            canonical_checkout.display()
+        );
+    }
+    Ok(canonical_candidate)
 }
 
 /// Outcome of resolving a remote spec to a cached, on-disk checkout —
@@ -321,10 +374,31 @@ fn ensure_checkout(spec: &RemoteRef, sha: &str) -> Result<PathBuf> {
     }
 
     let checkout_dir = repo_dir.join(sha);
-    if checkout_dir.join("manifest.md").is_file()
-        || (checkout_dir.exists() && has_any_file(&checkout_dir))
+    let completion_marker = repo_dir.join(format!(".{sha}.complete"));
+    if checkout_dir.is_dir()
+        && std::fs::read_to_string(&completion_marker).is_ok_and(|value| value.trim() == sha)
     {
         return Ok(checkout_dir);
+    }
+    if completion_marker.exists() {
+        let stale_marker =
+            repo_dir.join(format!(".{sha}.complete.stale-{}", Uuid::new_v4().simple()));
+        std::fs::rename(&completion_marker, &stale_marker).with_context(|| {
+            format!(
+                "quarantining stale remote checkout marker `{}`",
+                completion_marker.display()
+            )
+        })?;
+    }
+    if checkout_dir.exists() {
+        let quarantine = repo_dir.join(format!(".{sha}.incomplete-{}", Uuid::new_v4().simple()));
+        std::fs::rename(&checkout_dir, &quarantine).with_context(|| {
+            format!(
+                "quarantining incomplete remote checkout `{}` to `{}`",
+                checkout_dir.display(),
+                quarantine.display()
+            )
+        })?;
     }
 
     if !git::has_commit(&bare, sha)? {
@@ -338,16 +412,37 @@ fn ensure_checkout(spec: &RemoteRef, sha: &str) -> Result<PathBuf> {
         }
     }
 
-    std::fs::create_dir_all(&checkout_dir)
-        .with_context(|| format!("creating `{}`", checkout_dir.display()))?;
-    git::checkout_sha(&bare, sha, &checkout_dir)?;
+    let partial = repo_dir.join(format!(
+        ".{sha}.partial-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir(&partial).with_context(|| format!("creating `{}`", partial.display()))?;
+    if let Err(error) = git::checkout_sha(&bare, sha, &partial) {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(error);
+    }
+    std::fs::rename(&partial, &checkout_dir).with_context(|| {
+        format!(
+            "committing remote checkout `{}` to `{}`",
+            partial.display(),
+            checkout_dir.display()
+        )
+    })?;
+    let marker_partial = repo_dir.join(format!(
+        ".{sha}.complete-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    std::fs::write(&marker_partial, format!("{sha}\n"))
+        .with_context(|| format!("writing `{}`", marker_partial.display()))?;
+    std::fs::rename(&marker_partial, &completion_marker).with_context(|| {
+        format!(
+            "committing remote checkout marker `{}`",
+            completion_marker.display()
+        )
+    })?;
     Ok(checkout_dir)
-}
-
-fn has_any_file(dir: &std::path::Path) -> bool {
-    std::fs::read_dir(dir)
-        .map(|mut it| it.next().is_some())
-        .unwrap_or(false)
 }
 
 pub fn remote_run_history_key(spec: &RemoteRef) -> String {
@@ -367,4 +462,36 @@ pub fn remote_run_history_key(spec: &RemoteRef) -> String {
         spec.subpath_leaf()
     };
     format!("{leaf}-{short}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn remote_workflow_subpath_stays_inside_checkout() {
+        let checkout = tempdir().expect("checkout");
+        std::fs::create_dir_all(checkout.path().join("workflows/example"))
+            .expect("workflow directory");
+        let resolved =
+            secure_workflow_subpath(checkout.path(), "workflows/example").expect("safe subpath");
+        assert!(resolved.starts_with(checkout.path().canonicalize().expect("checkout root")));
+        assert!(secure_workflow_subpath(checkout.path(), "../escape").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_workflow_subpath_rejects_repository_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let checkout = tempdir().expect("checkout");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("manifest.md"), "outside").expect("outside manifest");
+        symlink(outside.path(), checkout.path().join("workflow")).expect("repository symlink");
+
+        let error = secure_workflow_subpath(checkout.path(), "workflow")
+            .expect_err("repository symlink must fail");
+        assert!(error.to_string().contains("traverses symlink"));
+    }
 }

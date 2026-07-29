@@ -10,7 +10,7 @@ const Input = z.object({
 const Output = z.object({ updated: z.number() });
 
 export default step.cli({
-  description: "Batch-write the obligation register",
+  description: "Batch-write the obligation register rows",
   input: Input,
   output: Output,
   command: ({ register_spreadsheet_id, run_tag, as_of, rows }) => [

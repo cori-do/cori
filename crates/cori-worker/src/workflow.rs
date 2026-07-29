@@ -27,9 +27,14 @@ use temporalio_common::error::{ActivityExecutionError, IncomingError};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{ActivityOptions, SyncWorkflowContext, WorkflowContext, WorkflowResult};
 
-use cori_protocol::{CompiledWorkflow, StepKind};
+use cori_protocol::{
+    CompiledWorkflow, SourceBundle, StepKind, bounded_activity_attempts,
+    bounded_activity_timeout_ms,
+};
 
-use crate::activities::{ActivityInput, ActivityOutput, CoriActivities, NeedsReauthDetails};
+use crate::activities::{
+    ActivityInput, ActivityOutput, CoriActivities, FrozenStep, NeedsReauthDetails,
+};
 
 /// Default mid-run re-auth timeout when [`WorkflowInput::reauth_timeout_secs`]
 /// is not set. Matches the redesign-migration-plan §Phase 6 default.
@@ -40,10 +45,11 @@ const DEFAULT_REAUTH_TIMEOUT_SECS: u64 = 15 * 60;
 pub struct WorkflowInput {
     /// Cori workflow id (the user-facing slug — not a Temporal type name).
     pub workflow_id: String,
-    /// Content hash of the workflow folder (manifest + steps). Carried
-    /// for trace / debugging only; the workflow body does not use it.
-    /// Optional because the smoke test constructs an in-memory DAG
-    /// without a source folder.
+    /// Content hash of the complete workflow tree, including imported helper
+    /// modules. The workflow body deterministically copies it into activity
+    /// inputs so workers can reject source drift before dispatch. Optional
+    /// because the smoke test constructs an in-memory DAG without a source
+    /// folder.
     #[serde(default)]
     pub workflow_content_hash: Option<String>,
     /// Identity of the user requesting this run. The broker uses this
@@ -72,6 +78,11 @@ pub struct WorkflowInput {
     /// that build in-memory DAGs.
     #[serde(default)]
     pub source_root: String,
+    /// Capped immutable source transport for every activity-bearing run.
+    /// Repeated into each external activity because Temporal task queues have
+    /// no host affinity, including when multiple workers poll the same queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bundle: Option<SourceBundle>,
 }
 
 /// Output of [`CoriWorkflow`].
@@ -205,6 +216,12 @@ impl CoriWorkflow {
                 user_id: input.user_id.clone(),
                 dry_run: input.dry_run,
                 source_root: input.source_root.clone(),
+                source_bundle: input.source_bundle.clone(),
+                frozen_step: step.source_sha256.as_ref().map(|source_sha256| FrozenStep {
+                    source_sha256: source_sha256.clone(),
+                    workflow_content_hash: input.workflow_content_hash.clone(),
+                    metadata: step.metadata.clone(),
+                }),
             };
 
             let opts = activity_options_for_step(step);
@@ -231,11 +248,10 @@ impl CoriWorkflow {
 
             match result {
                 Ok(out) => {
-                    let is_ok = out.status == "ok";
-                    // Only merge real outputs into the accumulator —
-                    // mocked outputs are synthetic and would poison
-                    // downstream steps' inputs.
-                    if is_ok {
+                    // Dry-run activities return schema-valid stubs. Feed those
+                    // through the DAG so downstream builders and schemas are
+                    // exercised without performing external side effects.
+                    if contributes_to_dataflow(&out.status, input.dry_run) {
                         if let JsonValue::Object(m) = &out.output {
                             for (k, v) in m {
                                 accumulated.insert(k.clone(), v.clone());
@@ -374,6 +390,10 @@ impl CoriWorkflow {
     }
 }
 
+fn contributes_to_dataflow(status: &str, dry_run: bool) -> bool {
+    status == "ok" || (dry_run && status == "skipped")
+}
+
 /// Render an [`ActivityExecutionError`] into a human-readable string by
 /// walking the cause chain. The outer `Display` impl only surfaces the
 /// generic wrapper message Temporal stamps on every activity failure
@@ -439,12 +459,10 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
         StepKind::Llm => 120,
         StepKind::Builtin => 30,
     };
-    let timeout = step
-        .metadata
-        .get("timeout_ms")
-        .and_then(|v| v.as_u64())
-        .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(default_secs));
+    let timeout = Duration::from_millis(bounded_activity_timeout_ms(
+        step.metadata.get("timeout_ms").and_then(|v| v.as_u64()),
+        default_secs * 1000,
+    ));
 
     // Default: cli/mcp_tool mutate external state, so we only attempt
     // once unless the step explicitly opts in. Pure (code) and
@@ -455,11 +473,12 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
         StepKind::Builtin => 1,
     };
     let retries = step.metadata.get("retries");
-    let max_attempts: i32 = retries
-        .and_then(|r| r.get("max"))
-        .and_then(|v| v.as_i64())
-        .map(|n| n as i32)
-        .unwrap_or(default_attempts);
+    let configured_attempts = retries.and_then(|r| r.get("max")).and_then(|v| v.as_u64());
+    let max_attempts = i32::try_from(bounded_activity_attempts(
+        configured_attempts,
+        u32::try_from(default_attempts).unwrap_or(1),
+    ))
+    .unwrap_or(default_attempts);
 
     // Backoff strategy mirrors the SDK's `retries.backoff` field. Linear
     // backoff keeps a constant interval (coefficient 1.0); exponential
@@ -483,6 +502,7 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
             "InvalidInputError".to_string(),
             "SchemaValidationError".to_string(),
             "StepFailedError".to_string(),
+            "SourceBundleError".to_string(),
             "RuntimeUnavailableError".to_string(),
             "MissingEnvelopeError".to_string(),
         ],
@@ -505,5 +525,19 @@ fn prost_duration_from_secs(s: i64) -> prost_wkt_types::Duration {
     prost_wkt_types::Duration {
         seconds: s,
         nanos: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contributes_to_dataflow;
+
+    #[test]
+    fn dry_run_stubs_continue_schema_dataflow() {
+        assert!(contributes_to_dataflow("ok", false));
+        assert!(contributes_to_dataflow("ok", true));
+        assert!(contributes_to_dataflow("skipped", true));
+        assert!(!contributes_to_dataflow("skipped", false));
+        assert!(!contributes_to_dataflow("failed", true));
     }
 }

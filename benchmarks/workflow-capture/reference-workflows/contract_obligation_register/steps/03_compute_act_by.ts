@@ -4,6 +4,7 @@ import { z } from "zod";
 const Input = z.object({
   term_end: z.string(),
   as_of: z.string(),
+  run_tag: z.string(),
   obligations: z.array(z.object({
     clause: z.string(),
     party: z.string(),
@@ -11,13 +12,17 @@ const Input = z.object({
     notice_days: z.number().int().min(0),
   })),
 });
-const Output = z.object({ rows: z.array(z.array(z.string())), due_clauses: z.array(z.string()) });
+const Output = z.object({
+  rows: z.array(z.array(z.string())),
+  due_clauses: z.array(z.string()),
+  legal_summary: z.string(),
+});
 
 export default step.code({
   description: "Compute the latest date each party can still act",
   input: Input,
   output: Output,
-  run: ({ term_end, as_of, obligations }) => {
+  run: ({ term_end, as_of, run_tag, obligations }) => {
     const termEnd = Date.parse(`${term_end}T00:00:00Z`);
     if (!Number.isFinite(termEnd)) throw new Error(`unusable term end: ${term_end}`);
     const asOfDate = as_of.slice(0, 10);
@@ -28,6 +33,7 @@ export default step.code({
     }).sort((left, right) =>
       left.act_by.localeCompare(right.act_by) || left.clause.localeCompare(right.clause)
     );
+    const due = assessed.filter((obligation) => obligation.action_required);
     return {
       rows: assessed.map((obligation) => [
         obligation.clause,
@@ -37,7 +43,13 @@ export default step.code({
         obligation.act_by,
         String(obligation.action_required),
       ]),
-      due_clauses: assessed.filter((obligation) => obligation.action_required).map((obligation) => obligation.clause),
+      due_clauses: due.map((obligation) => obligation.clause),
+      legal_summary: [
+        run_tag,
+        `obligations: ${assessed.length}`,
+        `action required: ${due.length}`,
+        `due clauses: ${due.map((obligation) => obligation.clause).join(", ") || "none"}`,
+      ].join("\n"),
     };
   },
 });

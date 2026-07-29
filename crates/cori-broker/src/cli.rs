@@ -159,6 +159,7 @@ pub fn run(
         stderr: combine_stderr(&cmd_call.stderr, &stderr_str, &parse_call.stderr),
         cost_eur: None,
         usage: None,
+        notes: Vec::new(),
     })
 }
 

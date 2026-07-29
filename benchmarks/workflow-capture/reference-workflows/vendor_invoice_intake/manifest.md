@@ -1,7 +1,7 @@
 ---
 id: vendor_invoice_intake
 name: Vendor Invoice Intake
-description: Read the week's vendor invoices whatever layout each supplier uses, record the stated figures, apply the accounts payable controls, and draft the exception list.
+description: Illustrative invoice intake structure; dynamic per-document execution requires v1 builtin support.
 created: 2026-07-27
 version: 1
 parameters:
@@ -19,10 +19,14 @@ parameters:
     description: Deterministic evaluation timestamp
 tools_required: [gws]
 mcp_servers: []
-tags: [benchmark, finance, hybrid]
+tags: [benchmark, finance, hybrid, structural-example]
 ---
 
 # Vendor Invoice Intake
+
+> Structural example only — not an executable benchmark oracle in Cori v1.
+> Reading every document returned by a variable Drive query requires dynamic
+> `map`/`for_each` fan-out, which v1 deliberately defers.
 
 Every supplier formats its invoices differently, so field extraction is a typed `llm` call over
 each document as it arrives. The arithmetic check, the overdue comparison, and every Workspace

@@ -64,10 +64,20 @@ impl LlmProvider for OpenAiProvider {
 
     fn complete(&self, req: &LlmRequest<'_>) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", self.base_url);
-        let system = system_message(req.strict_retry);
+        let mut system = system_message(req.strict_retry).to_string();
+        let strict_schema = req.output_schema.and_then(sanitize_openai_schema);
+        if let Some(schema) = req.output_schema
+            && strict_schema.is_none()
+        {
+            system.push_str(
+                "\n\nReturn JSON that matches this schema. Optional properties must remain optional; do not invent values for omitted fields:\n",
+            );
+            system.push_str(&schema.to_string());
+        }
 
         // Use response_format=json_schema when a schema is supplied so the
-        // provider enforces structure server-side.
+        // provider enforces structure server-side when the workflow contract
+        // is representable without strengthening optional-field semantics.
         let mut body = json!({
             "model": req.model,
             "messages": [
@@ -75,15 +85,20 @@ impl LlmProvider for OpenAiProvider {
                 { "role": "user",   "content": req.prompt },
             ],
         });
-        if let Some(schema) = req.output_schema {
+        if let Some(schema) = strict_schema {
             body["response_format"] = json!({
                 "type": "json_schema",
                 "json_schema": {
                     "name": "cori_response",
-                    "schema": sanitize_openai_schema(schema),
+                    "schema": schema,
                     "strict": true,
                 }
             });
+        } else if req.output_schema.is_some() {
+            // OpenAI strict schemas require every property. For a Zod schema
+            // with optional fields, use JSON mode plus Cori's local Zod
+            // validation/retry instead of silently changing the contract.
+            body["response_format"] = json!({ "type": "json_object" });
         }
 
         let resp = http_client()
@@ -253,10 +268,9 @@ impl LlmProvider for GeminiProvider {
     }
 
     fn complete(&self, req: &LlmRequest<'_>) -> Result<LlmResponse> {
-        let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            self.base_url, req.model, self.api_key
-        );
+        // Keep credentials out of the URL: reqwest transport errors include
+        // request URLs and those errors are persisted in Temporal history.
+        let url = gemini_generate_url(&self.base_url, req.model);
 
         let mut body = json!({
             "systemInstruction": {
@@ -276,6 +290,7 @@ impl LlmProvider for GeminiProvider {
 
         let resp = http_client()
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&body)
             .send()
             .map_err(BrokerError::LlmHttp)?;
@@ -313,6 +328,10 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
+fn gemini_generate_url(base_url: &str, model: &str) -> String {
+    format!("{base_url}/models/{model}:generateContent")
+}
+
 /// Gemini's `responseSchema` rejects `additionalProperties: false` and a
 /// handful of other JSON Schema keywords. Strip them recursively.
 fn sanitize_gemini_schema(schema: &JsonValue) -> JsonValue {
@@ -335,10 +354,11 @@ fn sanitize_gemini_schema(schema: &JsonValue) -> JsonValue {
     }
 }
 
-/// OpenAI's strict `json_schema` response format requires every object to set
-/// `additionalProperties: false` and to list **all** of its properties in
-/// `required`. Zod-derived schemas omit both, so apply them recursively.
-fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
+/// Return an OpenAI strict schema only when every object is already closed and
+/// every property is required. Rewriting an optional Zod property as required
+/// would change the workflow contract, so incompatible schemas return `None`
+/// and use JSON mode plus local Zod validation instead.
+fn sanitize_openai_schema(schema: &JsonValue) -> Option<JsonValue> {
     match schema {
         JsonValue::Object(m) => {
             let mut out = serde_json::Map::new();
@@ -346,7 +366,7 @@ fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
                 if matches!(k.as_str(), "$schema" | "$id") {
                     continue;
                 }
-                out.insert(k.clone(), sanitize_openai_schema(v));
+                out.insert(k.clone(), sanitize_openai_schema(v)?);
             }
             // `const` is valid JSON Schema without `type`, but OpenAI's
             // Structured Outputs subset requires a type at every leaf.
@@ -371,17 +391,41 @@ fn sanitize_openai_schema(schema: &JsonValue) -> JsonValue {
                 }
             }
             if out.get("type").and_then(|t| t.as_str()) == Some("object") {
-                out.insert("additionalProperties".to_string(), JsonValue::Bool(false));
-                if let Some(props) = out.get("properties").and_then(|p| p.as_object()) {
-                    let required: Vec<JsonValue> =
-                        props.keys().map(|k| JsonValue::String(k.clone())).collect();
-                    out.insert("required".to_string(), JsonValue::Array(required));
+                let props = out
+                    .get("properties")
+                    .and_then(JsonValue::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let property_names: std::collections::BTreeSet<&str> =
+                    props.keys().map(String::as_str).collect();
+                let required_names: std::collections::BTreeSet<&str> = out
+                    .get("required")
+                    .and_then(JsonValue::as_array)
+                    .map(|required| required.iter().filter_map(JsonValue::as_str).collect())
+                    .unwrap_or_default();
+                if required_names != property_names
+                    || out.get("additionalProperties") != Some(&JsonValue::Bool(false))
+                {
+                    return None;
                 }
+                out.insert(
+                    "required".to_string(),
+                    JsonValue::Array(
+                        props
+                            .keys()
+                            .map(|key| JsonValue::String(key.clone()))
+                            .collect(),
+                    ),
+                );
             }
-            JsonValue::Object(out)
+            Some(JsonValue::Object(out))
         }
-        JsonValue::Array(a) => JsonValue::Array(a.iter().map(sanitize_openai_schema).collect()),
-        other => other.clone(),
+        JsonValue::Array(a) => Some(JsonValue::Array(
+            a.iter()
+                .map(sanitize_openai_schema)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        other => Some(other.clone()),
     }
 }
 
@@ -437,12 +481,14 @@ mod tests {
         let schema = json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "status": { "const": "triaged" },
                 "attempt": { "enum": [1, 2] }
-            }
+            },
+            "required": ["status", "attempt"]
         });
-        let sanitized = sanitize_openai_schema(&schema);
+        let sanitized = sanitize_openai_schema(&schema).expect("strict-compatible schema");
         assert!(sanitized.get("$schema").is_none());
         assert_eq!(
             sanitized.pointer("/properties/status/type"),
@@ -452,5 +498,33 @@ mod tests {
             sanitized.pointer("/properties/attempt/type"),
             Some(&json!("number"))
         );
+    }
+
+    #[test]
+    fn openai_strict_schema_does_not_make_optional_fields_required() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "status": { "type": "string" },
+                "detail": { "type": "string" }
+            },
+            "required": ["status"]
+        });
+        assert!(
+            sanitize_openai_schema(&schema).is_none(),
+            "optional fields must use JSON mode and local Zod validation"
+        );
+    }
+
+    #[test]
+    fn gemini_endpoint_never_contains_the_api_key() {
+        let key = "secret-key-that-must-not-enter-errors";
+        let url = gemini_generate_url(
+            "https://generativelanguage.googleapis.com/v1beta",
+            "gemini-1.5-flash",
+        );
+        assert!(!url.contains(key));
+        assert!(!url.contains("?key="));
     }
 }

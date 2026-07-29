@@ -8,7 +8,7 @@ If you're trying to design a Cori workflow `cori-save-workflow`, you want [skill
 
 ## What Cori is, in one paragraph
 
-Cori turns one-off agent conversations into deterministic, executable TypeScript workflows. The agent writes the workflow at design time; the worker executes it at runtime with no LLM in the loop unless an `llm` step explicitly asks for one. Workflows are **folders run by path** (`cori run ./translate_fr`) or by **git ref** (`cori run github.com/org/workflows/translate@v1.1.12`); there is no registry. Execution is Temporal-backed: every `cori run` resolves the folder (fetching remote refs into `~/.cori/cache/remote/<host>/<repo>/<sha>/` when needed), compiles to `~/.cori/cache/`, runs the **planner** to map each step to an identity-derived task queue, starts the single generic `CoriWorkflow`, dispatches each step to the chosen queue, and writes a JSON trace to `~/.cori/runs/<key>/`. Disk is the only truth: there is no SQLite anywhere in the codebase.
+Cori turns one-off agent conversations into deterministic, executable TypeScript workflows. The agent writes the workflow at design time; the worker executes it at runtime with no LLM in the loop unless an `llm` step explicitly asks for one. Workflows are **folders run by path** (`cori run ./translate_fr`) or by **git ref** (`cori run github.com/org/workflows/translate@v1.1.12`); there is no registry. Execution is Temporal-backed: every `cori run` resolves the folder (fetching remote refs into `~/.cori/cache/remote/<host>/<repo>/<sha>/` when needed), compiles to `~/.cori/cache/`, snapshots verified source into `~/.cori/cache/sources/`, runs the **planner** to map each step to an identity-derived task queue, starts the single generic `CoriWorkflow`, dispatches each step to the chosen queue, and writes a JSON trace to `~/.cori/runs/<key>/`. Disk is the only truth: there is no SQLite anywhere in the codebase.
 
 ---
 
@@ -19,9 +19,9 @@ Do not re-litigate these without explicit human approval.
 1. **One workflow type.** `CoriWorkflow` (in [crates/cori-worker/src/workflow.rs](crates/cori-worker/src/workflow.rs)) handles every compiled DAG. The DAG is data passed in `WorkflowInput`, not code. Mid-run re-auth is **new control flow inside this single workflow** (Phase 6 signal/wait), never a second workflow type.
 2. **Four activity kinds, closed set.** `cori_cli`, `cori_mcp_tool`, `cori_code`, `cori_llm` — all in [crates/cori-worker/src/activities.rs](crates/cori-worker/src/activities.rs). Builtins (`map`, `for_each`, `branch`, `parallel`, `wait`) are workflow code, **not** activities, and are not implemented yet in v1.
 3. **Single execution path.** The old in-process executor was deleted during the Temporal migration. Do not reintroduce it, do not feature-flag a parallel path. Temporal is the only runtime.
-4. **DAG in `WorkflowInput`.** The full compiled DAG (including per-step `task_queue` assigned by the planner) is serialized into `WorkflowInput.compiled_dag` at workflow start. The workflow body never reads disk — that would break determinism on replay.
+4. **DAG and source bundle in `WorkflowInput`.** The full compiled DAG (including per-step `task_queue` assigned by the planner) is serialized into `WorkflowInput.compiled_dag` at workflow start. Every activity-bearing run serializes a bounded, content-addressed copy of the verified source snapshot once into `WorkflowInput.source_bundle` and passes it to activities; task queues have no host affinity, even when the queue name matches the triggering worker. The bundle is part of Temporal event history, so workflow folders are executable source—not a place for credentials, `.env` files, or confidential input data. Known secret-file names are rejected, and real credentials remain broker-managed. The absolute source path remains only as a backward-compatible fallback. The workflow body never reads disk — that would break determinism on replay.
 5. **Broker is the trust boundary.** Every external side effect (`std::process::Command`, HTTP, MCP, OAuth) goes through [crates/cori-broker](crates/cori-broker/src/lib.rs). Activity handlers are thin wrappers over broker functions via `tokio::task::spawn_blocking` (the broker is sync; the Temporal worker is async).
-6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (cron schedules — fired by the cron driver inside the Cori Console desktop app or `cori work`), `config.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
+6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs and verified source snapshots, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (cron schedules — fired by the cron driver inside the Cori Console desktop app or `cori work`), `config.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
 7. **Identity-derived task queues.** Queue names are `cori.user.<user_id>` (`Person` identity, from `OsUser` in v1) or `cori.service.<pool>` (`Service`, from `cori work --shared <name>`). Helpers live in [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) (`task_queue_for`, `identity_from_queue`). **Cross-user dispatch is impossible by construction** — Temporal's matching layer physically separates queues. The old `cori-default` constant is gone; do not reintroduce a default queue.
 8. **Two-place ownership enforcement (defense in depth).** (a) The planner routes each step to a queue derived from authenticated identity — physical isolation. (b) The broker resolves credentials keyed by `user_id` in `WorkflowInput` — token isolation. Both checks must stay; do not collapse to one.
 9. **Worker presence is Temporal-native.** Use `DescribeTaskQueue` only on human-frequency paths (`cori status`, `cori check`). Never per-step. The v1 fallback for cluster presence is reading `~/.cori/cluster/<queue>.json` files published by `cori work`. **Do not** use Temporal Worker Versioning / Build IDs for capability routing — versioning is reserved for future Cori-binary rollout. **Do not** introduce Nexus in v1 (noted as v2 possibility).
@@ -167,6 +167,8 @@ cori run <path-or-ref>
   → workflow_loader::load(folder)
        ├─ canonicalise, hash folder, look up `~/.cori/cache/<key>.json`
        └─ on miss: cori_compiler::compile(path) and persist atomically
+  → materialize a verified, content-addressed source snapshot in
+       `~/.cori/cache/sources/<content-hash>/`; Deno validates only that snapshot
   → resolve LLM credentials, discover capabilities, build Capabilities snapshot
   → preflight auth (per-capability `authed` from CapabilityReport)
   → temporal_endpoint::resolve() — configured / 127.0.0.1 / auto-spawn dev
@@ -174,12 +176,15 @@ cori run <path-or-ref>
   → identity = OsUser.resolve() → WorkerIdentity::Person { user_id }
   → planner::assign_queues(&mut compiled, &identity, &ClusterView)
        fills every CompiledStep.task_queue from its Placement
+  → for any activity-bearing workflow, package the verified snapshot as a
+       size-limited source bundle carried in WorkflowInput for whichever
+       worker Temporal selects (task queues have no host affinity)
   → CoriTemporalRuntime::connect(target, "default", task_queue)
   → run_workflow_once(...) — register CoriWorkflow + CoriActivities,
        start the workflow, await result
   → workflow loop (workflow.rs):
        for each CompiledStep:
-         build ActivityInput (carries user_id, run_id, source_path)
+         build ActivityInput (carries user_id, run_id, source_path, source bundle)
          ctx.start_activity(..., ActivityOptions { task_queue: step.task_queue, … })
          merge ActivityOutput into the accumulator
          on ApplicationFailure type=="NeedsReauth": ctx.wait_condition(reauth_completed, 15min)
@@ -191,7 +196,8 @@ cori run <path-or-ref>
 Per-activity flow inside `crates/cori-worker/src/activities.rs`:
 
 ```
-ActivityInput → set_broker_ctx() (Deno runtime, caps, llm opts, source_root,
+ActivityInput → verify/materialize its content-addressed source snapshot
+             → set_broker_ctx() (Deno runtime, caps, llm opts, source_root,
                                   credentials_dir via task-local)
              → tokio::task::spawn_blocking(|| broker_fn(...))
              → broker resolves tokens via cori_broker::credentials::for_user
@@ -260,6 +266,7 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 ~/.cori/
   config.toml              # temporal.host (optional), llm.<provider>.api_key, [remotes].hosts, …
   cache/                   # rebuildable compiled DAGs, keyed by sha(path + content_hash)
+    sources/<sha256>/      # verified immutable source snapshots used by workers
     remote/                # fetched remote workflows (system `git` clones)
       pins.json            # <host/repo//subpath@ref> → sha (source of truth for resolution)
       trust.json           # (repo, sha) pairs the user has consented to run

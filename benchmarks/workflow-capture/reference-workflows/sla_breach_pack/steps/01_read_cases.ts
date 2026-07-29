@@ -8,6 +8,6 @@ export default step.cli({
   description: "Read source support cases from Google Sheets",
   input: Input,
   output: Output,
-  command: ({ case_spreadsheet_id }) => ["gws", "sheets", "spreadsheets", "values", "get", "--params", JSON.stringify({ spreadsheetId: case_spreadsheet_id, range: "Cases" })],
+  command: ({ case_spreadsheet_id }) => ["gws", "sheets", "spreadsheets", "values", "get", "--params", JSON.stringify({ spreadsheetId: case_spreadsheet_id, range: "Source!A1:F" }), "--format", "json"],
   parse: (stdout) => ({ values: (JSON.parse(stdout) as { values?: string[][] }).values ?? [] }),
 });

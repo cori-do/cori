@@ -10,7 +10,7 @@ const Input = z.object({
 const Output = z.object({ updated: z.number() });
 
 export default step.cli({
-  description: "Batch-write the contributing factors and response timings",
+  description: "Batch-write the contributing factors and response timing rows",
   input: Input,
   output: Output,
   command: ({ findings_spreadsheet_id, run_tag, factors, timings }) => [

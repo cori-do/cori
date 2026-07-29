@@ -90,6 +90,8 @@ export interface RegisteredResource {
   createdByBenchmark: boolean;
   /** Index into `Scenario.fixtures` that produced this resource. */
   fixtureIndex?: number;
+  /** Canonical Gmail label state immediately after fixture provisioning. */
+  initialLabelIds?: readonly string[];
 }
 
 export interface Scenario {
@@ -189,6 +191,11 @@ export interface TaskCapture {
   skillCheckSucceeded: boolean;
   /** The benchmark's independent absolute-binary check reported ready. */
   benchmarkCheckSucceeded: boolean;
+  /**
+   * Hybrid tasks only: static lineage from an LLM output through executable
+   * callbacks to a later side-effect step. Null for deterministic tasks.
+   */
+  runtimeModelDataflowVerified: boolean | null;
   /** Both successful checks and static policy passed. */
   checkPassed: boolean;
   policy: WorkflowPolicyReport | null;
@@ -216,6 +223,44 @@ export interface TrialResult {
   };
 }
 
+export interface BenchmarkEnvironment {
+  cori: string;
+  cori_source: string;
+  cori_version: string | null;
+  cori_sha256: string | null;
+  author_cori_path: string | null;
+  author_cori_version: string | null;
+  author_cori_sha256: string | null;
+  harness_path: string | null;
+  harness_version: string | null;
+  harness_sha256: string | null;
+  gws: string;
+  gws_path: string | null;
+  gws_version: string | null;
+  gws_sha256: string | null;
+  temporal_path: string | null;
+  temporal_version: string | null;
+  temporal_sha256: string | null;
+  deno_path: string | null;
+  deno_version: string | null;
+  deno_sha256: string | null;
+  node_path: string;
+  node_version: string;
+  node_sha256: string | null;
+  subject_isolation: string | null;
+  subject_isolation_path: string | null;
+  subject_isolation_sha256: string | null;
+  benchmark_source_sha256: string | null;
+  capture_skill_sha256: string | null;
+  workspace_account_sha256: string | null;
+  calendar_id: string | null;
+  author_model: string | null;
+  llm_model: string | null;
+  os: string;
+  arch: string;
+  timezone: string;
+}
+
 export interface BenchmarkResultV2 {
   version: 2;
   status: "succeeded" | "failed";
@@ -225,7 +270,7 @@ export interface BenchmarkResultV2 {
   seed: number;
   startedAt: string;
   finishedAt: string;
-  environment: Record<string, string | null>;
+  environment: BenchmarkEnvironment;
   capture: {
     previewDidNotWrite: boolean;
     checkPassed: boolean;
@@ -241,11 +286,22 @@ export interface BenchmarkResultV2 {
     designTokens: number | null;
     runtimeTokens: number | null;
     runtimeCostEur: number | null;
+    /** Total one-time author + capture + check time for the selected task set. */
+    designWallTimeMs: number | null;
+    /** Sum of per-task direct means: one complete repetition of the selected set. */
+    directSuiteWallTimeMs: number | null;
+    /** Sum of per-task replay means: one complete repetition of the selected set. */
+    replaySuiteWallTimeMs: number | null;
     breakEvenRepetitions: number | null;
   };
   summary: {
     directScore: number | null;
     replayScore: number | null;
+    /** Independent task-level pairs used for inference (seeds are averaged within task). */
+    pairedSampleSize: number;
+    /** True only for an aggregate produced by the validated `combine` path. */
+    combinedResult: boolean;
+    inferenceEligible: boolean;
     pairedDifferenceCi95: readonly [number, number] | null;
     reuseAdvantageDemonstrated: boolean;
   };

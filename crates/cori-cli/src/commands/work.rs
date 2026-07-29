@@ -5,10 +5,10 @@
 //! GUI is the Cori Console desktop app.
 
 use anyhow::{Context, Result, bail};
+use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::LlmOptions;
-use cori_broker::{TriggerContext, runtime as broker_runtime};
 use cori_protocol::{WorkerIdentity, task_queue_for, validate_identity_token};
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
 use cori_worker::runner::serve_worker_until_signal;
@@ -27,14 +27,7 @@ pub fn work(opts: WorkOpts) -> Result<()> {
 
     print_worker_banner(&identity, &queue);
 
-    cli_runtime::ensure_installed()?;
-    let runtime_root = paths::runtime_dir()?;
-    let runtime = broker_runtime::Runtime::resolve(&runtime_root).map_err(|e| {
-        anyhow::anyhow!(
-            "{e}\n\nIf you have Deno installed, you can also point Cori at it with:\n  \
-             export CORI_DENO=$(which deno)"
-        )
-    })?;
+    let runtime = cli_runtime::resolve()?;
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
@@ -51,6 +44,7 @@ pub fn work(opts: WorkOpts) -> Result<()> {
         caps: caps.clone(),
         llm_opts,
         source_root: cwd,
+        source_cache_dir: paths::source_cache_dir()?,
         credentials_dir: paths::credentials_dir()?,
     };
     let _ = set_broker_ctx(broker_ctx);

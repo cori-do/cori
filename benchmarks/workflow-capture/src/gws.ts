@@ -1,4 +1,16 @@
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 
 import { taskById } from "./tasks.js";
 import type { Json, RegisteredResource, Scenario, ScenarioFixture, WorkspaceSnapshot } from "./types.js";
@@ -88,12 +100,41 @@ function phaseProcessTimeoutMs(): number {
     : 300_000;
 }
 
+interface GwsAuditProxy {
+  binary: string;
+  logPath: string;
+  realBinary: string;
+}
+
+export interface GwsAuditEvent {
+  argv: string[];
+  cwd: string;
+  at: string;
+  pid: number;
+}
+
+let installedAuditProxy: GwsAuditProxy | undefined;
+
 export class GwsClient {
+  private readonly runner: ProcessRunner;
+  private readonly binary: string;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly auditProxy: GwsAuditProxy | undefined;
+
   constructor(
-    private readonly runner: ProcessRunner = runProcess,
-    private readonly binary = process.env.GWS_BIN ?? "gws",
-    private readonly sleep: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  ) {}
+    runner: ProcessRunner = runProcess,
+    binary = process.env.GWS_BIN ?? "gws",
+    sleep: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  ) {
+    this.runner = runner;
+    this.sleep = sleep;
+    if (runner === runProcess) {
+      this.auditProxy = installGwsAuditProxy(binary);
+      this.binary = this.auditProxy.binary;
+    } else {
+      this.binary = binary;
+    }
+  }
 
   async call(path: readonly string[], params?: Json, body?: Json): Promise<Json> {
     const args = [...path];
@@ -101,10 +142,11 @@ export class GwsClient {
     if (body !== undefined) args.push("--json", JSON.stringify(body));
     args.push("--format", "json");
     let result: ProcessResult | undefined;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const maxAttempts = isRetrySafeGwsCall(path) ? 3 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       result = await this.runner(this.binary, args);
       if (result.code === 0) break;
-      if (!isTransientGwsFailure(result) || attempt === 3) {
+      if (!isTransientGwsFailure(result) || attempt === maxAttempts) {
         throw new Error(gwsFailureMessage(path, result));
       }
       await this.sleep(500 * 2 ** (attempt - 1));
@@ -124,12 +166,64 @@ export class GwsClient {
     return result.stdout.split(/\r?\n/u).map((line) => line.trim()).find(Boolean) ?? "";
   }
 
-  /** Read-only token refresh probe used before provisioning any fixture. */
-  async verifyAuthentication(): Promise<void> {
-    await this.call(
-      ["drive", "about", "get"],
-      { fields: "user" },
+  /** Absolute underlying executable, excluding the benchmark audit proxy. */
+  underlyingBinary(): string {
+    return this.auditProxy?.realBinary ?? this.binary;
+  }
+
+  /**
+   * Commands observed by the benchmark-owned PATH proxy. The proxy covers both
+   * direct harness calls and replayed `cori_cli` steps, so request-only safety
+   * fields (for example Calendar `sendUpdates`) remain auditable after the API
+   * response has discarded them.
+   */
+  auditEvidence(): { complete: boolean; events: GwsAuditEvent[] } {
+    if (!this.auditProxy) return { complete: false, events: [] };
+    if (!existsSync(this.auditProxy.logPath)) return { complete: true, events: [] };
+    return parseGwsAuditLog(readFileSync(this.auditProxy.logPath, "utf8"));
+  }
+
+  /**
+   * Start a bounded scenario audit window after fixture provisioning. Keeping
+   * one window per trial avoids copying the process-lifetime command history
+   * into every snapshot while preserving fail-closed parsing of prior writes.
+   */
+  beginAuditWindow(): { complete: boolean; events: GwsAuditEvent[] } {
+    if (!this.auditProxy) return { complete: false, events: [] };
+    const previous = this.auditEvidence();
+    const marker: GwsAuditEvent = {
+      argv: ["__cori_benchmark_audit_window__", randomUUID()],
+      cwd: process.cwd(),
+      at: new Date().toISOString(),
+      pid: process.pid,
+    };
+    writeFileSync(
+      this.auditProxy.logPath,
+      `${JSON.stringify(marker)}\n`,
+      "utf8",
     );
+    return { complete: previous.complete, events: [marker] };
+  }
+
+  /**
+   * Read-only token refresh probe used before provisioning any fixture.
+   * Returns a non-PII stable identity so batches cannot mix accounts.
+   */
+  async verifyAuthentication(): Promise<string> {
+    const about = await this.call(
+      ["drive", "about", "get"],
+      { fields: "user(permissionId,emailAddress)" },
+    );
+    const user = objectValue(about, "user");
+    const stableId = user
+      ? objectString(user, "permissionId") || objectString(user, "emailAddress")
+      : "";
+    if (!stableId) {
+      throw new Error(
+        "gws drive about get did not return user.permissionId or user.emailAddress",
+      );
+    }
+    return createHash("sha256").update(stableId).digest("hex");
   }
 
   /** A namespaced spreadsheet that is immediately trashed; only used by explicit preflight. */
@@ -141,6 +235,140 @@ export class GwsClient {
     const id = stringField(created, "spreadsheetId");
     await this.call(["drive", "files", "update"], { fileId: id }, { trashed: true });
   }
+}
+
+export function parseGwsAuditLog(
+  contents: string,
+): { complete: boolean; events: GwsAuditEvent[] } {
+  const events: GwsAuditEvent[] = [];
+  let complete = true;
+  for (const line of contents.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    try {
+      const value = JSON.parse(line) as Partial<GwsAuditEvent>;
+      if (
+        Array.isArray(value.argv) &&
+        value.argv.every((arg) => typeof arg === "string") &&
+        typeof value.cwd === "string" &&
+        typeof value.at === "string" &&
+        typeof value.pid === "number"
+      ) {
+        events.push(value as GwsAuditEvent);
+      } else {
+        complete = false;
+      }
+    } catch {
+      complete = false;
+    }
+  }
+  return { complete, events };
+}
+
+function isRetrySafeGwsCall(path: readonly string[]): boolean {
+  if (path[0]?.toLowerCase() === "schema") return true;
+  const method = path.at(-1)?.toLowerCase();
+  return method === "get" || method === "list";
+}
+
+function expectedTaggedDriveOutputs(taskId: string): number {
+  return [
+    "sla_breach_pack",
+    "expense_policy_audit",
+    "budget_variance_deck",
+    "weekly_operating_review",
+  ].includes(taskId)
+    ? 1
+    : 0;
+}
+
+function installGwsAuditProxy(configuredBinary: string): GwsAuditProxy {
+  if (installedAuditProxy) return installedAuditProxy;
+  const realBinary = resolveExecutable(configuredBinary);
+  const proxyDir = mkdtempSync(join(tmpdir(), "cori-bench-gws-audit-"));
+  const logPath = join(proxyDir, "commands.jsonl");
+  const modulePath = join(proxyDir, "proxy.mjs");
+  writeFileSync(modulePath, [
+    'import { appendFileSync } from "node:fs";',
+    'import { spawnSync } from "node:child_process";',
+    "const argv = process.argv.slice(2);",
+    `const logPath = ${JSON.stringify(logPath)};`,
+    `const realBinary = ${JSON.stringify(realBinary)};`,
+    "try {",
+    "  appendFileSync(logPath, JSON.stringify({ argv, cwd: process.cwd(), at: new Date().toISOString(), pid: process.pid }) + \"\\n\", \"utf8\");",
+    "} catch (error) {",
+    '  process.stderr.write(`benchmark GWS audit append failed: ${String(error)}\\n`);',
+    "  process.exit(126);",
+    "}",
+    "const result = spawnSync(realBinary, argv, { env: process.env, stdio: \"inherit\" });",
+    "if (result.error) {",
+    '  process.stderr.write(`benchmark GWS proxy failed: ${String(result.error)}\\n`);',
+    "  process.exit(126);",
+    "}",
+    "process.exit(result.status ?? 1);",
+    "",
+  ].join("\n"), "utf8");
+
+  let binary: string;
+  if (process.platform === "win32") {
+    binary = join(proxyDir, "gws.cmd");
+    writeFileSync(
+      binary,
+      `@echo off\r\n"${process.execPath}" "${modulePath}" %*\r\n`,
+      "utf8",
+    );
+  } else {
+    binary = join(proxyDir, "gws");
+    writeFileSync(
+      binary,
+      `#!/bin/sh\nexec "${process.execPath}" "${modulePath}" "$@"\n`,
+      "utf8",
+    );
+    chmodSync(binary, 0o700);
+  }
+
+  const pathEntries = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  process.env.PATH = [
+    proxyDir,
+    ...pathEntries.filter((entry) => resolve(entry) !== resolve(proxyDir)),
+  ].join(delimiter);
+  installedAuditProxy = { binary, logPath, realBinary };
+  return installedAuditProxy;
+}
+
+function resolveExecutable(binary: string): string {
+  if (isAbsolute(binary) || binary.includes("/") || binary.includes("\\")) {
+    const absolute = resolve(binary);
+    accessSync(absolute, constants.X_OK);
+    return absolute;
+  }
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";")
+    : [""];
+  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = join(directory, process.platform === "win32" ? `${binary}${extension}` : binary);
+      try {
+        accessSync(candidate, constants.X_OK);
+        return resolve(candidate);
+      } catch {
+        // Keep looking along PATH.
+      }
+    }
+  }
+  throw new Error(`cannot find GWS executable \`${binary}\` on PATH`);
+}
+
+function jsonAuditEvidence(gws: GwsClient, beginWindow = false): Json {
+  const evidence = beginWindow ? gws.beginAuditWindow() : gws.auditEvidence();
+  return {
+    complete: evidence.complete,
+    events: evidence.events.map((event) => ({
+      argv: [...event.argv],
+      cwd: event.cwd,
+      at: event.at,
+      pid: event.pid,
+    })),
+  };
 }
 
 function gwsFailureMessage(
@@ -327,7 +555,8 @@ export class WorkspaceScenarioDriver {
       "files",
       options.settleTaggedOutputs === true &&
           task.requiredServices.includes("drive")
-        ? scenario.resources.filter(isDriveBackedResource).length + 1
+        ? scenario.resources.filter(isDriveBackedResource).length +
+          expectedTaggedDriveOutputs(scenario.taskId)
         : 0,
     );
     resources[`__drive_${scenario.id}`] = taggedDrive;
@@ -346,6 +575,7 @@ export class WorkspaceScenarioDriver {
         });
       }
     }
+    resources[`__gws_audit_${scenario.id}`] = jsonAuditEvidence(this.gws);
     return {
       capturedAt: new Date().toISOString(),
       source: "workspace",
@@ -370,10 +600,9 @@ export class WorkspaceScenarioDriver {
       if (resource.service === "sheets") {
         resources[resource.id] = gridFixture(fixture.table ?? []);
       } else if (resource.service === "gmail") {
-        const message = fixture.messages?.[ordinal] ?? null;
         resources[resource.id] = {
           id: resource.id,
-          labelIds: messageIsUnread(message) ? ["INBOX", "UNREAD"] : ["INBOX"],
+          labelIds: [...(resource.initialLabelIds ?? ["INBOX"])],
         };
       } else if (resource.service === "calendar") {
         const events = { items: fixture.events ?? [] };
@@ -398,6 +627,10 @@ export class WorkspaceScenarioDriver {
     if (task.requiredServices.includes("gmail")) {
       resources[`__labels_${scenario.id}`] = { labels: [] };
     }
+    resources[`__gws_audit_${scenario.id}`] = jsonAuditEvidence(
+      this.gws,
+      true,
+    );
     return {
       capturedAt: new Date().toISOString(),
       source: "canonical_fixture",
@@ -502,7 +735,12 @@ export class WorkspaceScenarioDriver {
             }],
           });
         }
-        created.push({ id, role: fixture.role, service: fixture.service, createdByBenchmark: true });
+        created.push({
+          id,
+          role: fixture.role,
+          service: fixture.service,
+          createdByBenchmark: true,
+        });
       }
       return created;
     }
@@ -523,7 +761,15 @@ export class WorkspaceScenarioDriver {
             removeLabelIds: ["UNREAD"],
           });
         }
-        created.push({ id, role: fixture.role, service: fixture.service, createdByBenchmark: true });
+        created.push({
+          id,
+          role: fixture.role,
+          service: fixture.service,
+          createdByBenchmark: true,
+          initialLabelIds: unread
+            ? ["INBOX", "UNREAD"]
+            : ["INBOX", triagedLabelId!],
+        });
       }
       return created;
     }
@@ -754,6 +1000,14 @@ function stringField(value: Json, field: string): string {
 
 function objectString(value: Json, field: string): string {
   return value && typeof value === "object" && !Array.isArray(value) && typeof value[field] === "string" ? value[field] as string : "";
+}
+
+function objectValue(value: Json, field: string): Record<string, Json> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const nested = value[field];
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested
+    : null;
 }
 
 function base64Url(value: string): string {

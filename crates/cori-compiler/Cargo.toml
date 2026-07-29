@@ -15,5 +15,7 @@ serde_json.workspace = true
 regex.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
 cori-manifest.workspace = true
 cori-protocol.workspace = true

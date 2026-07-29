@@ -26,13 +26,20 @@
 
 mod step_parser;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use cori_manifest::{ManifestError, parse_manifest};
-use cori_protocol::{CompiledStep, CompiledWorkflow, Placement, StepKind};
+use cori_protocol::{
+    CompiledStep, CompiledWorkflow, MAX_WORKFLOW_SOURCE_BYTES, MAX_WORKFLOW_SOURCE_FILE_BYTES,
+    MAX_WORKFLOW_SOURCE_FILES, MAX_WORKFLOW_SOURCE_PATH_BYTES, MAX_WORKFLOW_SOURCE_PATH_DEPTH,
+    Placement, StepKind, workflow_source_component_looks_sensitive,
+};
 use regex::Regex;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use walkdir::{DirEntry, WalkDir};
 
 pub use step_parser::ParsedStep;
 
@@ -56,6 +63,150 @@ pub fn cli_binary_from_source(source: &str) -> Result<String, String> {
         .and_then(|value| value.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "could not statically determine CLI argv[0]".to_string())
+}
+
+/// Hash every executable input under a workflow root.
+///
+/// The digest is used both for the rebuildable compiler cache and at the
+/// activity boundary. Keeping one implementation prevents a workflow import
+/// (for example `types.ts` or `lib/helpers.ts`) from changing after preflight
+/// while the trace still claims the old workflow identity.
+///
+/// Git metadata is excluded because it is not importable workflow source and
+/// can change independently while a workflow folder is otherwise immutable.
+pub fn workflow_content_hash(workflow_dir: &Path) -> anyhow::Result<String> {
+    fn include_entry(entry: &DirEntry) -> bool {
+        entry.depth() == 0 || entry.file_name() != ".git"
+    }
+
+    let entries = WalkDir::new(workflow_dir)
+        // Workflow folders are executable input. Following a repository-owned
+        // symlink here would let an untrusted remote workflow make Cori walk
+        // and hash files outside the checkout before the consent gate.
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(include_entry);
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!(
+                "walking workflow directory `{}`: {error}",
+                workflow_dir.display()
+            )
+        })?;
+        if entry.file_type().is_symlink() {
+            return Err(anyhow::anyhow!(
+                "workflow tree contains symlink `{}`; symlinks are not allowed in executable workflow input",
+                entry.path().display()
+            ));
+        }
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+            if files.len() > MAX_WORKFLOW_SOURCE_FILES {
+                anyhow::bail!(
+                    "workflow tree contains more than {} files",
+                    MAX_WORKFLOW_SOURCE_FILES
+                );
+            }
+        } else if !entry.file_type().is_dir() {
+            return Err(anyhow::anyhow!(
+                "workflow tree contains unsupported special file `{}`",
+                entry.path().display()
+            ));
+        }
+    }
+
+    files.sort_by(|left, right| {
+        normalized_relative_path(workflow_dir, left)
+            .cmp(&normalized_relative_path(workflow_dir, right))
+    });
+
+    let mut hasher = Sha256::new();
+    let mut total_bytes = 0_u64;
+    for path in files {
+        let relative = normalized_relative_path(workflow_dir, &path);
+        if path
+            .strip_prefix(workflow_dir)
+            .unwrap_or(&path)
+            .components()
+            .any(|component| {
+                workflow_source_component_looks_sensitive(&component.as_os_str().to_string_lossy())
+            })
+        {
+            anyhow::bail!(
+                "workflow source `{relative}` looks like a credential or secret file; keep secrets outside the workflow folder because Cori freezes source in its cache and may persist it in Temporal history"
+            );
+        }
+        let depth = Path::new(&relative).components().count();
+        if relative.len() > MAX_WORKFLOW_SOURCE_PATH_BYTES || depth > MAX_WORKFLOW_SOURCE_PATH_DEPTH
+        {
+            anyhow::bail!(
+                "workflow path `{relative}` exceeds the portable source limit ({} bytes, depth {})",
+                MAX_WORKFLOW_SOURCE_PATH_BYTES,
+                MAX_WORKFLOW_SOURCE_PATH_DEPTH
+            );
+        }
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            anyhow::anyhow!("reading metadata for `{}`: {error}", path.display())
+        })?;
+        let expected_len = metadata.len();
+        if expected_len > MAX_WORKFLOW_SOURCE_FILE_BYTES {
+            anyhow::bail!(
+                "workflow file `{relative}` is {expected_len} bytes; per-file limit is {}",
+                MAX_WORKFLOW_SOURCE_FILE_BYTES
+            );
+        }
+        total_bytes = total_bytes
+            .checked_add(expected_len)
+            .ok_or_else(|| anyhow::anyhow!("workflow source size overflow"))?;
+        if total_bytes > MAX_WORKFLOW_SOURCE_BYTES {
+            anyhow::bail!(
+                "workflow tree is {total_bytes} bytes; total source limit is {}",
+                MAX_WORKFLOW_SOURCE_BYTES
+            );
+        }
+
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        hasher.update(expected_len.to_le_bytes());
+        let mut file = std::fs::File::open(&path)
+            .map_err(|error| anyhow::anyhow!("opening `{}`: {error}", path.display()))?;
+        let mut observed_len = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| anyhow::anyhow!("reading `{}`: {error}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            observed_len = observed_len
+                .checked_add(read as u64)
+                .ok_or_else(|| anyhow::anyhow!("workflow file size overflow"))?;
+            if observed_len > MAX_WORKFLOW_SOURCE_FILE_BYTES {
+                anyhow::bail!(
+                    "workflow file `{relative}` grew beyond the per-file limit while it was hashed"
+                );
+            }
+            hasher.update(&buffer[..read]);
+        }
+        if observed_len != expected_len {
+            anyhow::bail!(
+                "workflow file `{relative}` changed while it was hashed (expected {expected_len} bytes, read {observed_len})"
+            );
+        }
+    }
+
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn normalized_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +402,7 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
                     activity_id,
                     index: idx as u32,
                     source_path: rel.clone(),
+                    source_sha256: Some(source_sha256(src.as_bytes())),
                     kind: parsed.kind,
                     name: sf.name.clone(),
                     description: parsed.description,
@@ -409,6 +561,11 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         required_mcp_servers: required_mcp,
         required_llm_providers: required_llm,
     })
+}
+
+/// Return the full SHA-256 digest used to freeze one compiled step source.
+pub fn source_sha256(source: &[u8]) -> String {
+    hex::encode(Sha256::digest(source))
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +735,117 @@ mod tests {
         assert_eq!(w.steps[0].activity_id, "01_one");
         assert_eq!(w.steps[1].depends_on, vec!["01_one".to_string()]);
         assert_eq!(w.required_cli_binaries, vec!["echo".to_string()]);
+        assert_eq!(
+            w.steps[0].source_sha256.as_deref(),
+            Some(source_sha256(
+                b"import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"one\", command: () => [\"echo\", \"hi\"] });\n"
+            ).as_str())
+        );
+    }
+
+    #[test]
+    fn workflow_hash_includes_root_and_nested_imports() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            OK_MANIFEST,
+            &[(
+                "01_a.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"a\", command: () => [\"echo\"] });\n",
+            )],
+        );
+        let initial = workflow_content_hash(tmp.path()).unwrap();
+        assert_eq!(initial.len(), 64, "workflow identity uses full SHA-256");
+
+        fs::write(
+            tmp.path().join("types.ts"),
+            "export type Row = { id: string };\n",
+        )
+        .unwrap();
+        let with_root_import = workflow_content_hash(tmp.path()).unwrap();
+        assert_ne!(with_root_import, initial);
+
+        fs::create_dir_all(tmp.path().join("lib")).unwrap();
+        fs::write(
+            tmp.path().join("lib/helpers.ts"),
+            "export const normalize = (s: string) => s.trim();\n",
+        )
+        .unwrap();
+        let with_nested_import = workflow_content_hash(tmp.path()).unwrap();
+        assert_ne!(with_nested_import, with_root_import);
+
+        fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        fs::write(tmp.path().join(".git/index"), b"mutable git metadata").unwrap();
+        assert_eq!(
+            workflow_content_hash(tmp.path()).unwrap(),
+            with_nested_import,
+            "git internals are not executable workflow inputs"
+        );
+    }
+
+    #[test]
+    fn workflow_hash_rejects_untrusted_tree_resource_exhaustion() {
+        let too_large = tempdir();
+        let oversized = too_large.path().join("oversized.bin");
+        let file = fs::File::create(&oversized).expect("oversized file");
+        file.set_len(MAX_WORKFLOW_SOURCE_FILE_BYTES + 1)
+            .expect("sparse oversized file");
+        let error = workflow_content_hash(too_large.path()).expect_err("large file must fail");
+        assert!(error.to_string().contains("per-file limit"));
+
+        let too_many = tempdir();
+        for index in 0..=MAX_WORKFLOW_SOURCE_FILES {
+            fs::write(too_many.path().join(format!("{index:04}.txt")), b"x")
+                .expect("bounded fixture file");
+        }
+        let error = workflow_content_hash(too_many.path()).expect_err("file flood must fail");
+        assert!(error.to_string().contains("more than"));
+    }
+
+    #[test]
+    fn workflow_hash_rejects_secret_files_before_source_is_cached() {
+        for relative in [
+            ".env",
+            ".env.production",
+            "credentials.json",
+            "keys/service-account.pem",
+        ] {
+            let workflow = tempdir();
+            let path = workflow.path().join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("secret parent");
+            }
+            fs::write(&path, "must not be persisted").expect("secret fixture");
+            let error =
+                workflow_content_hash(workflow.path()).expect_err("secret source must fail closed");
+            assert!(
+                error.to_string().contains("credential or secret"),
+                "{relative}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_hash_rejects_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            OK_MANIFEST,
+            &[(
+                "01_a.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"a\", command: () => [\"echo\"] });\n",
+            )],
+        );
+        let outside = tempdir();
+        fs::write(outside.path().join("secret.txt"), "must not be traversed").unwrap();
+        symlink(outside.path(), tmp.path().join("linked-outside")).unwrap();
+
+        let error = workflow_content_hash(tmp.path()).expect_err("symlink must be rejected");
+        assert!(error.to_string().contains("symlink"));
+        assert!(error.to_string().contains("linked-outside"));
     }
 
     #[test]
