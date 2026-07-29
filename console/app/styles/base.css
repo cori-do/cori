@@ -267,11 +267,27 @@ code {
 .sep { color: var(--rule-strong); }
 
 .boot {
-  padding: 64px;
-  text-align: center;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--glass-window);
+  backdrop-filter: blur(30px) saturate(145%);
+  -webkit-backdrop-filter: blur(30px) saturate(145%);
+}
+.boot-mark {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  filter: drop-shadow(0 8px 24px rgb(var(--accent-rgb) / 0.24));
+  animation: boot-mark-breathe 1.6s ease-in-out infinite;
+}
+@keyframes boot-mark-breathe {
+  0%, 100% { opacity: 0.72; transform: scale(0.96); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-mark { animation: none; }
 }
 
 /* ─── Cards ──────────────────────────────────────────────────────────
