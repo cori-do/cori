@@ -292,8 +292,6 @@ export async function runBenchmark(
   let subject: BenchmarkSubject | undefined;
   await mkdir(runDir, { recursive: true });
   const calendarId = configuredBenchmarkCalendarId();
-  const gws = new GwsClient();
-  const driver = new WorkspaceScenarioDriver(gws, undefined, calendarId);
   const registry: CleanupRegistry = {
     runId,
     resources: [],
@@ -375,6 +373,8 @@ export async function runBenchmark(
         "CORI_BENCH_CALENDAR_ID is required for full and publication benchmark runs",
       );
     }
+    const gws = new GwsClient();
+    const driver = new WorkspaceScenarioDriver(gws, undefined, calendarId);
     await publishProgress(
       "environment_check",
       process.env.CORI_BENCH_CORI
@@ -749,6 +749,7 @@ export async function cleanup(
   const registry = await readJson<CleanupRegistry>(
     join(runDir, "cleanup-registry.json"),
   );
+  if (registry.resources.length === 0 && registry.runTags.length === 0) return;
   const driver = new WorkspaceScenarioDriver(
     new GwsClient(),
     undefined,

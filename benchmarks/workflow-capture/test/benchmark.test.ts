@@ -3080,8 +3080,10 @@ test("combine rejects differing author-side Cori identities", async () => {
 test("failed harness startup still writes a terminal result artifact", async () => {
   const artifactsRoot = await mkdtemp(join(tmpdir(), "cori-benchmark-test-"));
   const previousBinary = process.env.CORI_BENCH_CODEX_BIN;
+  const previousGwsBinary = process.env.GWS_BIN;
   const previousModel = process.env.CORI_BENCH_LLM_MODEL;
   process.env.CORI_BENCH_CODEX_BIN = join(artifactsRoot, "missing-codex");
+  process.env.GWS_BIN = process.execPath;
   process.env.CORI_BENCH_LLM_MODEL = "gpt-test";
   try {
     await assert.rejects(
@@ -3115,6 +3117,8 @@ test("failed harness startup still writes a terminal result artifact", async () 
   } finally {
     if (previousBinary === undefined) delete process.env.CORI_BENCH_CODEX_BIN;
     else process.env.CORI_BENCH_CODEX_BIN = previousBinary;
+    if (previousGwsBinary === undefined) delete process.env.GWS_BIN;
+    else process.env.GWS_BIN = previousGwsBinary;
     if (previousModel === undefined) delete process.env.CORI_BENCH_LLM_MODEL;
     else process.env.CORI_BENCH_LLM_MODEL = previousModel;
     await rm(artifactsRoot, { recursive: true, force: true });
