@@ -29,6 +29,7 @@ use crate::state::AppState;
 pub struct WorkflowPreflight {
     pub manifest: Value,
     pub content_hash: String,
+    pub history_key: String,
     pub absolute_path: PathBuf,
     pub steps: Vec<StepSummary>,
     pub required_cli_binaries: Vec<String>,
@@ -76,6 +77,7 @@ pub async fn resolve_workflow(
 fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
     let compiled = &outcome.loaded.compiled;
     let manifest = serde_json::to_value(&compiled.manifest).unwrap_or(Value::Null);
+    let history_key = cori_run::workflow_loader::loaded_run_history_key(&outcome.loaded);
 
     let mut has_builtin = false;
     let steps: Vec<StepSummary> = compiled
@@ -101,6 +103,7 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
     WorkflowPreflight {
         manifest,
         content_hash: outcome.loaded.content_hash.clone(),
+        history_key,
         absolute_path: outcome.loaded.absolute_path.clone(),
         steps,
         required_cli_binaries: compiled.required_cli_binaries.clone(),
