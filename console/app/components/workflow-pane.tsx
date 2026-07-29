@@ -21,11 +21,13 @@ import {
 import { Channel } from "@tauri-apps/api/core";
 import {
   isIpcError,
+  listLlmProviders,
   listRuns,
   recordTrust,
   resolveWorkflow,
   startRun,
   type ConsentRequired,
+  type LlmProviderInfo,
   type ParameterDef,
   type PlanStep,
   type RunEvent,
@@ -33,6 +35,7 @@ import {
   type RunTrace,
   type WorkflowPreflight,
 } from "../lib/api";
+import { ProviderKeyForm } from "./provider-key-form";
 import {
   formatAbsolute,
   formatCost,
@@ -87,6 +90,7 @@ export function WorkflowPane({
   const [history, setHistory] = useState<RunListEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [llmProviders, setLlmProviders] = useState<LlmProviderInfo[]>([]);
 
   // Only the newest resolve is allowed to land: arrowing down a long list
   // and pressing Enter twice must not let a slow first request overwrite
@@ -103,6 +107,9 @@ export function WorkflowPane({
     try {
       const pf = await resolveWorkflow({ source: src, update });
       if (id !== requestId.current) return;
+      if (pf.required_llm_providers.length > 0) {
+        listLlmProviders().then(setLlmProviders).catch(() => {});
+      }
       const defaults: Record<string, unknown> = {};
       for (const p of pf.manifest.parameters) {
         if (p.default !== undefined && p.default !== null) {
@@ -279,9 +286,24 @@ export function WorkflowPane({
             </p>
           )}
 
-          {preflight.missing_capabilities.length > 0 && (
+          {!run && (
+            <MissingLlmProviders
+              preflight={preflight}
+              providers={llmProviders}
+              onSaved={(updated) => {
+                setLlmProviders((ps) =>
+                  ps.map((p) => (p.id === updated.id ? updated : p)),
+                );
+                // Re-resolve so missing capabilities and readiness pick
+                // up the newly stored key.
+                if (source) void resolve(source);
+              }}
+            />
+          )}
+
+          {nonLlmMissing(preflight, llmProviders).length > 0 && (
             <p className="pane-note is-bad">
-              Needs {preflight.missing_capabilities.join(", ")}
+              Needs {nonLlmMissing(preflight, llmProviders).join(", ")}
             </p>
           )}
 
@@ -315,6 +337,63 @@ export function WorkflowPane({
           />
         </>
       )}
+    </div>
+  );
+}
+
+/** Required LLM providers with no stored key and no env override. */
+function missingLlmIds(
+  preflight: WorkflowPreflight,
+  providers: LlmProviderInfo[],
+): string[] {
+  if (providers.length === 0) return []; // list not loaded — raw note covers it
+  return preflight.required_llm_providers.filter((id) => {
+    const p = providers.find((x) => x.id === id);
+    return p ? !p.configured && !p.env_override : false;
+  });
+}
+
+/** Missing-capability lines minus the LLM ones we render inline forms
+ *  for (format from cori-broker: "missing LLM provider: `id` — hint"). */
+function nonLlmMissing(
+  preflight: WorkflowPreflight,
+  providers: LlmProviderInfo[],
+): string[] {
+  if (missingLlmIds(preflight, providers).length === 0) {
+    return preflight.missing_capabilities;
+  }
+  return preflight.missing_capabilities.filter(
+    (m) => !m.startsWith("missing LLM provider:"),
+  );
+}
+
+function MissingLlmProviders({
+  preflight,
+  providers,
+  onSaved,
+}: {
+  preflight: WorkflowPreflight;
+  providers: LlmProviderInfo[];
+  onSaved: (updated: LlmProviderInfo) => void;
+}) {
+  const missing = missingLlmIds(preflight, providers);
+  if (missing.length === 0) return null;
+  return (
+    <div className="card">
+      <p className="pane-note is-warn" style={{ margin: "0 0 8px" }}>
+        This workflow has LLM steps — paste an API key to continue. It's
+        verified, stored once, and reused by every future run.
+      </p>
+      {missing.map((id) => {
+        const p = providers.find((x) => x.id === id);
+        if (!p) return null;
+        return (
+          <div key={id} style={{ marginBottom: 10 }}>
+            <span className="label">{p.display_name}</span>
+            <ProviderKeyForm provider={p} onChanged={onSaved} />
+          </div>
+        );
+      })}
     </div>
   );
 }

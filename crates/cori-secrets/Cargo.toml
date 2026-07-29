@@ -1,0 +1,19 @@
+[package]
+name = "cori-secrets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared secret store: OS keychain first, 0600 file fallback. Used by the CLI/broker and the desktop app."
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+keyring.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

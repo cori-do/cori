@@ -12,10 +12,11 @@
 //!    token refresh). Without a provisioned client we fall back to
 //!    printing the manual hint — Cori never fakes the vendor's flow.
 //! 2. If `<capability>` is an LLM provider (`openai`, `anthropic`,
-//!    `gemini`), prompt for an API key and store it in
-//!    `~/.cori/config.toml` (env vars still take precedence at run
-//!    time). The migration plan explicitly leaves LLM credentials
-//!    out of the OAuth path; we surface a uniform prompt for UX.
+//!    `gemini`), prompt for an API key with hidden input and store it
+//!    in the shared secret store ([`cori_secrets`]): OS keychain,
+//!    file fallback on headless machines. Env vars still take
+//!    precedence at run time. The desktop app writes to the same
+//!    store, so keys set either way are visible everywhere.
 //! 3. Otherwise, treat `<capability>` as an MCP server id. Look up its
 //!    `oauth` block in `~/.cori/mcp-servers.json` and run the
 //!    [`pkce`][cori_broker::oauth::pkce] flow. The resulting [`Token`]
@@ -42,17 +43,18 @@ use cori_run::paths;
 
 const PKCE_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub fn login(capability: &str) -> Result<()> {
+pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
     // 1. Known-CLI adapter? Run the managed login flow.
     if let Some(adapter) = cli_auth::for_binary(capability) {
         return login_managed_cli(capability, adapter);
     }
 
-    // 2. LLM provider? Prompt for an API key and write config.
+    // 2. LLM provider? Prompt for an API key and store it in the
+    //    shared secret store.
     match capability {
-        "openai" => return login_llm_provider("openai"),
-        "anthropic" => return login_llm_provider("anthropic"),
-        "gemini" => return login_llm_provider("gemini"),
+        "openai" => return login_llm_provider("openai", stdin_key),
+        "anthropic" => return login_llm_provider("anthropic", stdin_key),
+        "gemini" => return login_llm_provider("gemini", stdin_key),
         _ => {}
     }
 
@@ -227,38 +229,92 @@ fn login_mcp_oauth(server_id: &str, oauth_cfg: &McpOAuthConfig) -> Result<()> {
     Ok(())
 }
 
-fn login_llm_provider(provider: &'static str) -> Result<()> {
-    use std::io::{BufRead, IsTerminal, Write};
+fn login_llm_provider(provider: &'static str, stdin_key: bool) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
 
-    let existing = LlmCredentials::from_env();
-    if existing.key_for(provider).is_some() {
-        println!("✓ {provider} is already configured via environment variable (overrides config).");
-        return Ok(());
-    }
-
-    if !std::io::stdin().is_terminal() {
-        bail!(
-            "`cori login {provider}` is interactive — set the API key with `cori config set llm.{provider}.api_key <key>` instead"
+    if LlmCredentials::from_env().key_for(provider).is_some() {
+        println!(
+            "Note: {provider} is also set via environment variable, which overrides the stored key at run time."
         );
     }
 
-    eprint!("Paste your {provider} API key (input hidden in your shell history): ");
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .context("reading API key from stdin")?;
-    let key = line.trim().to_string();
+    let key = if stdin_key || !std::io::stdin().is_terminal() {
+        // Scripted path: `echo $KEY | cori login anthropic --stdin`.
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("reading API key from stdin")?;
+        line.trim().to_string()
+    } else {
+        rpassword::prompt_password(format!("Paste your {provider} API key (input hidden): "))
+            .context("reading API key")?
+    };
     if key.is_empty() {
         bail!("no API key entered");
     }
 
-    crate::commands::config::set(&format!("llm.{provider}.api_key"), &key)?;
-    println!("✓ Stored {provider} API key in ~/.cori/config.toml.");
+    let store = cori_secrets::SecretStore::open_default().context("opening the secret store")?;
+    store
+        .set(&cori_secrets::llm_account(provider), &key)
+        .with_context(|| format!("storing the {provider} API key"))?;
+
+    if store.uses_keychain() {
+        println!("✓ Stored {provider} API key in the OS keychain.");
+    } else {
+        println!("✓ Stored {provider} API key in ~/.cori/credentials (no keychain on this machine; file is 0600).");
+    }
     println!("  (To override per shell, export the matching env var instead.)");
     notify_open_workflows(provider);
     Ok(())
+}
+
+/// `cori logout <capability>` — remove a stored credential.
+///
+/// LLM providers delete from the shared secret store; MCP servers
+/// delete the OAuth token owned by the current OS user.
+pub fn logout(capability: &str) -> Result<()> {
+    let llm_provider: Option<&'static str> = match capability {
+        "openai" => Some("openai"),
+        "anthropic" => Some("anthropic"),
+        "gemini" => Some("gemini"),
+        _ => None,
+    };
+    if let Some(provider) = llm_provider {
+        let store =
+            cori_secrets::SecretStore::open_default().context("opening the secret store")?;
+        store
+            .delete(&cori_secrets::llm_account(provider))
+            .with_context(|| format!("deleting the {provider} API key"))?;
+        println!("✓ Removed {provider} API key.");
+        if LlmCredentials::from_env().key_for(provider).is_some() {
+            println!("  Note: an environment variable for {provider} is still set in this shell.");
+        }
+        return Ok(());
+    }
+
+    let identity = OsUser
+        .resolve()
+        .context("resolving OS user for credential ownership")?;
+    let owner = match identity {
+        WorkerIdentity::Person { user_id } => Owner::User(user_id),
+        WorkerIdentity::Service { pool } => Owner::Service(pool),
+    };
+    let store = default_store(paths::credentials_dir()?);
+    let key = TokenKey::new(capability.to_string(), owner);
+    match store.get(&key) {
+        Ok(Some(_)) => {
+            store
+                .delete(&key)
+                .with_context(|| format!("deleting the token for `{capability}`"))?;
+            println!("✓ Signed out of `{capability}`.");
+            Ok(())
+        }
+        _ => {
+            println!("Nothing to remove — `{capability}` has no stored credential for this user.");
+            Ok(())
+        }
+    }
 }
 
 /// Phase 6: after a successful sign-in, signal every open workflow on

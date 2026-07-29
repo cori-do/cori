@@ -345,6 +345,29 @@ export const listCapabilities = () =>
 export const connectCapability = (args: { id: string }) =>
   call<CapabilityInfo>("connect_capability", args);
 
+// ---------- LLM provider keys (shared secret store) ---------------------
+
+export interface LlmProviderInfo {
+  id: string;
+  display_name: string;
+  /** A key is stored for this provider (non-secret index; the value never reaches the UI). */
+  configured: boolean;
+  /** An env var overrides the stored key at run time. */
+  env_override: boolean;
+  /** Secrets go to the OS keychain (false → 0600 file fallback). */
+  keychain: boolean;
+}
+
+export const listLlmProviders = () =>
+  call<LlmProviderInfo[]>("list_llm_providers");
+
+/** Verifies the key against the provider's API, then stores it in the OS keychain. */
+export const setLlmProviderKey = (args: { provider: string; api_key: string }) =>
+  call<LlmProviderInfo>("set_llm_provider_key", args);
+
+export const removeLlmProviderKey = (args: { provider: string }) =>
+  call<LlmProviderInfo>("remove_llm_provider_key", args);
+
 export const resolveWorkflow = (args: { source: string; update?: boolean }) =>
   call<WorkflowPreflight>("resolve_workflow", args);
 

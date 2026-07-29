@@ -716,24 +716,20 @@ pub fn persist_trace(
     Ok(())
 }
 
-/// Read LLM keys from `~/.cori/config.toml` and overlay env vars on top.
+/// Read LLM keys from the shared secret store (OS keychain, file
+/// fallback) and overlay env vars on top. Resolution is two layers:
+/// env > keychain. Secrets never live in `config.toml`.
 pub fn resolve_llm_credentials() -> LlmCredentials {
-    let mut from_config = LlmCredentials::default();
-    if let Ok(cfg) = config::Config::load() {
-        from_config.openai_api_key = cfg
-            .get("llm.openai.api_key")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        from_config.anthropic_api_key = cfg
-            .get("llm.anthropic.api_key")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        from_config.gemini_api_key = cfg
-            .get("llm.gemini.api_key")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+    let mut from_store = LlmCredentials::default();
+    if let Ok(store) = cori_secrets::SecretStore::open_default() {
+        from_store.openai_api_key = store.get(&cori_secrets::llm_account("openai")).ok().flatten();
+        from_store.anthropic_api_key = store
+            .get(&cori_secrets::llm_account("anthropic"))
+            .ok()
+            .flatten();
+        from_store.gemini_api_key = store.get(&cori_secrets::llm_account("gemini")).ok().flatten();
     }
-    LlmCredentials::from_env().or_fill_from(&from_config)
+    LlmCredentials::from_env().or_fill_from(&from_store)
 }
 
 /// Build the initial params JSON from manifest defaults overlaid with

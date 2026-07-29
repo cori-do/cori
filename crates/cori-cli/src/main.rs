@@ -78,6 +78,16 @@ enum Command {
     Login {
         /// Capability id — e.g. `notion`, `gws`, `openai`.
         capability: String,
+        /// For LLM providers: read the API key from stdin instead of
+        /// prompting (`echo $KEY | cori login anthropic --stdin`).
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Remove a stored credential — an LLM provider API key (from the
+    /// OS keychain) or an MCP server's OAuth token.
+    Logout {
+        /// Capability id — e.g. `anthropic`, `notion`.
+        capability: String,
     },
     /// Manage Cori-blessed capability binaries (`gws`, …).
     Capability {
@@ -213,7 +223,8 @@ fn main() -> anyhow::Result<()> {
             } => commands::runs::show(&run_id, activity.as_deref(), full, json),
         },
         Some(Command::Work { shared }) => commands::work::work(commands::work::WorkOpts { shared }),
-        Some(Command::Login { capability }) => commands::login::login(&capability),
+        Some(Command::Login { capability, stdin }) => commands::login::login(&capability, stdin),
+        Some(Command::Logout { capability }) => commands::login::logout(&capability),
         Some(Command::Capability { command }) => match command {
             CapabilityCommand::Install { id } => commands::capability::install_capability(&id),
             CapabilityCommand::List { json } => commands::capability::list(json),

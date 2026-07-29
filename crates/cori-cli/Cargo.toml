@@ -26,6 +26,8 @@ temporalio-client.workspace = true
 futures.workspace = true
 cori-protocol.workspace = true
 cori-broker.workspace = true
+cori-secrets.workspace = true
+rpassword.workspace = true
 cori-worker.workspace = true
 cori-run = { path = "../cori-run" }
 tokio.workspace = true
