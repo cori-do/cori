@@ -19,6 +19,12 @@ export default defineConfig(async () => ({
   // what triggers the "504 Outdated Optimize Dep" errors in the Tauri
   // webview (WKWebView caches the old `?v=` URL and Vite no longer
   // recognises that hash).
+  //
+  // "Every dep" means every one, including the two only reached once a
+  // route module loads: discovering those on first navigation forces the
+  // reload this list exists to prevent, and the app hangs on its
+  // hydration fallback. Keep in sync with:
+  //   grep -rho 'from "@tauri-apps/[^"]*"' app | sort -u
   optimizeDeps: {
     include: [
       "react",
@@ -29,6 +35,8 @@ export default defineConfig(async () => ({
       "react-router",
       "@tauri-apps/api/core",
       "@tauri-apps/api/event",
+      "@tauri-apps/api/webviewWindow",
+      "@tauri-apps/plugin-opener",
     ],
   },
 }));
