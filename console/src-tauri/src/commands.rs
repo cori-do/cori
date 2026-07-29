@@ -124,11 +124,18 @@ pub struct RunListEntry {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_runs(
     workflow_id: Option<String>,
+    history_key: Option<String>,
     limit: Option<usize>,
 ) -> IpcResult<Vec<RunListEntry>> {
+    if history_key
+        .as_deref()
+        .is_some_and(|key| !is_safe_segment(key))
+    {
+        return Err(IpcError::BadRequest("invalid history key".into()));
+    }
     let runs_root = paths::runs_dir().map_err(IpcError::Internal)?;
     let limit = limit.unwrap_or(50);
-    tokio::task::spawn_blocking(move || collect_traces(&runs_root, workflow_id, limit))
+    tokio::task::spawn_blocking(move || collect_traces(&runs_root, workflow_id, history_key, limit))
         .await
         .map_err(|e| IpcError::Internal(anyhow::anyhow!("runs task join: {e}")))?
         .map_err(IpcError::Internal)
@@ -137,6 +144,7 @@ pub async fn list_runs(
 fn collect_traces(
     runs_root: &Path,
     workflow_filter: Option<String>,
+    history_filter: Option<String>,
     limit: usize,
 ) -> anyhow::Result<Vec<RunListEntry>> {
     let mut out: Vec<RunListEntry> = Vec::new();
@@ -152,6 +160,11 @@ fn collect_traces(
         let Some(key) = dir.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
+        if let Some(history_key) = history_filter.as_deref()
+            && key != history_key
+        {
+            continue;
+        }
         let Ok(files) = std::fs::read_dir(&dir) else {
             continue;
         };
