@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useRevalidator } from "react-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -48,6 +56,38 @@ export function meta() {
 interface LauncherData {
   status: StatusResponse | null;
   recents: RecentWorkflow[];
+}
+
+const LAUNCHER_LIST_WIDTH_KEY = "cori-launcher-list-width";
+const DEFAULT_LAUNCHER_LIST_WIDTH = 240;
+const MIN_LAUNCHER_LIST_WIDTH = 192;
+const MAX_LAUNCHER_LIST_WIDTH = 480;
+const MIN_LAUNCHER_DETAIL_WIDTH = 320;
+const LAUNCHER_LIST_KEYBOARD_STEP = 16;
+
+function readLauncherListWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_LAUNCHER_LIST_WIDTH;
+  try {
+    const raw = window.localStorage.getItem(LAUNCHER_LIST_WIDTH_KEY);
+    const stored = raw === null || raw.trim() === "" ? Number.NaN : Number(raw);
+    if (Number.isFinite(stored)) {
+      return Math.min(
+        MAX_LAUNCHER_LIST_WIDTH,
+        Math.max(MIN_LAUNCHER_LIST_WIDTH, stored),
+      );
+    }
+  } catch {
+    // Storage can be unavailable in privacy-restricted webviews.
+  }
+  return DEFAULT_LAUNCHER_LIST_WIDTH;
+}
+
+function saveLauncherListWidth(width: number) {
+  try {
+    window.localStorage.setItem(LAUNCHER_LIST_WIDTH_KEY, String(width));
+  } catch {
+    // Resizing still works for this session when storage is unavailable.
+  }
 }
 
 export async function clientLoader(): Promise<LauncherData> {
@@ -101,11 +141,15 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   const [stack, setStack] = useState<StackStatus | undefined>(undefined);
   const [ctx, setCtx] = useState<LauncherContext>({ kind: "recents" });
   const [dragOver, setDragOver] = useState(false);
+  const [listWidth, setListWidth] = useState(readLauncherListWidth);
+  const [listResizing, setListResizing] = useState(false);
   // The workflow filling the right pane. Picking one on the left sets
   // this; nothing about it opens a window.
   const [picked, setPicked] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const paneRef = useRef<WorkflowPaneHandle>(null);
+  const panesRef = useRef<HTMLDivElement>(null);
+  const listWidthRef = useRef(listWidth);
   // Bumped on every async context-entry request; only the latest
   // response is applied (older ones land in the background but are
   // discarded). Avoids the user-typed-faster race.
@@ -595,6 +639,65 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     }
   }
 
+  function maxListWidth(): number {
+    const panesWidth = panesRef.current?.getBoundingClientRect().width;
+    if (panesWidth === undefined) return MAX_LAUNCHER_LIST_WIDTH;
+    return Math.max(
+      MIN_LAUNCHER_LIST_WIDTH,
+      Math.min(
+        MAX_LAUNCHER_LIST_WIDTH,
+        panesWidth - MIN_LAUNCHER_DETAIL_WIDTH,
+      ),
+    );
+  }
+
+  function updateListWidth(nextWidth: number, persist = false) {
+    const next = Math.round(
+      Math.min(maxListWidth(), Math.max(MIN_LAUNCHER_LIST_WIDTH, nextWidth)),
+    );
+    listWidthRef.current = next;
+    setListWidth(next);
+    if (persist) saveLauncherListWidth(next);
+  }
+
+  function resizeListFromPointer(e: ReactPointerEvent<HTMLDivElement>) {
+    const panes = panesRef.current;
+    if (!panes) return;
+    updateListWidth(e.clientX - panes.getBoundingClientRect().left);
+  }
+
+  function handleListResizeStart(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setListResizing(true);
+    resizeListFromPointer(e);
+  }
+
+  function handleListResizeEnd(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setListResizing(false);
+    saveLauncherListWidth(listWidthRef.current);
+  }
+
+  function handleListResizeKey(e: React.KeyboardEvent<HTMLDivElement>) {
+    let next: number | undefined;
+    if (e.key === "ArrowLeft") {
+      next = listWidthRef.current - LAUNCHER_LIST_KEYBOARD_STEP;
+    } else if (e.key === "ArrowRight") {
+      next = listWidthRef.current + LAUNCHER_LIST_KEYBOARD_STEP;
+    } else if (e.key === "Home") {
+      next = MIN_LAUNCHER_LIST_WIDTH;
+    } else if (e.key === "End") {
+      next = maxListWidth();
+    }
+    if (next === undefined) return;
+    e.preventDefault();
+    updateListWidth(next, true);
+  }
+
   return (
     <div className={`launcher${dragOver ? " is-drag-over" : ""}`}>
       <header
@@ -637,7 +740,13 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       />
 
       {/* Your workflows on the left, the one you picked on the right. */}
-      <div className="launcher-panes">
+      <div
+        ref={panesRef}
+        className={`launcher-panes${listResizing ? " is-resizing" : ""}`}
+        style={
+          { "--launcher-list-width": `${listWidth}px` } as CSSProperties
+        }
+      >
         <div className="launcher-list">
           <Breadcrumb
             context={ctx}
@@ -664,6 +773,31 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
             recentsCount={recents.length}
           />
         </div>
+
+        <div
+          className="launcher-pane-resizer"
+          role="separator"
+          aria-label="Resize workflow list"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_LAUNCHER_LIST_WIDTH}
+          aria-valuemax={MAX_LAUNCHER_LIST_WIDTH}
+          aria-valuenow={listWidth}
+          tabIndex={0}
+          title="Drag to resize the workflow list; double-click to reset"
+          onPointerDown={handleListResizeStart}
+          onPointerMove={(e) => {
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+              resizeListFromPointer(e);
+            }
+          }}
+          onPointerUp={handleListResizeEnd}
+          onPointerCancel={handleListResizeEnd}
+          onLostPointerCapture={() => setListResizing(false)}
+          onKeyDown={handleListResizeKey}
+          onDoubleClick={() =>
+            updateListWidth(DEFAULT_LAUNCHER_LIST_WIDTH, true)
+          }
+        />
 
         <div className="launcher-detail">
           <WorkflowPane source={picked} handleRef={paneRef} />
