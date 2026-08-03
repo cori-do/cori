@@ -32,6 +32,7 @@ import {
   listDir,
   listRecentWorkflows,
   listRemoteWorkflows,
+  nearestExistingDirectory,
   onApprovalsChanged,
   onStackStatus,
   peekSource,
@@ -47,7 +48,9 @@ import {
   type StatusResponse,
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
-import { openManage, openRun } from "../lib/windows";
+import { openRun, openSettings } from "../lib/windows";
+import { Inbox } from "./manage.approvals";
+import { ScheduleList } from "./manage.schedules";
 
 export function meta() {
   return [{ title: "Cori" }];
@@ -117,6 +120,8 @@ type LauncherContext =
       error: string | null;
     };
 
+type LauncherSection = "workflows" | "inbox" | "schedules";
+
 /**
  * Unified items model for the results pane. Each context yields a
  * sequence of `ListedItem`s; the selection / keyboard nav code below
@@ -143,6 +148,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   const [dragOver, setDragOver] = useState(false);
   const [listWidth, setListWidth] = useState(readLauncherListWidth);
   const [listResizing, setListResizing] = useState(false);
+  const [section, setSection] = useState<LauncherSection>("workflows");
   // The workflow filling the right pane. Picking one on the left sets
   // this; nothing about it opens a window.
   const [picked, setPicked] = useState<string | null>(null);
@@ -203,7 +209,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     let cancelled = false;
     listen<{ kind: string; run_id?: string }>("deeplink:open", (e) => {
       const p = e.payload;
-      if (p?.kind === "inbox") void openManage("approvals");
+      if (p?.kind === "inbox") setSection("inbox");
       else if (p?.kind === "run" && p.run_id) void openRun(p.run_id);
     })
       .then((fn) => {
@@ -217,18 +223,37 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     };
   }, []);
 
-  // Tray menu's History / Schedules / Workers items emit this with a
-  // `tab` payload — route through the launcher so window creation
-  // stays a UI concern. The launcher itself isn't surfaced; the user
-  // asked for a specific tab, not the launcher.
+  // Tray navigation for the three launcher sections stays in this window.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
-    listen<{ tab?: "runs" | "schedules" | "workers" }>(
-      "tray:open-manage",
+    listen<{ section?: LauncherSection }>(
+      "launcher:set-section",
       (e) => {
-        void openManage(e.payload?.tab);
+        const next = e.payload?.section;
+        if (next === "workflows" || next === "inbox" || next === "schedules") {
+          setSection(next);
+        }
       },
+    )
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Settings is the only tabbed destination that opens a separate window.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    listen<{ tab?: "runs" | "capabilities" | "providers" | "workers" }>(
+      "tray:open-settings",
+      (e) => void openSettings(e.payload?.tab),
     )
       .then((fn) => {
         if (cancelled) fn();
@@ -323,6 +348,16 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         });
       });
   }, []);
+
+  const locateMissingWorkflow = useCallback(
+    async (source: string) => {
+      const start = await nearestExistingDirectory(source);
+      setSection("workflows");
+      enterLocalContext(start);
+      inputRef.current?.focus();
+    },
+    [enterLocalContext],
+  );
 
   const enterRemoteContext = useCallback(
     (refStr: string, update = false) => {
@@ -436,7 +471,8 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
   const items = useMemo<ListedItem[]>(() => {
     if (ctx.kind === "recents") {
-      return fuzzyFilter(recents, input.trim(), (r) => [
+      const uniqueRecents = dedupeRecentWorkflows(recents);
+      return fuzzyFilter(uniqueRecents, input.trim(), (r) => [
         r.name ?? "",
         r.workflow_id,
         describeRecentSource(r),
@@ -506,13 +542,17 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   function activateItem(item: ListedItem) {
     if (item.kind === "recent") {
       const src = sourceToCli(item.recent.source);
-      if (src) setPicked(src);
+      if (src) {
+        setPicked(src);
+        setSection("workflows");
+      }
       return;
     }
     if (item.kind === "dir-entry") {
       const e = item.entry;
       if (e.kind === "workflow") {
         setPicked(e.path);
+        setSection("workflows");
         return;
       }
       if (e.kind === "dir") {
@@ -524,6 +564,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     }
     if (item.kind === "remote-entry") {
       setPicked(buildRemoteSource(item.listing, item.entry));
+      setSection("workflows");
       return;
     }
   }
@@ -725,7 +766,12 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
       <FirstRunCliPrompt />
 
-      {approvals.length > 0 && <ApprovalsPanel approvals={approvals} />}
+      {approvals.length > 0 && section !== "inbox" && (
+        <ApprovalsPanel
+          approvals={approvals}
+          onOpenInbox={() => setSection("inbox")}
+        />
+      )}
 
       <SearchBar
         value={input}
@@ -748,15 +794,23 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         }
       >
         <div className="launcher-list">
-          <Breadcrumb
-            context={ctx}
-            onPop={popContext}
-            onRefresh={
-              ctx.kind === "remote"
-                ? () => enterRemoteContext(ctx.refStr, true)
-                : undefined
-            }
+          <LauncherSectionNav
+            section={section}
+            pendingApprovals={approvals.length}
+            onSelect={setSection}
           />
+
+          {ctx.kind !== "recents" && (
+            <Breadcrumb
+              context={ctx}
+              onPop={popContext}
+              onRefresh={
+                ctx.kind === "remote"
+                  ? () => enterRemoteContext(ctx.refStr, true)
+                  : undefined
+              }
+            />
+          )}
 
           <ResultsPane
             ctx={ctx}
@@ -800,7 +854,23 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         />
 
         <div className="launcher-detail">
-          <WorkflowPane source={picked} handleRef={paneRef} />
+          {section === "workflows" && (
+            <WorkflowPane
+              source={picked}
+              handleRef={paneRef}
+              onLocateMissing={locateMissingWorkflow}
+            />
+          )}
+          {section === "inbox" && (
+            <LauncherSectionContent title="Inbox">
+              <Inbox />
+            </LauncherSectionContent>
+          )}
+          {section === "schedules" && (
+            <LauncherSectionContent title="Schedules">
+              <ScheduleList />
+            </LauncherSectionContent>
+          )}
         </div>
       </div>
 
@@ -811,22 +881,89 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           <button
             type="button"
             className="btn"
-            onClick={() => void openManage("runs")}
-            title="Past runs"
+            onClick={() => void openSettings()}
+            title="History, capabilities, AI providers, and workers"
           >
-            History
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void openManage("schedules")}
-            title="Cron-driven runs"
-          >
-            Schedules
+            Settings
           </button>
         </div>
       </footer>
     </div>
+  );
+}
+
+function LauncherSectionNav({
+  section,
+  pendingApprovals,
+  onSelect,
+}: {
+  section: LauncherSection;
+  pendingApprovals: number;
+  onSelect: (section: LauncherSection) => void;
+}) {
+  const entries: Array<{ id: LauncherSection; label: string }> = [
+    { id: "workflows", label: "Workflows" },
+    { id: "inbox", label: "Inbox" },
+    { id: "schedules", label: "Schedules" },
+  ];
+  return (
+    <nav className="launcher-sections" aria-label="Launcher sections">
+      {entries.map((entry) => (
+        <button
+          key={entry.id}
+          type="button"
+          className={`launcher-section${section === entry.id ? " is-active" : ""}`}
+          aria-current={section === entry.id ? "page" : undefined}
+          onClick={() => onSelect(entry.id)}
+        >
+          <LauncherSectionIcon section={entry.id} />
+          <span>{entry.label}</span>
+          {entry.id === "inbox" && pendingApprovals > 0 && (
+            <span className="launcher-section-count" aria-label={`${pendingApprovals} pending`}>
+              {pendingApprovals}
+            </span>
+          )}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function LauncherSectionIcon({ section }: { section: LauncherSection }) {
+  if (section === "inbox") {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <path d="M2.5 3.5h11v8.5h-11zM2.5 9h3l1 1.5h3L10.5 9h3" />
+      </svg>
+    );
+  }
+  if (section === "schedules") {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <circle cx="8" cy="8.5" r="5.5" />
+        <path d="M8 5.2v3.6l2.3 1.4M5 1.8v2M11 1.8v2" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden>
+      <path d="M2.5 4h4l1-1.5h6v10h-11z" />
+    </svg>
+  );
+}
+
+function LauncherSectionContent({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="launcher-section-content">
+      <h1>{title}</h1>
+      {children}
+    </section>
   );
 }
 
@@ -912,9 +1049,15 @@ function WindowControlGlyph({
  * Compact attention banner for pending human gates. The launcher is an
  * interrupter, not a reading surface: it shows what's being asked and
  * the primary action; the readable detail (per-param table, history)
- * lives in the manage window's Inbox tab.
+ * lives in the launcher's Inbox section.
  */
-function ApprovalsPanel({ approvals }: { approvals: ApprovalRequest[] }) {
+function ApprovalsPanel({
+  approvals,
+  onOpenInbox,
+}: {
+  approvals: ApprovalRequest[];
+  onOpenInbox: () => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const decide = (nonce: string, approved: boolean) => {
     setBusy(nonce);
@@ -933,7 +1076,7 @@ function ApprovalsPanel({ approvals }: { approvals: ApprovalRequest[] }) {
         <button
           type="button"
           className="approvals-open-inbox"
-          onClick={() => void openManage("approvals")}
+          onClick={onOpenInbox}
         >
           Open inbox →
         </button>
@@ -1139,13 +1282,12 @@ function Chip({ peek }: { peek: PeekResult | null }) {
         className="search-bar-chip local"
         title={peek.normalized + (peek.local_exists ? "" : " — not found")}
       >
-        local folder{!peek.local_exists && " ✗"}
+        folder{!peek.local_exists && " ✗"}
       </span>
     );
   }
   return (
     <span className="search-bar-chip remote" title={peek.normalized}>
-      <span>remote</span>
       <MiddleTruncate
         text={peek.normalized}
         tail={Math.min(20, Math.floor(peek.normalized.length / 2))}
@@ -1186,7 +1328,6 @@ function Breadcrumb({
         >
           ←
         </button>
-        <span className="crumb-label">Local</span>
         <MiddleTruncate
           text={context.path}
           tail={Math.min(28, Math.floor(context.path.length / 2))}
@@ -1209,7 +1350,6 @@ function Breadcrumb({
         >
           ←
         </button>
-        <span className="crumb-label">Remote</span>
         <MiddleTruncate
           text={pin}
           tail={Math.min(24, Math.max(8, Math.floor(pin.length / 2)))}
@@ -1415,7 +1555,6 @@ function RecentRow({
   const sourceLabel = describeRecentSource(r);
   const displayName = r.name ?? r.workflow_id;
   const disabled = !src;
-  const origin = r.source?.kind ?? "unavailable";
   return (
     <button
       type="button"
@@ -1438,7 +1577,6 @@ function RecentRow({
       <div className="result-row-body">
         <div className="result-row-name">{displayName}</div>
         <div className="result-row-location">
-          <span className="result-row-origin">{origin}</span>
           {sourceLabel && (
             <MiddleTruncate
               text={sourceLabel}
@@ -1607,6 +1745,32 @@ function describeRecentSource(r: RecentWorkflow): string {
     return s.ref ? `${s.host}/${tail}@${s.ref}` : `${s.host}/${tail}`;
   }
   return r.key;
+}
+
+/**
+ * Run history can contain multiple directory keys for the same workflow
+ * after migrations or path normalization changes. The sidebar is a recent
+ * workflow picker, so keep only the newest entry for each name + source path.
+ * `list_recent_workflows` is newest-first, making first-seen the right one.
+ */
+function dedupeRecentWorkflows(recents: RecentWorkflow[]): RecentWorkflow[] {
+  const seen = new Set<string>();
+  return recents.filter((recent) => {
+    const name = recent.name ?? recent.workflow_id;
+    const identity = `${name}\u0000${recentSourcePath(recent)}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function recentSourcePath(recent: RecentWorkflow): string {
+  const source = recent.source;
+  if (!source) return recent.key;
+  if (source.kind === "local") return source.path;
+  return source.subpath
+    ? `${source.host}/${source.repo}/${source.subpath}`
+    : `${source.host}/${source.repo}`;
 }
 
 function formatErr(e: unknown): string {

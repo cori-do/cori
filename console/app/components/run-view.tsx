@@ -27,7 +27,7 @@ import {
   formatDuration,
   formatRelative,
 } from "../lib/format";
-import { openManage } from "../lib/windows";
+import { openSettings } from "../lib/windows";
 
 export interface RunViewProps {
   /** Always known: from URL in live mode, from trace.run_id in historical. */
@@ -208,7 +208,7 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
         <button
           type="button"
           className="btn"
-          onClick={() => void openManage("runs")}
+          onClick={() => void openSettings("runs")}
         >
           All runs
         </button>

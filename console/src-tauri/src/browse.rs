@@ -345,6 +345,32 @@ pub async fn get_last_local_dir() -> IpcResult<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// Return the closest directory that still exists for a workflow path that
+/// was moved or deleted. This gives the launcher's relocation helper a useful
+/// starting point without making the webview guess at platform path syntax.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn nearest_existing_directory(path: String) -> IpcResult<String> {
+    tokio::task::spawn_blocking(move || {
+        let requested = expand_tilde(&path);
+        let nearest = nearest_existing_ancestor(&requested).unwrap_or_else(last_local_dir);
+        Ok(nearest.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| IpcError::Internal(anyhow::anyhow!("nearest directory join: {e}")))?
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    loop {
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
 // ---------- tests ----------------------------------------------------------
 
 #[cfg(test)]
@@ -406,5 +432,12 @@ mod tests {
         // `acme/flows/sub` looks like a path but has no marker and no
         // host segment — fall back to filter.
         assert!(matches!(classify("acme/flows/sub").kind, PeekKind::Filter));
+    }
+
+    #[test]
+    fn nearest_existing_ancestor_walks_up_from_a_missing_workflow() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let missing = cwd.join("__cori_missing_workflow_test__").join("nested");
+        assert_eq!(nearest_existing_ancestor(&missing), Some(cwd));
     }
 }

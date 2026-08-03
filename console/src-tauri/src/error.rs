@@ -43,6 +43,10 @@ pub enum IpcError {
     NoTemporal(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("workflow not found: {0}")]
+    WorkflowMissing(String),
+    #[error("workflow is no longer valid: {0}")]
+    WorkflowInvalid(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error(transparent)]
@@ -72,6 +76,16 @@ impl Serialize for IpcError {
             }
             IpcError::NoTemporal(s) => ("no_temporal", self.to_string(), json!({ "reason": s })),
             IpcError::NotFound(s) => ("not_found", self.to_string(), json!({ "resource": s })),
+            IpcError::WorkflowMissing(source) => (
+                "workflow_missing",
+                self.to_string(),
+                json!({ "source": source }),
+            ),
+            IpcError::WorkflowInvalid(source) => (
+                "workflow_invalid",
+                self.to_string(),
+                json!({ "source": source }),
+            ),
             IpcError::BadRequest(s) => ("bad_request", self.to_string(), json!({ "reason": s })),
             IpcError::Internal(e) => ("internal", format!("{e:#}"), Value::Null),
         };

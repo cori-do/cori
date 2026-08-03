@@ -15,6 +15,8 @@ export interface IpcError {
     | "needs_login"
     | "no_temporal"
     | "not_found"
+    | "workflow_missing"
+    | "workflow_invalid"
     | "bad_request"
     | "internal";
   message: string;
@@ -434,6 +436,9 @@ export const listDir = (path: string) =>
   call<DirListing>("list_dir", { path });
 
 export const getLastLocalDir = () => call<string>("get_last_local_dir");
+
+export const nearestExistingDirectory = (path: string) =>
+  call<string>("nearest_existing_directory", { path });
 
 // ---------- Remote repo browsing (Phase 4) ----------------------------
 

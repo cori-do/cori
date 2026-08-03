@@ -8,15 +8,15 @@
 //   • run-<id>   — disposable, one per run. Only for runs the launcher
 //                  did not start itself: history, and runs an agent or
 //                  a schedule kicked off elsewhere.
-//   • manage     — single, tabbed
+//   • settings   — single, tabbed
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
 
-export type ManageTab = "workers" | "schedules" | "runs" | "approvals";
+export type SettingsTab = "runs" | "capabilities" | "providers" | "workers";
 
 const RUN_SIZE = { width: 820, height: 720 } as const;
-const MANAGE_SIZE = { width: 900, height: 700 } as const;
+const SETTINGS_SIZE = { width: 900, height: 700 } as const;
 
 /**
  * Open (or focus) a run window. Live by default; pass `{ key, utc }`
@@ -43,26 +43,26 @@ export async function openRun(
 }
 
 /**
- * Open (or focus) the single manage window, optionally landing on a
- * specific tab. Defaults to the runs history tab.
+ * Open (or focus) the single settings window, optionally landing on a
+ * specific tab. Defaults to the worker tab.
  */
-export async function openManage(tab: ManageTab = "runs"): Promise<void> {
-  const label = "manage";
-  const url = `/manage/${tab}`;
+export async function openSettings(tab: SettingsTab = "workers"): Promise<void> {
+  const label = "settings";
+  const url = `/settings/${tab}`;
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
     await existing.show();
     await existing.setFocus();
     // The user explicitly asked for a tab (footer button, tray menu) —
     // flip to it even if the window was already showing a different one.
-    // The manage window's effect-handler picks this up and navigates.
-    await emit("manage:set-tab", { tab });
+    // The settings window's effect-handler picks this up and navigates.
+    await emit("settings:set-tab", { tab });
     return;
   }
   new WebviewWindow(label, {
     url,
-    title: "Manage — Cori",
-    ...MANAGE_SIZE,
+    title: "Settings — Cori",
+    ...SETTINGS_SIZE,
     minWidth: 720,
     minHeight: 520,
     resizable: true,
@@ -76,4 +76,3 @@ async function focusExisting(label: string): Promise<boolean> {
   await w.setFocus();
   return true;
 }
-

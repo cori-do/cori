@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react";
-import { useRevalidator } from "react-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteSchedule,
   enableSchedule,
@@ -20,19 +19,42 @@ export async function clientLoader(): Promise<ScheduleDto[]> {
 }
 
 export default function Schedules({ loaderData }: { loaderData: ScheduleDto[] }) {
-  const schedules = loaderData;
-  const revalidator = useRevalidator();
+  return <ScheduleList initialSchedules={loaderData} />;
+}
+
+/** Schedules content shared by the launcher and the route wrapper. */
+export function ScheduleList({
+  initialSchedules,
+}: {
+  initialSchedules?: ScheduleDto[];
+}) {
+  const [schedules, setSchedules] = useState(initialSchedules ?? []);
+  const [loading, setLoading] = useState(initialSchedules === undefined);
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<ScheduleDto | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setSchedules(await listSchedules());
+    } catch (e: unknown) {
+      setError(formatErr(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialSchedules === undefined) void refresh();
+  }, [initialSchedules, refresh]);
 
   async function toggle(s: ScheduleDto) {
     setBusy(s.id);
     setError(null);
     try {
       await setScheduleEnabled({ id: s.id, enabled: !s.enabled });
-      revalidator.revalidate();
+      await refresh();
     } catch (e: unknown) {
       setError(formatErr(e));
     } finally {
@@ -46,7 +68,7 @@ export default function Schedules({ loaderData }: { loaderData: ScheduleDto[] })
     setError(null);
     try {
       await deleteSchedule({ id: s.id });
-      revalidator.revalidate();
+      await refresh();
     } catch (e: unknown) {
       setError(formatErr(e));
     } finally {
@@ -74,7 +96,7 @@ export default function Schedules({ loaderData }: { loaderData: ScheduleDto[] })
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
-            revalidator.revalidate();
+            void refresh();
           }}
         />
       )}
@@ -85,12 +107,14 @@ export default function Schedules({ loaderData }: { loaderData: ScheduleDto[] })
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
-            revalidator.revalidate();
+            void refresh();
           }}
         />
       )}
 
-      {schedules.length === 0 ? (
+      {loading ? (
+        <div className="empty">Loading schedules…</div>
+      ) : schedules.length === 0 ? (
         <div className="empty">
           No schedules yet. A workflow's manifest must declare a{" "}
           <code>schedule:</code> field to be schedulable; click{" "}
