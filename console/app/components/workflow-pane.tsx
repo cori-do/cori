@@ -72,18 +72,28 @@ interface RunState {
 
 type Phase = "idle" | "loading" | "error" | "ready";
 
+type ResolveFailure = {
+  kind: "missing" | "invalid" | "generic";
+  message: string;
+};
+
 export function WorkflowPane({
   source,
   handleRef,
+  onLocateMissing,
 }: {
   /** `cori run`-compatible source string, or null when nothing is picked. */
   source: string | null;
   handleRef?: Ref<WorkflowPaneHandle>;
+  /** Open the launcher's local browser near a workflow's old path. */
+  onLocateMissing?: (source: string) => Promise<void>;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
+  const [phaseSource, setPhaseSource] = useState<string | null>(null);
+  const [loaderVisible, setLoaderVisible] = useState(false);
   const [preflight, setPreflight] = useState<WorkflowPreflight | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>({});
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<ResolveFailure | null>(null);
   const [consent, setConsent] = useState<ConsentRequired | null>(null);
   const [trusting, setTrusting] = useState(false);
   const [run, setRun] = useState<RunState | null>(null);
@@ -99,8 +109,9 @@ export function WorkflowPane({
 
   const resolve = useCallback(async (src: string, update = false) => {
     const id = ++requestId.current;
+    setPhaseSource(src);
     setPhase("loading");
-    setError(null);
+    setFailure(null);
     setConsent(null);
     setPreflight(null);
     setRun(null);
@@ -125,7 +136,7 @@ export function WorkflowPane({
         setConsent(e.details as ConsentRequired);
         setPhase("error");
       } else {
-        setError(formatErr(e));
+        setFailure(classifyResolveFailure(e));
         setPhase("error");
       }
     }
@@ -135,14 +146,28 @@ export function WorkflowPane({
     if (!source) {
       requestId.current += 1; // drop anything in flight
       setPhase("idle");
+      setPhaseSource(null);
       setPreflight(null);
       setRun(null);
-      setError(null);
+      setFailure(null);
       setConsent(null);
       return;
     }
     void resolve(source);
   }, [source, resolve]);
+
+  // A quick cache hit should feel instant, not flash a one-frame status.
+  // Slower resolves earn a quiet loader after a short threshold; keeping the
+  // node mounted lets it fade away while the result fades in underneath.
+  const resolving = phase === "loading" || phaseSource !== source;
+  useEffect(() => {
+    if (!resolving) {
+      setLoaderVisible(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setLoaderVisible(true), 160);
+    return () => window.clearTimeout(timer);
+  }, [resolving, source]);
 
   const running = run != null && !run.closed;
   const completedRunId = run?.closed
@@ -239,7 +264,7 @@ export function WorkflowPane({
       setConsent(null);
       await resolve(source);
     } catch (e: unknown) {
-      setError(formatErr(e));
+      setFailure(classifyResolveFailure(e));
     } finally {
       setTrusting(false);
     }
@@ -258,16 +283,33 @@ export function WorkflowPane({
         />
       )}
 
-      {phase === "loading" && (
-        <div className="pane-status">Resolving {source}…</div>
+      <div
+        className={`pane-loader${loaderVisible ? " is-visible" : ""}`}
+        role="status"
+        aria-live="polite"
+        aria-hidden={!loaderVisible}
+        title={source}
+      >
+        <span>Resolving workflow</span>
+        <span className="pane-loader-dots" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+      </div>
+
+      {!resolving && phase === "error" && !consent && (
+        <div className="pane-enter" key={`error:${source}`}>
+          <WorkflowFailureView
+            failure={failure}
+            source={source}
+            onLocateMissing={onLocateMissing}
+          />
+        </div>
       )}
 
-      {phase === "error" && !consent && (
-        <div className="pane-status is-error">{error ?? "Could not resolve."}</div>
-      )}
-
-      {preflight && (
-        <>
+      {!resolving && preflight && (
+        <div className="pane-enter" key={`workflow:${source}`}>
           <PaneHeader
             preflight={preflight}
             run={run}
@@ -335,7 +377,7 @@ export function WorkflowPane({
             loading={historyLoading}
             error={historyError}
           />
-        </>
+        </div>
       )}
     </div>
   );
@@ -409,6 +451,141 @@ function PaneEmpty() {
   );
 }
 
+function WorkflowFailureView({
+  failure,
+  source,
+  onLocateMissing,
+}: {
+  failure: ResolveFailure | null;
+  source: string;
+  onLocateMissing?: (source: string) => Promise<void>;
+}) {
+  if (failure?.kind === "missing") {
+    return (
+      <MissingWorkflow
+        source={source}
+        onLocate={onLocateMissing}
+      />
+    );
+  }
+  if (failure?.kind === "invalid") {
+    return <InvalidWorkflow />;
+  }
+  return (
+    <div className="pane-status is-error">
+      {failure?.message ?? "Could not resolve."}
+    </div>
+  );
+}
+
+function MissingWorkflow({
+  source,
+  onLocate,
+}: {
+  source: string;
+  onLocate?: (source: string) => Promise<void>;
+}) {
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState<string | null>(null);
+  const folderName = workflowFolderName(source);
+
+  async function locate() {
+    if (!onLocate || locating) return;
+    setLocating(true);
+    setLocateError(null);
+    try {
+      await onLocate(source);
+    } catch (e: unknown) {
+      setLocateError(formatErr(e));
+    } finally {
+      setLocating(false);
+    }
+  }
+
+  return (
+    <div className="workflow-issue" role="status">
+      <div className="workflow-issue-icon is-missing" aria-hidden>
+        <FolderSearchIcon />
+      </div>
+      <div className="workflow-issue-kicker">Workflow moved</div>
+      <h2>Let’s find it again.</h2>
+      <p>
+        Cori can’t find <strong>{folderName}</strong> at its last saved
+        location. It may have been moved, renamed, or deleted.
+      </p>
+      <div className="workflow-issue-path" title={source}>
+        {source}
+      </div>
+      <div className="workflow-issue-helper">
+        {onLocate && (
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => void locate()}
+            disabled={locating}
+          >
+            <FolderIcon />
+            {locating ? "opening…" : "browse nearby"}
+          </button>
+        )}
+        <span>
+          Pick the workflow folder on the left, or drop it anywhere in this
+          window.
+        </span>
+      </div>
+      {locateError && (
+        <div className="workflow-issue-error">{locateError}</div>
+      )}
+    </div>
+  );
+}
+
+function InvalidWorkflow() {
+  return (
+    <div className="workflow-issue is-invalid" role="status">
+      <div className="workflow-issue-icon is-invalid" aria-hidden>
+        <RemakeIcon />
+      </div>
+      <div className="workflow-issue-kicker">Workflow out of date</div>
+      <h2>Please remake this workflow.</h2>
+      <p>
+        This workflow is no longer valid in Cori. Remake it from the original
+        task, then select the new workflow to continue.
+      </p>
+    </div>
+  );
+}
+
+function workflowFolderName(source: string): string {
+  const clean = source.replace(/[\\/]+$/, "");
+  const leaf = clean.split(/[\\/]/).pop();
+  return leaf || "this workflow";
+}
+
+function classifyResolveFailure(e: unknown): ResolveFailure {
+  const message = formatErr(e);
+  if (isIpcError(e)) {
+    if (e.code === "workflow_missing") return { kind: "missing", message };
+    if (e.code === "workflow_invalid") return { kind: "invalid", message };
+  }
+
+  // Backward-compatible with an older Console backend during hot reload.
+  if (
+    message.includes("resolving workflow path") &&
+    (message.includes("No such file or directory") ||
+      message.includes("os error 2"))
+  ) {
+    return { kind: "missing", message };
+  }
+  if (
+    message.includes("validating workflow TypeScript modules") ||
+    message.includes("workflow TypeScript module graph validation failed")
+  ) {
+    return { kind: "invalid", message };
+  }
+  return { kind: "generic", message };
+}
+
 // ─── Header: name, clock, run ────────────────────────────────────────────
 
 function PaneHeader({
@@ -436,7 +613,7 @@ function PaneHeader({
       )}
       <button
         type="button"
-        className="btn primary pane-run"
+        className="btn pane-run"
         onClick={onRun}
         disabled={running || blocked}
         title={
@@ -925,6 +1102,48 @@ function PlayIcon() {
   return (
     <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden fill="currentColor">
       <path d="M5.5 3.6a.7.7 0 011.06-.6l6 4.4a.7.7 0 010 1.2l-6 4.4a.7.7 0 01-1.06-.6z" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden fill="none">
+      <path
+        d="M1.75 4.25h4l1.3 1.5h7.2v6.5a1 1 0 01-1 1H2.75a1 1 0 01-1-1v-8z"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FolderSearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="25" height="25" aria-hidden fill="none">
+      <path
+        d="M3 6.5h6l2 2h10v8.25A2.25 2.25 0 0118.75 19H5.25A2.25 2.25 0 013 16.75V6.5z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <circle cx="16.25" cy="14.25" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M17.9 15.9l2.1 2.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function RemakeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="25" height="25" aria-hidden fill="none">
+      <path
+        d="M6 3.5h8l4 4v13H6v-17z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M14 3.5v4h4M9.5 12.25l5 5m0-5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );
 }

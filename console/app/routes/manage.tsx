@@ -3,51 +3,41 @@ import { useEffect } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export function meta() {
-  return [{ title: "Manage — Cori" }];
+  return [{ title: "Settings — Cori" }];
 }
 
-// Labels are user-facing; URL slugs are stable routing keys. "History"
-// is the more specific name for the runs tab — see the launcher footer
-// and tray menu, which call the same tab History.
+// Launcher sections (Workflows, Inbox, Schedules) stay in the launcher.
+// This separate window contains machine and worker settings only.
 const TABS: Array<{ to: string; label: string }> = [
-  { to: "/manage/approvals", label: "Inbox" },
-  { to: "/manage/runs", label: "History" },
-  { to: "/manage/schedules", label: "Schedules" },
-  { to: "/manage/capabilities", label: "Capabilities" },
-  { to: "/manage/providers", label: "AI Providers" },
-  { to: "/manage/workers", label: "Workers" },
+  { to: "/settings/workers", label: "Workers" },
+  { to: "/settings/runs", label: "History" },
+  { to: "/settings/capabilities", label: "Capabilities" },
+  { to: "/settings/providers", label: "AI Providers" },
 ];
 
-const VALID_TABS = new Set([
-  "runs",
-  "schedules",
-  "capabilities",
-  "providers",
-  "workers",
-  "approvals",
-]);
+const VALID_TABS = new Set(["runs", "capabilities", "providers", "workers"]);
 
 export default function Manage() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
-  // Bare /manage → default to History (the most useful tab in practice).
+  // Bare /settings → the worker this machine contributes.
   useEffect(() => {
-    if (pathname === "/manage" || pathname === "/manage/") {
-      navigate("/manage/runs", { replace: true });
+    if (pathname === "/settings" || pathname === "/settings/") {
+      navigate("/settings/workers", { replace: true });
     }
   }, [pathname, navigate]);
 
-  // `openManage(tab)` emits this when the manage window was already
+  // `openSettings(tab)` emits this when the settings window was already
   // open — flip to the requested tab instead of leaving the user on
   // whichever one they last touched.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
-    listen<{ tab: string }>("manage:set-tab", (e) => {
+    listen<{ tab: string }>("settings:set-tab", (e) => {
       const tab = e.payload?.tab;
       if (tab && VALID_TABS.has(tab)) {
-        navigate(`/manage/${tab}`);
+        navigate(`/settings/${tab}`);
       }
     })
       .then((fn) => {
@@ -63,7 +53,7 @@ export default function Manage() {
 
   return (
     <div className="manage">
-      <nav className="manage-tabs" aria-label="Manage sections">
+      <nav className="manage-tabs" aria-label="Settings sections">
         {TABS.map((t) => (
           <NavLink
             key={t.to}

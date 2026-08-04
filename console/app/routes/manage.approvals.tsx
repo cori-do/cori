@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { useRevalidator } from "react-router";
+import { useCallback, useEffect, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   decideApproval,
@@ -16,7 +15,7 @@ export function meta() {
   return [{ title: "Inbox — Cori" }];
 }
 
-interface InboxData {
+export interface InboxData {
   pending: ApprovalRequest[];
   decided: ApprovalDecisionEntry[];
 }
@@ -30,17 +29,38 @@ export async function clientLoader(): Promise<InboxData> {
 }
 
 export default function Approvals({ loaderData }: { loaderData: InboxData }) {
-  const revalidator = useRevalidator();
-  const [pending, setPending] = useState(loaderData.pending);
+  return <Inbox initialData={loaderData} />;
+}
+
+/**
+ * Reusable inbox content. It owns its refresh cycle so the same view can
+ * live in the launcher without depending on a route loader revalidation.
+ */
+export function Inbox({ initialData }: { initialData?: InboxData }) {
+  const [data, setData] = useState<InboxData>(
+    initialData ?? { pending: [], decided: [] },
+  );
+  const [loading, setLoading] = useState(initialData === undefined);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [pending, decided] = await Promise.all([
+        listApprovals().catch(() => [] as ApprovalRequest[]),
+        listDecidedApprovals().catch(() => [] as ApprovalDecisionEntry[]),
+      ]);
+      setData({ pending, decided });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   // Live updates: the Rust watcher emits on every change to pending/.
   useEffect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
-    onApprovalsChanged((p) => {
-      if (cancelled) return;
-      setPending(p);
-      revalidator.revalidate(); // refresh the decided history too
+    if (initialData === undefined) void refresh();
+    onApprovalsChanged(() => {
+      if (!cancelled) void refresh();
     })
       .then((fn) => {
         if (cancelled) fn();
@@ -51,7 +71,11 @@ export default function Approvals({ loaderData }: { loaderData: InboxData }) {
       cancelled = true;
       unlisten?.();
     };
-  }, [revalidator]);
+  }, [initialData, refresh]);
+
+  if (loading) {
+    return <div className="empty">Loading inbox…</div>;
+  }
 
   return (
     <>
@@ -62,16 +86,18 @@ export default function Approvals({ loaderData }: { loaderData: InboxData }) {
         auto-approves.
       </p>
 
-      {pending.length === 0 ? (
+      {data.pending.length === 0 ? (
         <div className="empty">Nothing waiting on you. 🎉</div>
       ) : (
-        pending.map((a) => <PendingCard key={a.nonce} approval={a} />)
+        data.pending.map((a) => (
+          <PendingCard key={a.nonce} approval={a} onDecided={refresh} />
+        ))
       )}
 
-      {loaderData.decided.length > 0 && (
+      {data.decided.length > 0 && (
         <>
           <h2>Recently decided</h2>
-          {loaderData.decided.map((d) => (
+          {data.decided.map((d) => (
             <div className="card decided-row" key={`${d.nonce}-${d.decided_at}`}>
               <span className={`pill ${d.decision === "approved" ? "ok" : "muted"}`}>
                 {d.decision}
@@ -88,13 +114,20 @@ export default function Approvals({ loaderData }: { loaderData: InboxData }) {
   );
 }
 
-function PendingCard({ approval: a }: { approval: ApprovalRequest }) {
+function PendingCard({
+  approval: a,
+  onDecided,
+}: {
+  approval: ApprovalRequest;
+  onDecided: () => void | Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
   const decide = (approved: boolean) => {
     setBusy(true);
     // The watcher event removes the card; on error just re-enable
     // (the item may have expired meanwhile).
     decideApproval(a.nonce, approved)
+      .then(() => onDecided())
       .catch(() => {})
       .finally(() => setBusy(false));
   };

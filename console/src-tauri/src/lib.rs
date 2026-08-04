@@ -237,6 +237,7 @@ pub fn run() {
             browse::peek_source,
             browse::list_dir,
             browse::get_last_local_dir,
+            browse::nearest_existing_directory,
             remote_browse::list_remote_workflows,
             trigger::resolve_workflow,
             trigger::start_run,
@@ -258,19 +259,15 @@ pub fn run() {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Open launcher", true, None::<&str>)?;
-    let approvals = MenuItem::with_id(app, "open_approvals", "Approvals…", true, None::<&str>)?;
-    let history = MenuItem::with_id(app, "open_history", "History…", true, None::<&str>)?;
+    let workflows = MenuItem::with_id(app, "open_workflows", "Workflows", true, None::<&str>)?;
+    let inbox = MenuItem::with_id(app, "open_inbox", "Inbox", true, None::<&str>)?;
     let schedules = MenuItem::with_id(app, "open_schedules", "Schedules…", true, None::<&str>)?;
-    let workers = MenuItem::with_id(app, "open_workers", "Workers…", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "open_settings", "Settings…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Cori", true, None::<&str>)?;
-    let sep_top = PredefinedMenuItem::separator(app)?;
     let sep_bot = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[
-            &show, &sep_top, &approvals, &history, &schedules, &workers, &sep_bot, &quit,
-        ],
+        &[&workflows, &inbox, &schedules, &settings, &sep_bot, &quit],
     )?;
 
     let tray_icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
@@ -282,11 +279,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         // platform's secondary gesture (right-click on macOS/Win/Linux).
         .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id().as_ref() {
-            "show" => focus_or_show_launcher(app),
-            "open_approvals" => emit_open_manage(app, "approvals"),
-            "open_history" => emit_open_manage(app, "runs"),
-            "open_schedules" => emit_open_manage(app, "schedules"),
-            "open_workers" => emit_open_manage(app, "workers"),
+            "open_workflows" => emit_open_launcher_section(app, "workflows"),
+            "open_inbox" => emit_open_launcher_section(app, "inbox"),
+            "open_schedules" => emit_open_launcher_section(app, "schedules"),
+            "open_settings" => emit_open_settings(app, "workers"),
             "quit" => initiate_quit(app),
             _ => {}
         })
@@ -352,14 +348,21 @@ fn focus_or_show_launcher(app: &AppHandle) {
     }
 }
 
-/// Tray menu's History / Schedules / Workers items. Emits
-/// `tray:open-manage` with the requested tab — the launcher (always
-/// running, even when hidden) catches it and calls `openManage(tab)`.
-/// We don't focus the launcher here: the user asked for a specific
-/// tab, not the launcher itself.
-fn emit_open_manage(app: &AppHandle, tab: &str) {
-    if let Err(e) = app.emit("tray:open-manage", serde_json::json!({ "tab": tab })) {
-        warn!(error = %e, "could not emit tray:open-manage");
+/// Surface one of the launcher's three in-place sections.
+fn emit_open_launcher_section(app: &AppHandle, section: &str) {
+    focus_or_show_launcher(app);
+    if let Err(e) = app.emit(
+        "launcher:set-section",
+        serde_json::json!({ "section": section }),
+    ) {
+        warn!(error = %e, "could not emit launcher:set-section");
+    }
+}
+
+/// Settings is the only menu destination that opens another window.
+fn emit_open_settings(app: &AppHandle, tab: &str) {
+    if let Err(e) = app.emit("tray:open-settings", serde_json::json!({ "tab": tab })) {
+        warn!(error = %e, "could not emit tray:open-settings");
     }
 }
 

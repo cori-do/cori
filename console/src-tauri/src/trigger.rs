@@ -56,10 +56,11 @@ pub async fn resolve_workflow(
     update: Option<bool>,
 ) -> IpcResult<WorkflowPreflight> {
     let update = update.unwrap_or(false);
+    let error_source = source.clone();
     let outcome = tokio::task::spawn_blocking(move || preflight(&source, update, false))
         .await
         .map_err(|e| IpcError::Internal(anyhow::anyhow!("preflight task join: {e}")))?
-        .map_err(IpcError::Internal)?;
+        .map_err(|error| classify_preflight_error(error, error_source))?;
 
     if let Some(cr) = outcome.consent_required {
         return Err(IpcError::ConsentRequired(ConsentDetails {
@@ -72,6 +73,45 @@ pub async fn resolve_workflow(
     }
 
     Ok(build_preflight_payload(outcome))
+}
+
+/// Keep expected, recoverable workflow failures out of the Console's generic
+/// error renderer. The UI deliberately does not need to know about anyhow's
+/// context chain or broker validation internals.
+fn classify_preflight_error(error: anyhow::Error, source: String) -> IpcError {
+    let resolving_workflow_path = error
+        .chain()
+        .any(|cause| cause.to_string().starts_with("resolving workflow path `"));
+    let path_not_found = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if resolving_workflow_path && path_not_found {
+        return IpcError::WorkflowMissing(source);
+    }
+
+    let invalid_typescript = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<cori_broker::runtime::StepValidationError>(),
+            Some(
+                cori_broker::runtime::StepValidationError::Failed { .. }
+                    | cori_broker::runtime::StepValidationError::Graph(_)
+                    | cori_broker::runtime::StepValidationError::GraphEscape { .. }
+            )
+        )
+    });
+    let invalid_source = error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.starts_with("compile errors:")
+            || message.starts_with("no `manifest.md` in `")
+            || message.ends_with("is not a directory")
+    });
+    if invalid_typescript || invalid_source {
+        return IpcError::WorkflowInvalid(source);
+    }
+
+    IpcError::Internal(error)
 }
 
 fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
@@ -349,5 +389,34 @@ fn kind_label_step(k: &StepKind) -> &'static str {
         StepKind::Code => "code",
         StepKind::Llm => "llm",
         StepKind::Builtin => "builtin",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_workflow_path_gets_a_recoverable_error_code() {
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("resolving workflow path `/missing/example`");
+
+        assert!(matches!(
+            classify_preflight_error(error, "/missing/example".into()),
+            IpcError::WorkflowMissing(source) if source == "/missing/example"
+        ));
+    }
+
+    #[test]
+    fn invalid_module_graph_gets_a_remake_error_code() {
+        let error = anyhow::Error::new(cori_broker::runtime::StepValidationError::Graph(
+            "unsupported specifier `vitest`".into(),
+        ))
+        .context("validating workflow TypeScript modules");
+
+        assert!(matches!(
+            classify_preflight_error(error, "/workflows/example".into()),
+            IpcError::WorkflowInvalid(source) if source == "/workflows/example"
+        ));
     }
 }
