@@ -101,7 +101,10 @@ fn login_authless_cli(capability: &str, spec: &install::InstallSpec) -> Result<(
             );
         }
         None => {
-            println!("`{capability}` is not installed — installing {}…", spec.display_name);
+            println!(
+                "`{capability}` is not installed — installing {}…",
+                spec.display_name
+            );
             let path = install::install(capability)
                 .with_context(|| format!("installing `{capability}`"))?;
             println!("✓ Installed to {} — no sign-in required.", path.display());

@@ -58,7 +58,8 @@ pub fn list(json: bool) -> Result<()> {
         .map(|status| {
             let managed_login = cli_auth::for_binary(&status.id)
                 .and_then(|a| {
-                    cli_auth::resolve_client(&status.id, None).and_then(|c| a.managed_login(&c, &[]))
+                    cli_auth::resolve_client(&status.id, None)
+                        .and_then(|c| a.managed_login(&c, &[]))
                 })
                 .is_some();
             CapabilityRow {

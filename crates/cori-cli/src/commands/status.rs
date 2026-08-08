@@ -124,7 +124,10 @@ fn print_registry() {
     println!();
     println!("Installable capabilities (not on this machine):");
     for c in missing {
-        println!("  · {:<10} {} — use for: {}", c.id, c.display_name, c.use_for);
+        println!(
+            "  · {:<10} {} — use for: {}",
+            c.id, c.display_name, c.use_for
+        );
         if let Some(remedy) = c.remedy {
             println!("               → {remedy}");
         }

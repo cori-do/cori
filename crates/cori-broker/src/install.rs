@@ -351,9 +351,8 @@ fn install_raw_binary(spec: &InstallSpec) -> Result<PathBuf> {
         ),
     };
     let body = fetch(&api_url)?;
-    let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-        InstallError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    })?;
+    let json: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
     let entry = json
         .get("assets")
