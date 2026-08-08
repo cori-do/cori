@@ -64,14 +64,95 @@ pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials)
 }
 
 fn discover_clis(wanted: &[String]) -> BTreeMap<String, PathBuf> {
+    // Registry capabilities are always probed in addition to the
+    // caller's wanted set: a worker advertises every installed
+    // Cori-blessed binary, and `cori status` / the MCP `status` tool
+    // surface them without the caller having to know the registry.
+    let mut names: BTreeSet<&str> = wanted.iter().map(String::as_str).collect();
+    names.extend(crate::install::REGISTRY.iter().map(|s| s.id));
+
     let mut out = BTreeMap::new();
-    for name in wanted {
+    for name in names {
         // PATH first, then Cori-managed installs in `~/.cori/bin`.
         if let Some(p) = crate::install::resolve_binary(name) {
-            out.insert(name.clone(), p);
+            out.insert(name.to_string(), p);
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Registry advertisement — the one artifact every consumer derives from.
+// ---------------------------------------------------------------------------
+
+/// Advertisement row for one registry capability, installed or not.
+///
+/// This is what makes capability discovery *dynamic* for agents: `cori
+/// status`, the MCP `status` tool, and `cori capability list --json`
+/// all render this same struct, so adding a capability to
+/// [`crate::install::REGISTRY`] advertises it everywhere at once — no
+/// skill-prose edits, no per-consumer sidecars.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryCapability {
+    /// Capability id == executable name (`gws`, `anydoc`, `lightpanda`).
+    pub id: String,
+    pub display_name: String,
+    /// Full human-facing detail (the Console tooltip text).
+    pub details: String,
+    /// One agent-facing line: when to reach for this capability.
+    pub use_for: String,
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The capability has a sign-in step. `false` == installed is ready.
+    pub requires_auth: bool,
+    /// Auth probe result; `None` when not installed or auth-free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authed: Option<bool>,
+    /// The one command that makes this capability ready, when it isn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+/// Snapshot the capability registry with per-entry install and auth
+/// state. Includes entries that are *not* installed — advertising what
+/// could be one command away is the point.
+pub fn registry_status() -> Vec<RegistryCapability> {
+    crate::install::REGISTRY
+        .iter()
+        .map(|spec| {
+            let path = crate::install::resolve_binary(spec.id);
+            let installed = path.is_some();
+            let requires_auth = crate::cli_auth::for_binary(spec.id).is_some();
+            let authed = if installed && requires_auth {
+                match crate::cli_auth::check_known(spec.id) {
+                    crate::cli_auth::AuthState::Ok => Some(true),
+                    crate::cli_auth::AuthState::NeedsReauth { .. } => Some(false),
+                    crate::cli_auth::AuthState::Unknown => None,
+                }
+            } else {
+                None
+            };
+            let remedy = if !installed {
+                Some(format!("cori capability install {}", spec.id))
+            } else if authed == Some(false) {
+                Some(format!("cori login {}", spec.id))
+            } else {
+                None
+            };
+            RegistryCapability {
+                id: spec.id.to_string(),
+                display_name: spec.display_name.to_string(),
+                details: spec.details.to_string(),
+                use_for: spec.use_for.to_string(),
+                installed,
+                path: path.map(|p| p.display().to_string()),
+                requires_auth,
+                authed,
+                remedy,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]

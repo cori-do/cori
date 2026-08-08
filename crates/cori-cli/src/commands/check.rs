@@ -267,9 +267,15 @@ fn build_capability_readiness(
         let entry = lookup(cli);
         let authed = present && entry.map(|c| c.authed).unwrap_or(true);
         let remedy = if !present {
-            Some(format!(
-                "`{cli}` is not installed on this machine — install it and re-check"
-            ))
+            // Registry capabilities have a one-command install; anything
+            // else is the user's own binary.
+            if cori_broker::install::spec_for(cli).is_some() {
+                Some(format!("cori capability install {cli}"))
+            } else {
+                Some(format!(
+                    "`{cli}` is not installed on this machine — install it and re-check"
+                ))
+            }
         } else if !authed {
             Some(format!("cori login {cli}"))
         } else {

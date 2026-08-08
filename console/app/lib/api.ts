@@ -332,12 +332,16 @@ export const getStackStatus = () => call<StackStatus>("get_stack_status");
 export interface CapabilityInfo {
   id: string;
   display_name: string;
+  /** Full human-facing detail, rendered as the card's tooltip. */
+  details: string;
   installed: boolean;
   path?: string;
   /** undefined == probe could not run (not installed / no adapter). */
   authed?: boolean;
   /** Connect can run end-to-end from the Console. */
   connectable: boolean;
+  /** false == auth-free capability: installed means ready, Connect == install. */
+  requires_auth: boolean;
 }
 
 export const listCapabilities = () =>

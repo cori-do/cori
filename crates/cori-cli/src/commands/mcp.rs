@@ -397,10 +397,15 @@ fn tool_definitions() -> JsonValue {
         },
         {
             "name": "status",
-            "title": "Machine status",
+            "title": "Machine status & capability discovery",
             "description": "Temporal endpoint reachability, identity, discovered \
-                capabilities with auth state, and workers seen on the cluster. \
-                Mirrors `cori status`.",
+                capabilities with auth state, workers seen on the cluster, and \
+                the capability registry (`capability_registry`): every \
+                Cori-blessed CLI binary — installed or one command away — with \
+                a `use_for` line saying when to reach for it. Call this before \
+                designing workflow steps that touch documents, the web, or an \
+                external system, and prefer a registry capability over \
+                hand-rolled code. Mirrors `cori status`.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])
@@ -628,6 +633,11 @@ fn tool_status() -> Result<JsonValue> {
             "authed": c.authed,
             "detail": c.detail,
         })).collect::<Vec<_>>(),
+        // The Cori-blessed capability registry, installed or not: what
+        // each binary is for and the one command that makes it ready.
+        // Design-time agents should prefer these over hand-rolled code
+        // (a curl pipeline, a Python document parser) when one fits.
+        "capability_registry": capabilities::registry_status(),
         "workers_seen": cluster.reports.iter().map(|r| json!({
             "task_queue": r.task_queue,
             "kind": match &r.identity {

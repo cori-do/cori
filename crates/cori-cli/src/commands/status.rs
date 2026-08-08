@@ -48,6 +48,7 @@ pub fn status() -> Result<()> {
     print_identity(&identity, &queue);
     println!();
     print_capabilities(&self_report);
+    print_registry();
     println!();
     print_cluster(&cluster, &queue);
     println!();
@@ -106,6 +107,31 @@ fn print_capability(c: &Capability) {
         String::new()
     };
     println!("  {marker} {id:<10} ({kind}{detail}){hint}", id = c.id,);
+}
+
+/// Registry capabilities that are *not* on this machine — each is one
+/// command away, so advertise them instead of leaving agents (and
+/// humans) to hand-roll what a blessed binary already does. Installed
+/// entries already appear in [`print_capabilities`].
+fn print_registry() {
+    let missing: Vec<_> = capabilities::registry_status()
+        .into_iter()
+        .filter(|c| !c.installed)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    println!();
+    println!("Installable capabilities (not on this machine):");
+    for c in missing {
+        println!(
+            "  · {:<10} {} — use for: {}",
+            c.id, c.display_name, c.use_for
+        );
+        if let Some(remedy) = c.remedy {
+            println!("               → {remedy}");
+        }
+    }
 }
 
 fn print_cluster(cluster: &planner::ClusterView, this_queue: &str) {
