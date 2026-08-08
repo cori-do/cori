@@ -45,9 +45,9 @@ export default function Capabilities({
   return (
     <>
       <p className="hint" style={{ marginTop: 0 }}>
-        Tools Cori can install and sign in to for you. Connecting opens
-        your browser for the provider's consent screen — nothing else to
-        set up.
+        Tools Cori can install and sign in to for you. Where a provider
+        requires sign-in, connecting opens your browser for its consent
+        screen; auth-free tools are ready as soon as they're installed.
       </p>
 
       {caps.length === 0 ? (
@@ -59,12 +59,19 @@ export default function Capabilities({
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h3 style={{ margin: 0, display: "flex", alignItems: "baseline", gap: 8 }}>
                   {c.display_name}
+                  <span
+                    className="tooltip-trigger"
+                    tabIndex={0}
+                    aria-label={`About ${c.display_name}`}
+                    style={{ fontSize: "0.85em" }}
+                  >
+                    ⓘ
+                    <span role="tooltip" className="tooltip-body">
+                      {c.details}
+                    </span>
+                  </span>
                   <StatePill cap={c} busy={connecting === c.id} />
                 </h3>
-                <div className="hint" style={{ marginTop: 4 }}>
-                  <code>{c.id}</code>
-                  {c.path ? <> — <code>{c.path}</code></> : " — not installed yet"}
-                </div>
               </div>
               <ConnectButton
                 cap={c}
@@ -75,8 +82,9 @@ export default function Capabilities({
             </div>
             {connecting === c.id && (
               <p className="hint" style={{ marginBottom: 0 }}>
-                Waiting for the browser sign-in to finish… complete the
-                consent screen, then come back here.
+                {c.requires_auth
+                  ? "Waiting for the browser sign-in to finish… complete the consent screen, then come back here."
+                  : "Installing…"}
               </p>
             )}
             {errors[c.id] ? (
@@ -92,8 +100,16 @@ export default function Capabilities({
 }
 
 function StatePill({ cap, busy }: { cap: CapabilityInfo; busy: boolean }) {
-  if (busy) return <span className="pill warn">connecting…</span>;
+  if (busy) {
+    return (
+      <span className="pill warn">
+        {cap.requires_auth ? "connecting…" : "installing…"}
+      </span>
+    );
+  }
   if (!cap.installed) return <span className="pill muted">not installed</span>;
+  // Auth-free capability: installed is ready — there is no sign-in state.
+  if (!cap.requires_auth) return <span className="pill ok">ready</span>;
   if (cap.authed === true) return <span className="pill ok">connected</span>;
   if (cap.authed === false) return <span className="pill warn">signed out</span>;
   return <span className="pill muted">installed</span>;
@@ -110,6 +126,15 @@ function ConnectButton({
   anyBusy: boolean;
   onConnect: () => void;
 }) {
+  // Auth-free capability: the only action is installing.
+  if (!cap.requires_auth) {
+    if (cap.installed) return null;
+    return (
+      <button className="btn primary" disabled={anyBusy} onClick={onConnect}>
+        {busy ? "Installing…" : "Install"}
+      </button>
+    );
+  }
   if (cap.authed === true) {
     return (
       <button className="btn" disabled={anyBusy} onClick={onConnect}>

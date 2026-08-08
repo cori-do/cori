@@ -35,28 +35,38 @@ pub fn install_capability(id: &str) -> Result<()> {
     );
     let path = install::install(id)?;
     println!("✓ Installed to {}", path.display());
-    println!("  Next: `cori login {id}` to sign in.");
+    if cli_auth::for_binary(id).is_some() {
+        println!("  Next: `cori login {id}` to sign in.");
+    } else {
+        println!("  No sign-in required — ready to use.");
+    }
     Ok(())
 }
 
 #[derive(Serialize)]
 struct CapabilityRow {
-    id: String,
-    display_name: String,
-    installed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    /// `true` / `false` from the auth probe; `None` when the probe
-    /// could not run (binary missing or no adapter).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    authed: Option<bool>,
+    #[serde(flatten)]
+    status: cori_broker::capabilities::RegistryCapability,
     /// A managed `cori login` can drive sign-in end-to-end (an OAuth
     /// client is provisioned or provisionable in this build).
     managed_login: bool,
 }
 
 pub fn list(json: bool) -> Result<()> {
-    let rows: Vec<CapabilityRow> = install::REGISTRY.iter().map(row_for).collect();
+    let rows: Vec<CapabilityRow> = cori_broker::capabilities::registry_status()
+        .into_iter()
+        .map(|status| {
+            let managed_login = cli_auth::for_binary(&status.id)
+                .and_then(|a| {
+                    cli_auth::resolve_client(&status.id, None).and_then(|c| a.managed_login(&c, &[]))
+                })
+                .is_some();
+            CapabilityRow {
+                status,
+                managed_login,
+            }
+        })
+        .collect();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -64,55 +74,30 @@ pub fn list(json: bool) -> Result<()> {
     }
 
     for r in &rows {
-        let state = match (r.installed, r.authed) {
+        let s = &r.status;
+        let state = match (s.installed, s.authed) {
             (false, _) => "not installed".to_string(),
             (true, Some(true)) => "installed, signed in".to_string(),
             (true, Some(false)) => "installed, signed out".to_string(),
             (true, None) => "installed".to_string(),
         };
-        let mark = if r.installed && r.authed == Some(true) {
+        // Installed is ready unless an auth probe says signed out
+        // (auth-free capabilities have no probe and no sign-in step).
+        let mark = if s.installed && s.authed != Some(false) {
             "✓"
         } else {
             "·"
         };
-        println!("{mark} {:<6} {:<24} {state}", r.id, r.display_name);
-        if let Some(p) = &r.path {
+        println!("{mark} {:<11} {:<56} {state}", s.id, s.display_name);
+        println!("         use for: {}", s.use_for);
+        if let Some(p) = &s.path {
             println!("         {p}");
         }
-        if !r.installed {
-            println!("         install: cori capability install {}", r.id);
-        } else if r.authed == Some(false) {
-            println!("         sign in: cori login {}", r.id);
+        if let Some(remedy) = &s.remedy {
+            println!("         → {remedy}");
         }
     }
     Ok(())
-}
-
-fn row_for(spec: &install::InstallSpec) -> CapabilityRow {
-    let path = install::resolve_binary(spec.id);
-    let installed = path.is_some();
-    let authed = if installed {
-        match cli_auth::check_known(spec.id) {
-            cli_auth::AuthState::Ok => Some(true),
-            cli_auth::AuthState::NeedsReauth { .. } => Some(false),
-            cli_auth::AuthState::Unknown => None,
-        }
-    } else {
-        None
-    };
-    let managed_login = cli_auth::for_binary(spec.id)
-        .and_then(|a| {
-            cli_auth::resolve_client(spec.id, None).and_then(|c| a.managed_login(&c, &[]))
-        })
-        .is_some();
-    CapabilityRow {
-        id: spec.id.to_string(),
-        display_name: spec.display_name.to_string(),
-        installed,
-        path: path.map(|p| p.display().to_string()),
-        authed,
-        managed_login,
-    }
 }
 
 fn known_ids() -> Vec<&'static str> {
