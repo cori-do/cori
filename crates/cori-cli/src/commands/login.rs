@@ -5,18 +5,28 @@
 //!
 //! 1. `cori-sap` always replaces the owner- and canonical-target-bound access
 //!    token in the OS keychain; it fails closed when no keychain is available.
-//!    No token is delegated through a vendor CLI. Other known CLI adapters
-//!    receive Cori's provisioned OAuth client when one is available.
-//! 2. If `<capability>` is an LLM provider (`openai`, `anthropic`,
+//!    No token is delegated through a vendor CLI.
+//! 2. If `<capability>` matches another known [`cori_broker::cli_auth`]
+//!    adapter (currently: `gws`), run the **managed login**: install
+//!    the binary if missing (built-in [`cori_broker::install`]
+//!    registry), provision the Cori-owned OAuth client into the
+//!    vendor's config if the adapter supports it, then delegate to the
+//!    vendor's own `<cli> auth login` (which opens the browser and owns
+//!    token refresh). Without a provisioned client we fall back to
+//!    printing the manual hint — Cori never fakes the vendor's flow.
+//! 3. If `<capability>` is a registry capability with no auth adapter
+//!    (`anydoc`, `lightpanda`), there is nothing to sign in to:
+//!    install the binary if missing and confirm readiness.
+//! 4. If `<capability>` is an LLM provider (`openai`, `anthropic`,
 //!    `gemini`), prompt for an API key with hidden input and store it
 //!    in the shared secret store ([`cori_secrets`]): OS keychain,
 //!    file fallback on headless machines. Env vars still take
 //!    precedence at run time. The desktop app writes to the same
 //!    store, so keys set either way are visible everywhere.
-//! 3. Otherwise, treat `<capability>` as an MCP server id. Look up its
+//! 5. Otherwise, treat `<capability>` as an MCP server id. Look up its
 //!    `oauth` block in `~/.cori/mcp-servers.json` and run the
 //!    [`pkce`][cori_broker::oauth::pkce] flow. The resulting [`Token`]
-//!    is stored in the OS keychain (or a `0600` plaintext file fallback)
+//!    is stored in the OS keychain (or the encrypted-file fallback)
 //!    keyed by `(server_id, Owner::User(<os user>))`.
 //!
 //! MCP OAuth is idempotent while an existing token is valid. SAP and LLM
@@ -47,12 +57,20 @@ pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
         return login_sap(stdin_key);
     }
 
-    // 1. Known-CLI adapter? Run the managed login flow.
+    // 2. Known-CLI adapter? Run the managed login flow.
     if let Some(adapter) = cli_auth::for_binary(capability) {
         return login_managed_cli(capability, adapter);
     }
 
-    // 2. LLM provider? Prompt for an API key and store it in the
+    // 3. Registry capability without an auth adapter (anydoc,
+    //    lightpanda, …)? Nothing to sign in to — install it if missing
+    //    so `cori login <id>` stays the one command that makes any
+    //    capability ready.
+    if let Some(spec) = install::spec_for(capability) {
+        return login_authless_cli(capability, spec);
+    }
+
+    // 4. LLM provider? Prompt for an API key and store it in the
     //    shared secret store.
     match capability {
         "openai" => return login_llm_provider("openai", stdin_key),
@@ -61,7 +79,7 @@ pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
         _ => {}
     }
 
-    // 3. MCP server with OAuth metadata.
+    // 5. MCP server with OAuth metadata.
     let home = paths::home()?;
     let servers = discover_mcp_for_login(&home);
     let server_cfg = servers.get(capability).ok_or_else(|| {
@@ -139,8 +157,32 @@ fn current_user_id() -> Result<String> {
     }
 }
 
-/// CLI login: install if managed → provision the Cori-owned OAuth client →
-/// sign in → re-probe.
+/// Auth-free registry capability: `cori login` degrades to "make sure
+/// it is installed". No credentials, no browser, no token store.
+fn login_authless_cli(capability: &str, spec: &install::InstallSpec) -> Result<()> {
+    match install::resolve_binary(capability) {
+        Some(path) => {
+            println!(
+                "✓ {} is installed at {} — no sign-in required.",
+                spec.display_name,
+                path.display()
+            );
+        }
+        None => {
+            println!(
+                "`{capability}` is not installed — installing {}…",
+                spec.display_name
+            );
+            let path = install::install(capability)
+                .with_context(|| format!("installing `{capability}`"))?;
+            println!("✓ Installed to {} — no sign-in required.", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// Managed CLI login: install if missing → provision the Cori-owned
+/// OAuth client → delegate to the vendor's own sign-in → re-probe.
 fn login_managed_cli(capability: &str, adapter: &dyn cli_auth::CliAuthAdapter) -> Result<()> {
     // Already signed in? Done.
     if matches!(adapter.check(), cli_auth::AuthState::Ok) {

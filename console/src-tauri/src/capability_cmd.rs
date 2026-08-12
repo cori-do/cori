@@ -20,6 +20,8 @@ use crate::error::{IpcError, IpcResult};
 pub struct CapabilityInfo {
     pub id: String,
     pub display_name: String,
+    /// Full human-facing detail, rendered as the card's tooltip.
+    pub details: String,
     pub installed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -27,8 +29,13 @@ pub struct CapabilityInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authed: Option<bool>,
     /// Connect can run end-to-end from the Console (install recipe +
-    /// provisionable OAuth client + managed adapter).
+    /// provisionable OAuth client + managed adapter, or nothing to
+    /// sign in to at all).
     pub connectable: bool,
+    /// The capability has an auth adapter (sign-in step). `false` for
+    /// auth-free capabilities (anydoc, lightpanda) where installed ==
+    /// ready and Connect == install.
+    pub requires_auth: bool,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -48,8 +55,15 @@ pub async fn connect_capability(id: String) -> IpcResult<CapabilityInfo> {
 fn connect_blocking(id: &str) -> IpcResult<CapabilityInfo> {
     let spec = install::spec_for(id)
         .ok_or_else(|| IpcError::BadRequest(format!("unknown capability `{id}`")))?;
-    let adapter = cli_auth::for_binary(id)
-        .ok_or_else(|| IpcError::BadRequest(format!("capability `{id}` has no managed sign-in")))?;
+
+    // Auth-free capability (anydoc, lightpanda): Connect == install.
+    let Some(adapter) = cli_auth::for_binary(id) else {
+        if install::resolve_binary(id).is_none() {
+            install::install(id)
+                .map_err(|e| IpcError::Internal(anyhow::anyhow!("installing `{id}`: {e}")))?;
+        }
+        return Ok(info_for(spec));
+    };
 
     // Already signed in? Refresh state and return.
     if matches!(adapter.check(), AuthState::Ok) {
@@ -110,7 +124,10 @@ fn resolve_plan(
 fn info_for(spec: &install::InstallSpec) -> CapabilityInfo {
     let path = install::resolve_binary(spec.id);
     let installed = path.is_some();
-    let authed = if installed {
+    // Auth state only means something when the capability has an auth
+    // adapter; auth-free capabilities report `null` so the UI shows
+    // "installed", not "signed in".
+    let authed = if installed && cli_auth::for_binary(spec.id).is_some() {
         match cli_auth::check_known(spec.id) {
             AuthState::Ok => Some(true),
             AuthState::NeedsReauth { .. } => Some(false),
@@ -119,15 +136,19 @@ fn info_for(spec: &install::InstallSpec) -> CapabilityInfo {
     } else {
         None
     };
-    let connectable = cli_auth::for_binary(spec.id)
-        .map(|a| resolve_plan(spec.id, a).is_some())
-        .unwrap_or(false);
+    // Auth-free capabilities are always connectable: Connect == install.
+    let connectable = match cli_auth::for_binary(spec.id) {
+        Some(a) => resolve_plan(spec.id, a).is_some(),
+        None => true,
+    };
     CapabilityInfo {
         id: spec.id.to_string(),
         display_name: spec.display_name.to_string(),
+        details: spec.details.to_string(),
         installed,
         path: path.map(|p| p.display().to_string()),
         authed,
         connectable,
+        requires_auth: cli_auth::for_binary(spec.id).is_some(),
     }
 }

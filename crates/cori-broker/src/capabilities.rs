@@ -42,10 +42,11 @@ impl Capabilities {
 }
 
 /// Discover capabilities. `home` is the Cori home directory
-/// (`~/.cori/`); `wanted_clis` is the set of CLI binary names the caller
-/// cares about — only those are probed so we don't enumerate PATH for
-/// nothing. `llm_creds` is the credential set the CLI resolved from
-/// config + env; we report any provider whose key is present.
+/// (`~/.cori/`); `wanted_clis` is the set of workflow CLI requirements.
+/// Those names and every registry capability are probed, while linked
+/// capabilities such as `cori-sap` are tracked separately from PATH binaries.
+/// `llm_creds` is the credential set the CLI resolved from config + env; we
+/// report any provider whose key is present.
 pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials) -> Capabilities {
     let (cli_binaries, built_in_clis) = discover_clis(wanted_clis);
     let mcp_servers = discover_mcp(home);
@@ -68,19 +69,99 @@ pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials)
 }
 
 fn discover_clis(wanted: &[String]) -> (BTreeMap<String, PathBuf>, BTreeSet<String>) {
+    // Registry capabilities are always probed in addition to the caller's
+    // wanted set. This lets status surfaces advertise installed Cori-managed
+    // tools without conflating linked capabilities with PATH executables.
+    let mut names: BTreeSet<&str> = wanted.iter().map(String::as_str).collect();
+    names.extend(crate::install::REGISTRY.iter().map(|spec| spec.id));
+
     let mut binaries = BTreeMap::new();
     let mut built_ins = BTreeSet::new();
-    for name in wanted {
+    for name in names {
         if name == "cori-sap" {
-            built_ins.insert(name.clone());
+            built_ins.insert(name.to_string());
             continue;
         }
         // PATH first, then Cori-managed installs in `~/.cori/bin`.
         if let Some(p) = crate::install::resolve_binary(name) {
-            binaries.insert(name.clone(), p);
+            binaries.insert(name.to_string(), p);
         }
     }
     (binaries, built_ins)
+}
+
+// ---------------------------------------------------------------------------
+// Registry advertisement — the one artifact every consumer derives from.
+// ---------------------------------------------------------------------------
+
+/// Advertisement row for one registry capability, installed or not.
+///
+/// This is what makes capability discovery *dynamic* for agents: `cori
+/// status`, the MCP `status` tool, and `cori capability list --json`
+/// all render this same struct, so adding a capability to
+/// [`crate::install::REGISTRY`] advertises it everywhere at once — no
+/// skill-prose edits, no per-consumer sidecars.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryCapability {
+    /// Capability id == executable name (`gws`, `anydoc`, `lightpanda`).
+    pub id: String,
+    pub display_name: String,
+    /// Full human-facing detail (the Console tooltip text).
+    pub details: String,
+    /// One agent-facing line: when to reach for this capability.
+    pub use_for: String,
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The capability has a sign-in step. `false` == installed is ready.
+    pub requires_auth: bool,
+    /// Auth probe result; `None` when not installed or auth-free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authed: Option<bool>,
+    /// The one command that makes this capability ready, when it isn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+/// Snapshot the capability registry with per-entry install and auth
+/// state. Includes entries that are *not* installed — advertising what
+/// could be one command away is the point.
+pub fn registry_status() -> Vec<RegistryCapability> {
+    crate::install::REGISTRY
+        .iter()
+        .map(|spec| {
+            let path = crate::install::resolve_binary(spec.id);
+            let installed = path.is_some();
+            let requires_auth = crate::cli_auth::for_binary(spec.id).is_some();
+            let authed = if installed && requires_auth {
+                match crate::cli_auth::check_known(spec.id) {
+                    crate::cli_auth::AuthState::Ok => Some(true),
+                    crate::cli_auth::AuthState::NeedsReauth { .. } => Some(false),
+                    crate::cli_auth::AuthState::Unknown => None,
+                }
+            } else {
+                None
+            };
+            let remedy = if !installed {
+                Some(format!("cori capability install {}", spec.id))
+            } else if authed == Some(false) {
+                Some(format!("cori login {}", spec.id))
+            } else {
+                None
+            };
+            RegistryCapability {
+                id: spec.id.to_string(),
+                display_name: spec.display_name.to_string(),
+                details: spec.details.to_string(),
+                use_for: spec.use_for.to_string(),
+                installed,
+                path: path.map(|p| p.display().to_string()),
+                requires_auth,
+                authed,
+                remedy,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,7 +513,7 @@ mod tests {
     fn cori_sap_is_a_linked_capability_without_a_path_binary() {
         let wanted = vec!["cori-sap".to_string()];
         let (binaries, built_ins) = discover_clis(&wanted);
-        assert!(binaries.is_empty());
+        assert!(!binaries.contains_key("cori-sap"));
         assert_eq!(built_ins, BTreeSet::from(["cori-sap".to_string()]));
 
         let capabilities = Capabilities {
