@@ -829,6 +829,7 @@ dependencies = [
  "chrono",
  "cori-compiler",
  "cori-protocol",
+ "cori-sap",
  "cori-secrets",
  "dirs",
  "flate2",
@@ -921,6 +922,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -948,6 +950,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -988,8 +991,23 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "url",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "cori-sap"
+version = "0.3.11"
+dependencies = [
+ "clap",
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "url",
 ]
 
 [[package]]

@@ -28,6 +28,55 @@ This file documents the frontmatter. The prose body structure is in the main SKI
 | `tags` | list of strings | Helps grouping in `list_workflow`. Common tags: `deploy`, `data`, `report`, `compliance`, `support`. |
 | `schedule` | string (cron) | If set, registers a scheduled trigger. e.g. `"0 3 * * *"` for daily at 03:00. Cron interpreted in `schedule_tz`. |
 | `schedule_tz` | string (IANA tz) | Default `UTC`. Use `"Europe/Paris"`, `"America/Los_Angeles"`, etc. |
+| `result` | result object (see below) | Declarative presentation resolved from parameters and successful object outputs after the run. Add this whenever the workflow has a user-facing outcome. |
+
+## Result object
+
+`result` is optional for compatibility. When present, `headline` is required;
+all other collections are optional. Paths use dot notation, with numeric
+segments for arrays (for example `summary.rows.0.name`). They resolve against
+workflow parameters plus successful object outputs shallow-merged in step
+order, so later keys replace earlier keys.
+
+```yaml
+result:
+  headline: "{{ summary.row_count }} budget lines · {{ summary.total_variance_percent }}% variance"
+  description: The variance deck and finance draft are ready.
+  fields:
+    - label: Total budget
+      path: summary.total_budget
+      format: currency
+      currency: EUR
+    - label: Unfavorable
+      path: summary.unfavorable_count
+      tone: warning
+  sections:
+    - label: Largest variances
+      path: unfavorable_rows
+      display: table
+  artifacts:
+    - label: Variance deck
+      url: "https://docs.google.com/presentation/d/{{ presentation_id }}/edit"
+    - label: Finance draft
+      url: "https://mail.google.com/mail/u/0/#drafts"
+      required: false
+```
+
+- Headline, description, and artifact URL templates interpolate scalar
+  `{{ path }}` values only. Expressions, helpers, conditionals, and object or
+  array interpolation are rejected.
+- Field formats are `auto` (default), `number`, `currency`, `percent`, and
+  `duration`. Percent values are percentage points; `12.5` renders as `12.5%`.
+  Duration values are milliseconds. Currency requires a three-letter uppercase
+  code such as `EUR`.
+- Field tones are `neutral` (default), `success`, `warning`, and `danger`.
+- Section displays are `auto` (default), `table`, `list`, and `text`.
+- Fields, sections, and artifacts default to `required: true`. Missing optional
+  items are omitted. Missing required values and type mismatches become
+  non-fatal result issues in the run trace.
+- Artifact URLs must explicitly start with `https://` or `http://`, resolve to
+  an absolute URL with a host, and are never opened automatically. Prefer
+  stable API-provided browser links over constructing undocumented URLs.
 
 ## Parameter object
 
@@ -117,6 +166,12 @@ parameters:
 tools_required: [gws]
 mcp_servers: []
 tags: [translation, compliance, e-commerce]
+result:
+  headline: "French product sheet ready for {{ target_tab }}"
+  fields:
+    - label: First row check
+      path: results.0.check
+      required: false
 schedule: "0 3 * * *"
 schedule_tz: Europe/Paris
 ---
@@ -159,6 +214,7 @@ When you run `cori run <path>` (or `cori check <path>`), the compiler checks:
 - `enum` parameters have `values`
 - `tools_required` and `mcp_servers` are arrays of strings
 - `schedule` parses as a valid cron expression
+- Result paths, templates, formats, currencies, and artifact URL templates are coherent
 - Each TypeScript step file compiles and exports a valid `step.<kind>({…})` default
 - Step files referenced in `## Steps` exist in `steps/` and are numbered correctly
 

@@ -10,6 +10,7 @@ members = [
     "crates/cori-manifest",
     "crates/cori-protocol",
     "crates/cori-secrets",
+    "crates/cori-sap",
     "console/src-tauri",
 ]
 
@@ -84,6 +85,7 @@ cori-ledger = { path = "crates/cori-ledger" }
 cori-manifest = { path = "crates/cori-manifest" }
 cori-protocol = { path = "crates/cori-protocol" }
 cori-run = { path = "crates/cori-run" }
+cori-sap = { path = "crates/cori-sap" }
 cori-secrets = { path = "crates/cori-secrets" }
 cori-worker = { path = "crates/cori-worker" }
 

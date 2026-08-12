@@ -126,6 +126,7 @@ pub fn invoke(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::process::scrub_sap_env(&mut cmd);
     hide_console_window(&mut cmd);
     let mut child = cmd.spawn().map_err(BrokerError::Spawn)?;
 

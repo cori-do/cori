@@ -44,6 +44,7 @@ import {
 } from "../lib/format";
 import { openRun } from "../lib/windows";
 import { ConnectOffer } from "./run-view";
+import { ResultCard } from "./result-card";
 
 /** What the launcher can ask of the pane from its own key handling. */
 export interface WorkflowPaneHandle {
@@ -750,6 +751,13 @@ function RunSummary({ run }: { run: RunState | null }) {
 
   return (
     <div className="pane-summary">
+      {trace?.result && (
+        <ResultCard
+          result={trace.result}
+          partial={trace.status === "failed"}
+          compact
+        />
+      )}
       <div className={`pane-summary-line${run.closed ? "" : " is-pending"}`}>
         {failed ? (
           <>
@@ -852,6 +860,11 @@ function HistoryRow({ entry }: { entry: RunListEntry }) {
       </span>
       <span className="pane-history-main">
         <span className={`pane-history-status ${statusClass}`}>{status}</span>
+        {entry.result_headline && (
+          <span className="pane-history-headline" title={entry.result_headline}>
+            {entry.result_headline}
+          </span>
+        )}
         <span className="pane-history-meta">
           <span title={formatAbsolute(entry.started_at)}>
             {formatRelative(entry.started_at)}

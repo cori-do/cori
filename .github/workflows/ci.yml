@@ -67,6 +67,12 @@ jobs:
       - name: cargo clippy
         # cori-console excluded — same reason as the build job above.
         run: cargo clippy --workspace --exclude cori-console --all-targets -- -D warnings
+      - name: cargo clippy (Console Rust, sidecars disabled)
+        # Compile the Console integration on pull requests without requiring
+        # the release-only Temporal sidecar artifact.
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+        run: cargo clippy -p cori-console --lib -- -D warnings
       - name: cargo test
         run: cargo test --workspace --exclude cori-console
 
@@ -89,3 +95,9 @@ jobs:
       - run: pnpm build
       - run: pnpm lint
       - run: pnpm test
+      - name: SAP reference workflow contract
+        working-directory: examples/sap_purchase_order_read
+        run: |
+          deno fmt --check .
+          deno check --frozen steps/01_read_purchase_orders.ts tests/read_purchase_orders.test.ts
+          deno task test

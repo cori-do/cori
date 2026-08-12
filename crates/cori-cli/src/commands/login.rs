@@ -3,7 +3,10 @@
 //!
 //! Dispatch logic (in order):
 //!
-//! 1. If `<capability>` matches a known [`cori_broker::cli_auth`]
+//! 1. `cori-sap` always replaces the owner- and canonical-target-bound access
+//!    token in the OS keychain; it fails closed when no keychain is available.
+//!    No token is delegated through a vendor CLI.
+//! 2. If `<capability>` matches another known [`cori_broker::cli_auth`]
 //!    adapter (currently: `gws`), run the **managed login**: install
 //!    the binary if missing (built-in [`cori_broker::install`]
 //!    registry), provision the Cori-owned OAuth client into the
@@ -11,24 +14,24 @@
 //!    vendor's own `<cli> auth login` (which opens the browser and owns
 //!    token refresh). Without a provisioned client we fall back to
 //!    printing the manual hint — Cori never fakes the vendor's flow.
-//! 2. If `<capability>` is a registry capability with no auth adapter
+//! 3. If `<capability>` is a registry capability with no auth adapter
 //!    (`anydoc`, `lightpanda`), there is nothing to sign in to:
 //!    install the binary if missing and confirm readiness.
-//! 3. If `<capability>` is an LLM provider (`openai`, `anthropic`,
+//! 4. If `<capability>` is an LLM provider (`openai`, `anthropic`,
 //!    `gemini`), prompt for an API key with hidden input and store it
 //!    in the shared secret store ([`cori_secrets`]): OS keychain,
 //!    file fallback on headless machines. Env vars still take
 //!    precedence at run time. The desktop app writes to the same
 //!    store, so keys set either way are visible everywhere.
-//! 4. Otherwise, treat `<capability>` as an MCP server id. Look up its
+//! 5. Otherwise, treat `<capability>` as an MCP server id. Look up its
 //!    `oauth` block in `~/.cori/mcp-servers.json` and run the
 //!    [`pkce`][cori_broker::oauth::pkce] flow. The resulting [`Token`]
 //!    is stored in the OS keychain (or the encrypted-file fallback)
 //!    keyed by `(server_id, Owner::User(<os user>))`.
 //!
-//! Idempotent: if a still-valid token already exists for the
-//! requesting user, the command is a no-op and prints `(already signed
-//! in)`.
+//! MCP OAuth is idempotent while an existing token is valid. SAP and LLM
+//! logins deliberately replace the existing secret so an expired credential
+//! can always be refreshed.
 
 use std::time::Duration;
 
@@ -47,12 +50,19 @@ use cori_run::paths;
 const PKCE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
-    // 1. Known-CLI adapter? Run the managed login flow.
+    // SAP tokens are Cori-managed, owner/tenant-bound secrets. This path must
+    // run before generic CLI delegation; `cori-sap` deliberately exposes no
+    // auth subcommand.
+    if capability == "cori-sap" {
+        return login_sap(stdin_key);
+    }
+
+    // 2. Known-CLI adapter? Run the managed login flow.
     if let Some(adapter) = cli_auth::for_binary(capability) {
         return login_managed_cli(capability, adapter);
     }
 
-    // 2. Registry capability without an auth adapter (anydoc,
+    // 3. Registry capability without an auth adapter (anydoc,
     //    lightpanda, …)? Nothing to sign in to — install it if missing
     //    so `cori login <id>` stays the one command that makes any
     //    capability ready.
@@ -60,7 +70,7 @@ pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
         return login_authless_cli(capability, spec);
     }
 
-    // 3. LLM provider? Prompt for an API key and store it in the
+    // 4. LLM provider? Prompt for an API key and store it in the
     //    shared secret store.
     match capability {
         "openai" => return login_llm_provider("openai", stdin_key),
@@ -69,7 +79,7 @@ pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
         _ => {}
     }
 
-    // 4. MCP server with OAuth metadata.
+    // 5. MCP server with OAuth metadata.
     let home = paths::home()?;
     let servers = discover_mcp_for_login(&home);
     let server_cfg = servers.get(capability).ok_or_else(|| {
@@ -87,6 +97,64 @@ pub fn login(capability: &str, stdin_key: bool) -> Result<()> {
     })?;
 
     login_mcp_oauth(capability, oauth_cfg)
+}
+
+fn login_sap(stdin_token: bool) -> Result<()> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+
+    let user_id = current_user_id()?;
+    let credentials_dir = paths::credentials_dir()?;
+    let target = cli_auth::sap::credential_target_for_owner(&user_id, &credentials_dir)
+        .context("resolving the machine-configured SAP target")?;
+
+    println!("SAP credential target:");
+    println!("  profile: {}", target.profile_name());
+    println!("  target:  {}", target.credential_scope());
+
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    if !stdin_token && stdin_is_terminal {
+        print!("Store an access token for this exact target? [y/N] ");
+        std::io::stdout().flush().context("flushing confirmation")?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut answer)
+            .context("reading SAP target confirmation")?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            bail!("SAP login cancelled; no credential was stored");
+        }
+    }
+
+    let token = if stdin_token || !stdin_is_terminal {
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("reading SAP access token from stdin")?;
+        line
+    } else {
+        rpassword::prompt_password("Paste the SAP access token (input hidden): ")
+            .context("reading SAP access token")?
+    };
+
+    cli_auth::sap::store_access_token(&user_id, &credentials_dir, &target, &token)
+        .context("storing the owner- and target-bound SAP access token")?;
+    println!("✓ Stored the SAP access token in Cori's secure credential store.");
+    println!("  Cori passes it only to the linked SAP workflow adapter in memory.");
+    notify_open_workflows("cori-sap");
+    Ok(())
+}
+
+fn current_user_id() -> Result<String> {
+    match OsUser
+        .resolve()
+        .context("resolving OS user for SAP credential ownership")?
+    {
+        WorkerIdentity::Person { user_id } => Ok(user_id),
+        WorkerIdentity::Service { .. } => {
+            bail!("SAP user credentials cannot be provisioned as a service identity")
+        }
+    }
 }
 
 /// Auth-free registry capability: `cori login` degrades to "make sure
@@ -311,6 +379,15 @@ fn login_llm_provider(provider: &'static str, stdin_key: bool) -> Result<()> {
 /// LLM providers delete from the shared secret store; MCP servers
 /// delete the OAuth token owned by the current OS user.
 pub fn logout(capability: &str) -> Result<()> {
+    if capability == "cori-sap" {
+        let user_id = current_user_id()?;
+        let credentials_dir = paths::credentials_dir()?;
+        let removed = cli_auth::sap::delete_access_tokens_for_owner(&user_id, &credentials_dir)
+            .context("removing owner-scoped SAP credentials")?;
+        println!("✓ Removed {removed} stored SAP credential(s) for the current user.");
+        return Ok(());
+    }
+
     let llm_provider: Option<&'static str> = match capability {
         "openai" => Some("openai"),
         "anthropic" => Some("anthropic"),

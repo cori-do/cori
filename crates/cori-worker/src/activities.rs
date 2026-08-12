@@ -230,6 +230,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &absolute_path,
                     &step_input,
                     &user_id,
+                    &credentials_dir,
                     Some(&expected_binary),
                 )
             }
@@ -405,13 +406,23 @@ fn expected_cli_binary(
     // Compatibility only for Temporal histories produced before FrozenStep
     // existed. New runs always use the compiled metadata above.
     let source = std::fs::read_to_string(step_path).map_err(BrokerError::Io)?;
-    cori_compiler::cli_binary_from_source(&source).map_err(|message| BrokerError::StepFailed {
-        message: format!(
-            "could not revalidate CLI capability boundary for `{}`: {message}",
-            step_path.display()
-        ),
-        stack: None,
-    })
+    let binary = cori_compiler::cli_binary_from_source(&source).map_err(|message| {
+        BrokerError::StepFailed {
+            message: format!(
+                "could not revalidate CLI capability boundary for `{}`: {message}",
+                step_path.display()
+            ),
+            stack: None,
+        }
+    })?;
+    if binary == "cori-sap" {
+        return Err(BrokerError::StepFailed {
+            message: "SAP credential dispatch requires compiler-frozen CLI metadata; this legacy workflow history cannot authorize `cori-sap`; start a new run from the current workflow source"
+                .to_string(),
+            stack: None,
+        });
+    }
+    Ok(binary)
 }
 
 fn expected_metadata_string(
@@ -648,6 +659,63 @@ mod tests {
         assert_eq!(
             expected_cli_binary(&step, Some(&frozen)).expect("frozen binary"),
             "approved"
+        );
+    }
+
+    #[test]
+    fn frozen_cli_metadata_explicitly_authorizes_cori_sap() {
+        let frozen = FrozenStep {
+            source_sha256: "frozen-source-hash".to_string(),
+            workflow_content_hash: None,
+            metadata: JsonMap::from_iter([(
+                "binary".to_string(),
+                JsonValue::String("cori-sap".to_string()),
+            )]),
+        };
+
+        assert_eq!(
+            expected_cli_binary(std::path::Path::new("unused.ts"), Some(&frozen))
+                .expect("frozen SAP binary"),
+            "cori-sap"
+        );
+    }
+
+    #[test]
+    fn legacy_source_cannot_introduce_cori_sap() {
+        let temp = tempdir().expect("temporary workflow");
+        let step = temp.path().join("01_cli.ts");
+        std::fs::write(
+            &step,
+            "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"legacy SAP\", command: () => [\"cori-sap\", \"purchase-orders\", \"list\"] });\n",
+        )
+        .expect("legacy step source");
+
+        let error = expected_cli_binary(&step, None)
+            .expect_err("legacy metadata must not authorize SAP credentials");
+        assert!(matches!(
+            classify(&error),
+            Category::NonRetryable {
+                type_name: "StepFailedError"
+            }
+        ));
+        let message = error.to_string();
+        assert!(message.contains("compiler-frozen CLI metadata"));
+        assert!(message.contains("start a new run"));
+    }
+
+    #[test]
+    fn legacy_source_compatibility_remains_for_non_sap_clis() {
+        let temp = tempdir().expect("temporary workflow");
+        let step = temp.path().join("01_cli.ts");
+        std::fs::write(
+            &step,
+            "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"legacy CLI\", command: () => [\"echo\", \"ok\"] });\n",
+        )
+        .expect("legacy step source");
+
+        assert_eq!(
+            expected_cli_binary(&step, None).expect("legacy non-SAP binary"),
+            "echo"
         );
     }
 

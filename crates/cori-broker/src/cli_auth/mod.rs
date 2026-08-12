@@ -7,13 +7,15 @@
 //! emitting a confusing 401.
 //!
 //! Adapters are intentionally tiny: each one knows how to run a
-//! "whoami"-style probe and how to suggest a re-auth command. v1 ships
-//! `gws`; unknown CLIs are passed through without an auth check (the
-//! whitelist in [`crate::capabilities`] still gates them).
+//! "whoami"-style probe and how to suggest a re-auth command. `gws` uses a
+//! Cori-provisioned OAuth client; `cori-sap` uses an owner- and target-bound
+//! Cori secret consumed only by linked broker dispatch. Unknown CLIs are
+//! passed through without an auth check.
 
 pub mod gws;
+pub mod sap;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Result of an adapter probe.
@@ -64,11 +66,37 @@ pub struct ManagedLogin {
     pub login_argv: Vec<String>,
 }
 
+/// Extra restrictions an authenticated CLI applies when Cori dispatches it
+/// from workflow code. The default preserves the existing generic CLI
+/// behaviour; security-sensitive adapters can close ambient env and mark the
+/// child as a workflow invocation.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowPolicy {
+    pub allow_step_env: bool,
+    pub forced_env: &'static [(&'static str, &'static str)],
+}
+
+impl Default for WorkflowPolicy {
+    fn default() -> Self {
+        Self {
+            allow_step_env: true,
+            forced_env: &[],
+        }
+    }
+}
+
 pub trait CliAuthAdapter: Send + Sync {
     /// The binary this adapter probes (`"gws"`, `"gh"`, …).
     fn binary(&self) -> &'static str;
     /// Probe the CLI's current auth state.
     fn check(&self) -> AuthState;
+    /// Probe auth for an explicit workflow owner and credential directory.
+    /// Most vendor CLIs keep process-local auth and use the context-free
+    /// default. Credentials managed by Cori (notably SAP) override this so a
+    /// process-global environment variable can never satisfy another owner.
+    fn check_for_owner(&self, _owner_id: &str, _credentials_dir: &Path) -> AuthState {
+        self.check()
+    }
     /// Human-readable name of the underlying account / service.
     fn display_name(&self) -> &'static str {
         self.binary()
@@ -95,6 +123,10 @@ pub trait CliAuthAdapter: Send + Sync {
     fn spawn_env(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
+    /// Restrictions applied only to workflow-spawned invocations.
+    fn workflow_policy(&self) -> WorkflowPolicy {
+        WorkflowPolicy::default()
+    }
 }
 
 /// Apply [`CliAuthAdapter::spawn_env`] to a command, honouring the
@@ -105,6 +137,7 @@ pub fn apply_spawn_env(cmd: &mut std::process::Command, adapter: &dyn CliAuthAda
             cmd.env(k, v);
         }
     }
+    crate::process::scrub_sap_env(cmd);
 }
 
 /// Resolve the OAuth client Cori should provision for `capability`, in
@@ -319,9 +352,18 @@ static ADAPTERS: OnceLock<Vec<Box<dyn CliAuthAdapter>>> = OnceLock::new();
 
 fn registry() -> &'static [Box<dyn CliAuthAdapter>] {
     ADAPTERS.get_or_init(|| {
-        let v: Vec<Box<dyn CliAuthAdapter>> = vec![Box::new(gws::GwsAdapter)];
+        let v: Vec<Box<dyn CliAuthAdapter>> =
+            vec![Box::new(gws::GwsAdapter), Box::new(sap::SapAdapter)];
         v
     })
+}
+
+/// Workflow-spawn policy for a CLI. Unknown binaries keep the generic CLI
+/// defaults; named adapters can opt into tighter boundaries.
+pub fn workflow_policy_for_binary(name: &str) -> WorkflowPolicy {
+    for_binary(name)
+        .map(CliAuthAdapter::workflow_policy)
+        .unwrap_or_default()
 }
 
 /// Look up an adapter by CLI binary name.
@@ -363,6 +405,15 @@ pub fn check_known(name: &str) -> AuthState {
     state
 }
 
+/// Context-aware auth probe for activity dispatch and capability reports.
+/// Owner-bound adapters deliberately bypass the process-wide TTL cache.
+pub fn check_known_for_owner(name: &str, owner_id: &str, credentials_dir: &Path) -> AuthState {
+    let Some(adapter) = for_binary(name) else {
+        return AuthState::Ok;
+    };
+    adapter.check_for_owner(owner_id, credentials_dir)
+}
+
 /// Drop the cached probe result for one binary (after a login attempt).
 pub fn invalidate_check(name: &str) {
     if let Some(cache) = CHECK_CACHE.get()
@@ -375,6 +426,25 @@ pub fn invalidate_check(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cori_sap_uses_cori_managed_owner_credentials() {
+        let adapter = for_binary("cori-sap").expect("cori-sap auth adapter");
+        assert_eq!(adapter.display_name(), "SAP");
+        assert_eq!(adapter.login_hint(), "run: cori login cori-sap");
+        assert!(adapter.baked_client().is_none());
+    }
+
+    #[test]
+    fn cori_sap_workflow_policy_closes_step_env() {
+        let policy = workflow_policy_for_binary("cori-sap");
+        assert!(!policy.allow_step_env);
+        assert!(policy.forced_env.is_empty());
+
+        let generic = workflow_policy_for_binary("some-cli");
+        assert!(generic.allow_step_env);
+        assert!(generic.forced_env.is_empty());
+    }
 
     #[test]
     fn extract_https_url_finds_indented_auth_url() {

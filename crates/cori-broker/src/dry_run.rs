@@ -29,17 +29,43 @@ pub fn cli(
     expected_binary: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let call = dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::CliCommand, input)?;
-    let binary = call
+    let argv = call
         .output
         .get("command")
         .and_then(JsonValue::as_array)
-        .and_then(|argv| argv.first())
-        .and_then(JsonValue::as_str)
         .ok_or_else(|| BrokerError::StepFailed {
-            message: "cli step produced an empty command".to_string(),
+            message: "cli step produced an invalid command".to_string(),
             stack: None,
         })?;
+    let binary =
+        argv.first()
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| BrokerError::StepFailed {
+                message: "cli step produced an empty command".to_string(),
+                stack: None,
+            })?;
     crate::cli::validate_binary_boundary(expected_binary, binary)?;
+    if binary == "cori-sap" {
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|argument| {
+                argument
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| BrokerError::StepFailed {
+                        message: "cori-sap command arguments must be strings".to_string(),
+                        stack: None,
+                    })
+            })
+            .collect::<Result<_>>()?;
+        cori_sap::validate_workflow_argv(&argv).map_err(|error| BrokerError::StepFailed {
+            message: format!(
+                "cori-sap reported permanent error `{}` during dry-run validation",
+                error.code()
+            ),
+            stack: None,
+        })?;
+    }
     let preview = call
         .output
         .get("command")

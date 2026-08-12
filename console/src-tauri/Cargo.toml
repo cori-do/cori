@@ -42,3 +42,6 @@ reqwest.workspace = true
 cori-worker.workspace = true
 cori-compiler.workspace = true
 cori-manifest.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

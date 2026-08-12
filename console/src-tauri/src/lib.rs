@@ -97,6 +97,14 @@ fn repair_path_from_login_shell() {
 fn repair_path_from_login_shell() {}
 
 pub fn run() {
+    // This must be the first operation, before PATH repair, Tauri plugins, or
+    // worker threads. Unsetting an inherited secret would not reliably erase
+    // the initial environment from same-UID process inspection on every OS.
+    if let Err(message) = cori_broker::process::reject_ambient_sap_token() {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
+
     // GUI launches inherit a minimal PATH; recover the login shell's PATH
     // before anything probes it. Must stay first — see the fn doc and the
     // `set_var` SAFETY note (no threads may exist yet).

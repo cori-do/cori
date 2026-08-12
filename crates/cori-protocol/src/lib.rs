@@ -5,11 +5,17 @@
 //! recorder references its `activity_id` values.
 
 pub mod trace;
-pub use trace::{ActivityTrace, CostSummary, RunTrace, TokenUsage, WorkflowSource};
+pub use trace::{
+    ActivityTrace, CostSummary, ResolvedResult, ResolvedResultArtifact, ResolvedResultField,
+    ResolvedResultSection, ResultIssue, ResultIssueKind, RunTrace, TokenUsage, WorkflowSource,
+};
 
 use serde::{Deserialize, Serialize};
 
-pub use cori_manifest::Manifest;
+pub use cori_manifest::{
+    Manifest, ResultArtifactDeclaration, ResultDeclaration, ResultFieldDeclaration,
+    ResultFieldFormat, ResultFieldTone, ResultSectionDeclaration, ResultSectionDisplay,
+};
 
 /// Resource bounds applied before untrusted workflow trees are compiled or
 /// transported. Keeping these limits in the shared protocol prevents the

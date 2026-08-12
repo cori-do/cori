@@ -228,6 +228,10 @@ fn call_tool(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    // SAP credentials are owner-scoped and may only enter a direct
+    // `cori-sap` child through the CLI broker. Neither ambient worker state nor
+    // MCP static env is allowed to re-export them.
+    crate::process::scrub_sap_env(&mut cmd);
     hide_console_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| BrokerError::McpSpawn {
