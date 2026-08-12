@@ -14,6 +14,7 @@
 // top-to-bottom.
 
 import { useCallback, useState } from "react";
+import { BackendLogo } from "../components/provider-icons";
 import { ProviderKeyForm } from "../components/provider-key-form";
 import {
   getLlmSettings,
@@ -181,6 +182,7 @@ function ActiveBanner({ settings }: { settings: LlmSettings }) {
   return (
     <div className="active-banner">
       <span className="pill ok">active</span>
+      <BackendLogo backendId={a.backend_id} size={16} />
       <div>
         <strong>{a.display_name}</strong> runs your <code>llm</code> steps,
         using <code>{a.model}</code> for <code>{a.tier}</code> work.
@@ -251,6 +253,7 @@ function BackendRow({
 
         <div className="backend-identity">
           <div className="backend-name">
+            <BackendLogo backendId={backend.id} />
             {backend.display_name}
             <span className="pill muted">
               {backend.kind === "subscription" ? "subscription" : "API key"}
@@ -267,29 +270,25 @@ function BackendRow({
                   : "No key yet"}
             {backend.remedy ? ` — ${backend.remedy}` : ""}
           </p>
-        </div>
 
-        {/* The models this provider uses, readable without expanding —
-            "which model does each provider run?" is the second question
-            this page exists to answer, so it shouldn't need a click. */}
-        <span className="backend-models tooltip-trigger" tabIndex={0}>
-          {backend.models.map((m, i) => (
-            <span key={m.tier}>
-              {i > 0 ? <span className="sep"> · </span> : null}
-              <span className={m.overridden ? "is-custom" : undefined}>
-                {m.model}
-              </span>
-            </span>
-          ))}
-          <span role="tooltip" className="tooltip-body">
-            {backend.models.map((m) => (
-              <span key={m.tier} style={{ display: "block" }}>
-                <code>{m.tier}</code> → <code>{m.model}</code>
-                {m.overridden ? " (your choice)" : ""}
+          {/* The models this provider uses, readable without expanding —
+              "which model does each provider run?" is the second question
+              this page exists to answer, so it shouldn't need a click.
+              On its own line under the name so a full default list (a
+              vendor's own model names can run 60+ characters) has the
+              row's width to wrap into instead of being squeezed beside
+              the toggle and ellipsised. */}
+          <p className="backend-models">
+            {backend.models.map((m, i) => (
+              <span key={m.tier}>
+                {i > 0 ? <span className="sep"> · </span> : null}
+                <span className={m.overridden ? "is-custom" : undefined}>
+                  {m.model}
+                </span>
               </span>
             ))}
-          </span>
-        </span>
+          </p>
+        </div>
 
         <label className="backend-toggle">
           <input

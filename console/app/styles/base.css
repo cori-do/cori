@@ -2379,30 +2379,10 @@ table.runs td strong {
 
 .backend-main {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-}
-
-/* The three tier models, legible without expanding the row. Mono and
-   muted so the provider name still leads. */
-.backend-models {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 34ch;
-}
-.backend-models .is-custom { color: var(--accent); }
-.backend-models .tooltip-body {
-  left: auto;
-  right: 0;
-  width: auto;
-  min-width: 200px;
-  font-family: var(--font-sans);
 }
 
 .backend-rank {
@@ -2454,6 +2434,42 @@ table.runs td strong {
   font-size: 13.5px;
 }
 .backend-identity .hint { margin-top: 3px; }
+
+/* The three tier models, on their own line under the name so a full
+   default list — a vendor's own model names can run 60+ characters
+   combined — has the identity column's full width to wrap into,
+   instead of being squeezed into a narrow side column and ellipsised.
+   Mono and muted so the provider name still leads. */
+.backend-models {
+  margin: 3px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.backend-models .is-custom { color: var(--accent); }
+
+/* The vendor mark, recessed like an input rather than floating free —
+   a quiet chip that identifies the row at a glance without competing
+   with the provider name for weight. `currentColor` inside inherits
+   this, so the mark and the pills around it stay one value in both
+   themes. */
+.backend-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--muted-strong);
+}
+.active-banner .backend-logo {
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+}
 
 .backend-toggle {
   display: inline-flex;
@@ -2508,17 +2524,19 @@ table.runs td strong {
 }
 
 @media (max-width: 640px) {
-  /* Identity takes the full width; the controls tuck under it rather
-     than crushing the provider name. */
+  /* Identity (name, subtitle, and now the model line) takes the full
+     width; the toggle and expand button tuck under it on their own row
+     rather than crushing the provider name. */
   .backend-main {
     grid-template-columns: auto auto minmax(0, 1fr) auto;
     row-gap: 8px;
   }
   .backend-identity { grid-column: 3 / -1; }
-  /* Not enough width for the model summary and the controls on one
-     line; the summary is the part the expanded view repeats. */
-  .backend-models { display: none; }
   .backend-toggle { grid-column: 3; grid-row: 2; }
+  /* The expand button is the only direct `.icon-btn` child of the row —
+     the reorder arrows are nested inside `.backend-reorder` — so this
+     targets it without a class of its own. */
+  .backend-main > .icon-btn { grid-column: 4; grid-row: 2; }
 }
 
 /* The `llm` kind carries a tooltip naming the provider that will serve
