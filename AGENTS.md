@@ -21,7 +21,7 @@ Do not re-litigate these without explicit human approval.
 3. **Single execution path.** The old in-process executor was deleted during the Temporal migration. Do not reintroduce it, do not feature-flag a parallel path. Temporal is the only runtime.
 4. **DAG and source bundle in `WorkflowInput`.** The full compiled DAG (including per-step `task_queue` assigned by the planner) is serialized into `WorkflowInput.compiled_dag` at workflow start. Every activity-bearing run serializes a bounded, content-addressed copy of the verified source snapshot once into `WorkflowInput.source_bundle` and passes it to activities; task queues have no host affinity, even when the queue name matches the triggering worker. The bundle is part of Temporal event history, so workflow folders are executable source—not a place for credentials, `.env` files, or confidential input data. Known secret-file names are rejected, and real credentials remain broker-managed. The absolute source path remains only as a backward-compatible fallback. The workflow body never reads disk — that would break determinism on replay.
 5. **Broker is the trust boundary.** Every external side effect (`std::process::Command`, HTTP, MCP, OAuth) goes through [crates/cori-broker](crates/cori-broker/src/lib.rs). Activity handlers are thin wrappers over broker functions via `tokio::task::spawn_blocking` (the broker is sync; the Temporal worker is async).
-6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs and verified source snapshots, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (cron schedules — fired by the cron driver inside the Cori Console desktop app or `cori work`), `config.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
+6. **Disk is truth, files-only.** Workflows live in user-owned folders (anywhere on disk, typically in a git repo). Cori writes nothing into them. Cori's own state is in `~/.cori/`: `cache/` (compiled DAGs and verified source snapshots, rebuildable), `runs/<folder>-<pathhash>/*.json` (trace history), `credentials/` (token metadata; real tokens go in the OS keychain), `cluster/<queue>.json` (worker capability reports), `schedules/<id>.json` (cron schedules — fired by the cron driver inside the Cori Console desktop app or `cori work`), `config.toml`, and the non-secret SAP connection profile `sap.toml`. **No SQLite. Do not reintroduce `rusqlite`.**
 7. **Identity-derived task queues.** Queue names are `cori.user.<user_id>` (`Person` identity, from `OsUser` in v1) or `cori.service.<pool>` (`Service`, from `cori work --shared <name>`). Helpers live in [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) (`task_queue_for`, `identity_from_queue`). **Cross-user dispatch is impossible by construction** — Temporal's matching layer physically separates queues. The old `cori-default` constant is gone; do not reintroduce a default queue.
 8. **Two-place ownership enforcement (defense in depth).** (a) The planner routes each step to a queue derived from authenticated identity — physical isolation. (b) The broker resolves credentials keyed by `user_id` in `WorkflowInput` — token isolation. Both checks must stay; do not collapse to one.
 9. **Worker presence is Temporal-native.** Use `DescribeTaskQueue` only on human-frequency paths (`cori status`, `cori check`). Never per-step. The v1 fallback for cluster presence is reading `~/.cori/cluster/<queue>.json` files published by `cori work`. **Do not** use Temporal Worker Versioning / Build IDs for capability routing — versioning is reserved for future Cori-binary rollout. **Do not** introduce Nexus in v1 (noted as v2 possibility).
@@ -75,6 +75,7 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
   cori-manifest/   YAML schema + parser (manifest.md frontmatter + body)
   cori-protocol/   wire types (CompiledWorkflow, Placement, WorkerIdentity, RunTrace,
                    ActivityTrace, TokenUsage, task_queue_for, …)
+  cori-sap/        typed, read-only SAP S/4HANA Purchase Order OData adapter
 packages/                              pnpm workspace (Node ≥ 20)
   sdk/             @cori-do/sdk — what user step files import (`step.cli`, `step.code`, …)
   runner/          Deno script that hosts `code` activities
@@ -91,7 +92,8 @@ hooks/             wraps the canonical skill with zero duplication. `commands/` 
 .mcp.json          slash commands, `hooks/` = the once-per-session save-offer Stop
                    hook, `.mcp.json` = the `cori mcp` server declaration (also read
                    by Claude Code when developing in this repo — harmless dogfood)
-examples/          Reference workflows (hello_world, code_only, translate_product_sheets_fr)
+examples/          Reference workflows (hello_world, code_only,
+                   translate_product_sheets_fr, sap_purchase_order_read)
 scripts/install.sh
 docs/              internal working notes (spike results, design notes). NOT the public docs —
                    those live in the sibling workspace repo `docs/` and mirror code, never lead it
@@ -212,6 +214,12 @@ Apply this consistently when classifying `BrokerError → ApplicationFailure`:
 - **Retryable** (Temporal will retry): network timeouts, 5xx HTTP, transient LLM rate limits, MCP server temporarily unreachable.
 - **Non-retryable** (`ApplicationFailure::non_retryable`): schema validation failure, missing capability (CLI not on PATH), authentication failure (`NeedsReauth`), malformed step metadata, invalid input shape. `NeedsReauth` uses the type tag `"NeedsReauth"` so the workflow body can catch it specifically and suspend on a signal.
 
+SAP is a deliberate v1 exception to the generic network taxonomy: linked
+`cori-sap` workflow failures are always non-retryable stable-code errors, and
+their Temporal policy is forced to exactly one attempt regardless of authored
+retry metadata. A human-driven `NeedsReauth` signal may resume the blocked read;
+there are no automatic SAP transient retries.
+
 Default `max_attempts` per kind:
 
 | Kind | Default `max_attempts` | Why |
@@ -265,6 +273,7 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 ```
 ~/.cori/
   config.toml              # temporal.host (optional), [remotes].hosts, … — never secrets; LLM keys → OS keychain via `cori login <provider>`
+  sap.toml                 # non-secret SAP origin/client profile; SAP token → OS keychain via `cori login cori-sap`
   cache/                   # rebuildable compiled DAGs, keyed by sha(path + content_hash)
     sources/<sha256>/      # verified immutable source snapshots used by workers
     remote/                # fetched remote workflows (system `git` clones)

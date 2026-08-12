@@ -1,11 +1,11 @@
 //! Worker capability discovery and validation.
 //!
 //! Before any step runs, the broker resolves the set of capabilities the
-//! current process can offer — which CLI binaries are on PATH, which MCP
-//! servers are declared in `~/.cori/mcp-servers.json`, which LLM providers
-//! have credentials configured. The CLI then cross-checks a workflow's
-//! requirements against this snapshot and refuses to start if anything is
-//! missing.
+//! current process can offer — which CLI binaries are on PATH, which typed
+//! adapters are linked into the worker, which MCP servers are declared in
+//! `~/.cori/mcp-servers.json`, and which LLM providers have credentials
+//! configured. The CLI then cross-checks a workflow's requirements against
+//! this snapshot and refuses to start if anything is missing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -23,6 +23,9 @@ use crate::mcp::McpServerConfig;
 pub struct Capabilities {
     /// Binary name → resolved path on PATH.
     pub cli_binaries: BTreeMap<String, PathBuf>,
+    /// CLI-shaped capabilities whose data plane is linked into the broker.
+    /// These never resolve or execute a same-named PATH binary.
+    pub built_in_clis: BTreeSet<String>,
     /// Server name → connection config.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     /// Provider names with usable credentials.
@@ -31,7 +34,7 @@ pub struct Capabilities {
 
 impl Capabilities {
     pub fn has_cli(&self, name: &str) -> bool {
-        self.cli_binaries.contains_key(name)
+        self.built_in_clis.contains(name) || self.cli_binaries.contains_key(name)
     }
     pub fn has_mcp(&self, name: &str) -> bool {
         self.mcp_servers.contains_key(name)
@@ -44,7 +47,7 @@ impl Capabilities {
 /// nothing. `llm_creds` is the credential set the CLI resolved from
 /// config + env; we report any provider whose key is present.
 pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials) -> Capabilities {
-    let cli_binaries = discover_clis(wanted_clis);
+    let (cli_binaries, built_in_clis) = discover_clis(wanted_clis);
     let mcp_servers = discover_mcp(home);
     let mut llm_providers = BTreeSet::new();
     if llm_creds.openai_api_key.is_some() {
@@ -58,20 +61,26 @@ pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials)
     }
     Capabilities {
         cli_binaries,
+        built_in_clis,
         mcp_servers,
         llm_providers,
     }
 }
 
-fn discover_clis(wanted: &[String]) -> BTreeMap<String, PathBuf> {
-    let mut out = BTreeMap::new();
+fn discover_clis(wanted: &[String]) -> (BTreeMap<String, PathBuf>, BTreeSet<String>) {
+    let mut binaries = BTreeMap::new();
+    let mut built_ins = BTreeSet::new();
     for name in wanted {
+        if name == "cori-sap" {
+            built_ins.insert(name.clone());
+            continue;
+        }
         // PATH first, then Cori-managed installs in `~/.cori/bin`.
         if let Some(p) = crate::install::resolve_binary(name) {
-            out.insert(name.clone(), p);
+            binaries.insert(name.clone(), p);
         }
     }
-    out
+    (binaries, built_ins)
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,12 +299,38 @@ impl CapabilityReport {
             });
         }
 
+        // Linked CLI-shaped capabilities are reported separately so their
+        // detail cannot be mistaken for an executable path.
+        for name in &caps.built_in_clis {
+            let auth_state = match (&identity, credentials_dir) {
+                (WorkerIdentity::Person { user_id }, Some(dir)) => {
+                    cli_auth::check_known_for_owner(name, user_id, dir)
+                }
+                _ => cli_auth::check_known(name),
+            };
+            let (authed, detail) = match auth_state {
+                cli_auth::AuthState::NeedsReauth { hint } => {
+                    (false, format!("built into Cori worker; {hint}"))
+                }
+                _ => (true, "built into Cori worker".to_string()),
+            };
+            capabilities.push(Capability {
+                id: name.clone(),
+                kind: CapabilityKind::Cli,
+                authed,
+                detail: Some(detail),
+            });
+        }
+
         // Per-CLI auth state is best-effort: only known CLIs are probed.
         for (name, path) in &caps.cli_binaries {
-            let authed = !matches!(
-                cli_auth::check_known(name),
-                cli_auth::AuthState::NeedsReauth { .. }
-            );
+            let auth_state = match (&identity, credentials_dir) {
+                (WorkerIdentity::Person { user_id }, Some(dir)) => {
+                    cli_auth::check_known_for_owner(name, user_id, dir)
+                }
+                _ => cli_auth::check_known(name),
+            };
+            let authed = !matches!(auth_state, cli_auth::AuthState::NeedsReauth { .. });
             capabilities.push(Capability {
                 id: name.clone(),
                 kind: CapabilityKind::Cli,
@@ -365,7 +400,6 @@ pub fn report(identity: WorkerIdentity, caps: &Capabilities) -> CapabilityReport
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     use std::fs;
@@ -392,5 +426,39 @@ mod tests {
 
         let path = std::env::join_paths([shadow_dir, executable_dir]).expect("PATH");
         assert_eq!(which_on_path_in("tool", &path), Some(executable));
+    }
+
+    #[test]
+    fn cori_sap_is_a_linked_capability_without_a_path_binary() {
+        let wanted = vec!["cori-sap".to_string()];
+        let (binaries, built_ins) = discover_clis(&wanted);
+        assert!(binaries.is_empty());
+        assert_eq!(built_ins, BTreeSet::from(["cori-sap".to_string()]));
+
+        let capabilities = Capabilities {
+            cli_binaries: binaries,
+            built_in_clis: built_ins,
+            ..Capabilities::default()
+        };
+        assert!(capabilities.has_cli("cori-sap"));
+        assert!(validate(&capabilities, &wanted, &[], &[]).is_empty());
+
+        let report = CapabilityReport::from_capabilities(
+            WorkerIdentity::Person {
+                user_id: "alice".to_string(),
+            },
+            &capabilities,
+        );
+        let sap = report
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "cori-sap")
+            .expect("linked SAP capability report");
+        assert!(
+            sap.detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("built into Cori worker"))
+        );
+        assert!(!sap.authed, "owner-less probes must fail closed");
     }
 }

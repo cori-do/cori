@@ -92,6 +92,7 @@ impl Runtime {
             .arg("--frozen")
             .arg(self.schema_path())
             .arg(runtime_root.join("sdk/index.ts"));
+        crate::process::scrub_sap_env(&mut command);
         hide_console_window(&mut command);
         let output = command.output().map_err(BrokerError::Spawn)?;
         if !output.status.success() {
@@ -161,6 +162,7 @@ impl Runtime {
             .arg("--config")
             .arg(&self.config_path)
             .args(step_files);
+        crate::process::scrub_sap_env(&mut command);
         hide_console_window(&mut command);
         let output = command.output().map_err(StepValidationError::Spawn)?;
 
@@ -207,6 +209,7 @@ impl Runtime {
             .arg("--config")
             .arg(&self.config_path)
             .arg(step_file);
+        crate::process::scrub_sap_env(&mut command);
         hide_console_window(&mut command);
         let output = command.output().map_err(StepValidationError::Spawn)?;
         if !output.status.success() {

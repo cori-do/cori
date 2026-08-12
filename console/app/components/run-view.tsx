@@ -21,6 +21,7 @@ import {
   type RunEvent,
   type RunTrace,
 } from "../lib/api";
+import { ResultCard } from "./result-card";
 import {
   formatAbsolute,
   formatCost,
@@ -234,6 +235,9 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
 function TraceBody({ trace }: { trace: RunTrace }) {
   return (
     <>
+      {trace.result && (
+        <ResultCard result={trace.result} partial={trace.status === "failed"} />
+      )}
       <div className="card">
         <dl className="kv">
           <dt>Run id</dt>

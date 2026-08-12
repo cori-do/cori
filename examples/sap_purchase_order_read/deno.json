@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "@cori-do/sdk": "npm:@cori-do/sdk@^0.2.4",
+    "zod": "npm:zod@^4.4.3"
+  },
+  "tasks": {
+    "test": "deno test --frozen --no-check --allow-read --allow-env --allow-net=registry.npmjs.org,esm.sh,jsr.io tests/"
+  }
+}

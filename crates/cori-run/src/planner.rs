@@ -251,6 +251,7 @@ mod tests {
             route_default: None,
             schedule: None,
             schedule_tz: None,
+            result: None,
             body: String::new(),
         }
     }

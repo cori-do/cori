@@ -72,21 +72,22 @@ enum Command {
     /// client is used, so no vendor console setup is needed — the
     /// browser consent screen is the only step.
     ///
-    /// Idempotent and refresh-aware: rerunning with a still-valid
-    /// token is a no-op. Tokens are stored in the OS keychain (with an
-    /// encrypted-file fallback) and scoped to the current OS user.
+    /// MCP OAuth reuses a still-valid token. SAP and LLM login replace the
+    /// existing secret so expired credentials can be refreshed. SAP requires
+    /// an OS keychain and binds the token to the current user and canonical
+    /// SAP target; other credential types retain their documented fallback.
     Login {
-        /// Capability id — e.g. `notion`, `gws`, `openai`.
+        /// Capability id — e.g. `notion`, `gws`, `cori-sap`, `openai`.
         capability: String,
-        /// For LLM providers: read the API key from stdin instead of
-        /// prompting (`echo $KEY | cori login anthropic --stdin`).
+        /// Read an LLM API key or SAP access token from stdin instead of
+        /// prompting (`printf '%s\n' "$TOKEN" | cori login cori-sap --stdin`).
         #[arg(long)]
         stdin: bool,
     },
-    /// Remove a stored credential — an LLM provider API key (from the
-    /// OS keychain) or an MCP server's OAuth token.
+    /// Remove a stored credential — an SAP token, LLM provider API key, or
+    /// MCP server OAuth token.
     Logout {
-        /// Capability id — e.g. `anthropic`, `notion`.
+        /// Capability id — e.g. `cori-sap`, `anthropic`, `notion`.
         capability: String,
     },
     /// Manage Cori-blessed capability binaries (`gws`, …).
@@ -180,6 +181,11 @@ enum ConfigCommand {
 }
 
 fn main() -> anyhow::Result<()> {
+    // This must precede logging, parsing, worker startup, and every child
+    // process. Unsetting an inherited secret would not reliably erase the
+    // initial environment from same-UID process inspection on every OS.
+    cori_broker::process::reject_ambient_sap_token().map_err(anyhow::Error::msg)?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

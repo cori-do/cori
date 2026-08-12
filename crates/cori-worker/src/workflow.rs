@@ -448,7 +448,8 @@ fn needs_reauth_details(err: &ActivityExecutionError) -> Option<NeedsReauthDetai
 ///
 /// Recognised metadata keys:
 /// - `timeout_ms` (number): overrides `start_to_close_timeout`.
-/// - `retries.max` (number): overrides the default attempt cap.
+/// - `retries.max` (number): overrides the default attempt cap, except for
+///   `cori-sap` CLI steps, which always execute at most once.
 /// - `retries.backoff` (`"exponential"` | `"linear"`): retry backoff
 ///   strategy. Defaults to exponential.
 fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOptions {
@@ -474,11 +475,20 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
     };
     let retries = step.metadata.get("retries");
     let configured_attempts = retries.and_then(|r| r.get("max")).and_then(|v| v.as_u64());
-    let max_attempts = i32::try_from(bounded_activity_attempts(
-        configured_attempts,
-        u32::try_from(default_attempts).unwrap_or(1),
-    ))
-    .unwrap_or(default_attempts);
+    // SAP reads are intentionally exposed through a narrow adapter, but an
+    // HTTP retry can still duplicate work if that adapter grows write
+    // operations later. The compiled CLI binary is frozen into WorkflowInput,
+    // so this gate is deterministic on replay and cannot be relaxed by
+    // authored `retries` metadata.
+    let max_attempts = if is_cori_sap_cli_step(step) {
+        1
+    } else {
+        i32::try_from(bounded_activity_attempts(
+            configured_attempts,
+            u32::try_from(default_attempts).unwrap_or(1),
+        ))
+        .unwrap_or(default_attempts)
+    };
 
     // Backoff strategy mirrors the SDK's `retries.backoff` field. Linear
     // backoff keeps a constant interval (coefficient 1.0); exponential
@@ -521,6 +531,11 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
         .build()
 }
 
+fn is_cori_sap_cli_step(step: &cori_protocol::CompiledStep) -> bool {
+    step.kind == StepKind::Cli
+        && step.metadata.get("binary").and_then(JsonValue::as_str) == Some("cori-sap")
+}
+
 fn prost_duration_from_secs(s: i64) -> prost_wkt_types::Duration {
     prost_wkt_types::Duration {
         seconds: s,
@@ -530,7 +545,32 @@ fn prost_duration_from_secs(s: i64) -> prost_wkt_types::Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::contributes_to_dataflow;
+    use cori_protocol::{CompiledStep, Placement, StepKind};
+    use serde_json::json;
+
+    use super::{activity_options_for_step, contributes_to_dataflow};
+
+    fn cli_step(binary: &str, retries: Option<u64>) -> CompiledStep {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("binary".to_string(), json!(binary));
+        if let Some(max) = retries {
+            metadata.insert("retries".to_string(), json!({ "max": max }));
+        }
+        CompiledStep {
+            activity_id: "01_read".to_string(),
+            index: 0,
+            source_path: "steps/01_read.ts".to_string(),
+            source_sha256: Some("frozen-source-hash".to_string()),
+            kind: StepKind::Cli,
+            name: "read".to_string(),
+            description: "read data".to_string(),
+            route: None,
+            depends_on: Vec::new(),
+            metadata,
+            placement: Placement::RequiresLocalFs,
+            task_queue: Some("cori.user.test".to_string()),
+        }
+    }
 
     #[test]
     fn dry_run_stubs_continue_schema_dataflow() {
@@ -539,5 +579,25 @@ mod tests {
         assert!(contributes_to_dataflow("skipped", true));
         assert!(!contributes_to_dataflow("skipped", false));
         assert!(!contributes_to_dataflow("failed", true));
+    }
+
+    #[test]
+    fn cori_sap_cli_retry_override_is_ignored() {
+        let options = activity_options_for_step(&cli_step("cori-sap", Some(10)));
+
+        assert_eq!(
+            options.retry_policy.expect("retry policy").maximum_attempts,
+            1
+        );
+    }
+
+    #[test]
+    fn retry_override_remains_available_to_other_cli_steps() {
+        let options = activity_options_for_step(&cli_step("other-cli", Some(5)));
+
+        assert_eq!(
+            options.retry_policy.expect("retry policy").maximum_attempts,
+            5
+        );
     }
 }

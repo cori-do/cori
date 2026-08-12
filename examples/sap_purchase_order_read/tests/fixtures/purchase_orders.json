@@ -1,0 +1,17 @@
+{
+  "purchase_orders": [
+    {
+      "purchase_order": "4500000001",
+      "purchase_order_type": "NB",
+      "company_code": "1010",
+      "purchasing_organization": "1010",
+      "supplier": "10000001",
+      "document_currency": "EUR",
+      "creation_date": "2026-08-01",
+      "processing_status": "02"
+    }
+  ],
+  "count": 1,
+  "limit": 25,
+  "has_more": false
+}

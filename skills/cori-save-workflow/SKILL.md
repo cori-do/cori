@@ -323,6 +323,14 @@ tags: [<a few>]
 - <lessons, gotchas, edge cases — including useful warnings from dead-ends in the original conversation>
 ```
 
+When the workflow produces a user-facing outcome, add a declarative `result`
+block. Name the outcome with a required headline, expose a small number of
+useful metrics, sections, and explicit HTTP(S) artifact links, and reference
+only parameters or object keys emitted by successful steps. Do not make users
+inspect the last activity's raw JSON to understand whether the workflow did
+its job. Omit `result` only when the workflow genuinely has no user-facing
+outcome. See the manifest schema for the supported formats and path rules.
+
 Write the prose for a competent reader who wasn't in the original conversation. Explain *why* each step exists, not just what.
 
 ### Step 7: Show the user before committing
