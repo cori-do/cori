@@ -240,7 +240,9 @@ try {
       emit({
         ok: true,
         output: {
-          model: stepDef.model,
+          // `null` when the step declared no model — the host resolves
+          // one at its default capability tier.
+          model: stepDef.model ?? null,
           prompt: String(prompt ?? ""),
           batch: stepDef.batch ?? null,
           batchPrompts,

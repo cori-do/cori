@@ -53,7 +53,13 @@ fn collect_status(published_target: Option<String>) -> anyhow::Result<Value> {
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &[],
+        &credentials,
+        &cori_run::resolve_llm_policy(&identity),
+        capabilities::LlmProbe::Probe,
+    );
     let self_report = CapabilityReport::from_capabilities_with(
         identity.clone(),
         &caps,

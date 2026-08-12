@@ -189,12 +189,11 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
             }
         }
         StepKind::Llm => {
+            // `model` is optional. A step that declares none is served at
+            // the host's default capability tier, which is the point: the
+            // workflow says it needs an LLM, not which vendor's LLM.
             if let Some(model) = extract_string_field(args_span, "model") {
                 metadata.insert("model".into(), JsonValue::String(model));
-            } else {
-                errors.push(
-                    ParseError::new("missing required `model: \"...\"` field").field("model"),
-                );
             }
             if let Some((size, by)) = extract_batch_field(args_span) {
                 let mut batch = JsonMap::new();
@@ -1012,6 +1011,23 @@ export default step.cli({
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Llm);
         assert_eq!(p.metadata.get("model").unwrap(), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn llm_step_without_a_model_compiles() {
+        // The portable form: the workflow says it needs an LLM, and the
+        // host serves it at the default capability tier.
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"summarise\", prompt: () => `hi` });";
+        let p = parse(src).unwrap();
+        assert_eq!(p.kind, StepKind::Llm);
+        assert!(p.metadata.get("model").is_none());
+    }
+
+    #[test]
+    fn llm_step_accepts_a_capability_tier() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"triage\", model: \"fast\", prompt: () => `hi` });";
+        let p = parse(src).unwrap();
+        assert_eq!(p.metadata.get("model").unwrap(), "fast");
     }
 
     #[test]

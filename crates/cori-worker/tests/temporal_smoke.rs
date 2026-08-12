@@ -71,6 +71,7 @@ async fn runs_a_trivial_builtin_workflow() {
         required_cli_binaries: vec![],
         required_mcp_servers: vec![],
         required_llm_providers: vec![],
+        requires_llm: false,
     };
 
     let input = WorkflowInput {

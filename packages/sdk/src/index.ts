@@ -148,9 +148,34 @@ export interface LlmBatchOpts {
   readonly by: string;
 }
 
+/**
+ * How much model a step needs, independent of vendor.
+ *
+ * - `fast` — classification, extraction, short rewrites
+ * - `balanced` — the default; most steps
+ * - `deep` — multi-constraint reasoning, long synthesis
+ */
+export type ModelTier = "fast" | "balanced" | "deep";
+
+/**
+ * What a step asks for. A tier is the portable choice; a concrete model
+ * name (`"gpt-4o-mini"`) is a *preference* — the host uses it when it can
+ * reach that vendor and otherwise serves the same tier from whatever
+ * backend it has, recording the substitution in the run trace.
+ *
+ * `string` is kept in the union so any vendor model name type-checks.
+ */
+export type ModelPreference = ModelTier | (string & {});
+
 export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
   extends BaseStepOpts {
-  readonly model: string;
+  /**
+   * Optional. Omit it to let the host pick at its default tier — the
+   * portable choice, and the one that runs anywhere. Declare a tier
+   * (`"fast"`) to say how much model the step needs, or a concrete model
+   * name to express a preference.
+   */
+  readonly model?: ModelPreference;
   readonly input?: I;
   readonly output?: O;
   readonly prompt: (input: ZodOutput<I>) => string;
@@ -158,7 +183,7 @@ export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 }
 
 export interface LlmStepDef extends StepDef<"llm"> {
-  readonly model: string;
+  readonly model?: ModelPreference;
   readonly prompt: (input: unknown) => string;
   readonly batch?: LlmBatchOpts;
   readonly input?: ZodTypeAny;

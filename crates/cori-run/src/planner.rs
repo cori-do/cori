@@ -332,6 +332,7 @@ mod tests {
             required_cli_binaries: vec![],
             required_mcp_servers: vec![],
             required_llm_providers: vec![],
+            requires_llm: false,
         };
 
         let summary = assign_queues(&mut compiled, &me, &cluster).unwrap();
@@ -354,6 +355,7 @@ mod tests {
             required_cli_binaries: vec![],
             required_mcp_servers: vec![],
             required_llm_providers: vec![],
+            requires_llm: false,
         };
         let err = assign_queues(&mut compiled, &svc, &cluster).unwrap_err();
         assert!(matches!(err, PlacementError::LocalFsFromService { .. }));
@@ -379,6 +381,7 @@ mod tests {
             required_cli_binaries: vec![],
             required_mcp_servers: vec![],
             required_llm_providers: vec![],
+            requires_llm: false,
         };
         let err = assign_queues(&mut compiled, &me, &cluster).unwrap_err();
         assert!(matches!(err, PlacementError::MissingCapability { .. }));
@@ -408,6 +411,7 @@ mod tests {
             required_cli_binaries: vec!["curl".into()],
             required_mcp_servers: vec![],
             required_llm_providers: vec![],
+            requires_llm: false,
         };
         let summary = assign_queues(&mut compiled, &me, &cluster).unwrap();
         assert_eq!(summary[0].task_queue, "cori.user.jean");
@@ -432,6 +436,7 @@ mod tests {
             required_cli_binaries: vec![],
             required_mcp_servers: vec![],
             required_llm_providers: vec![],
+            requires_llm: false,
         };
         let summary = assign_queues(&mut compiled, &me, &cluster).unwrap();
         assert_eq!(summary[0].task_queue, "cori.user.solo");

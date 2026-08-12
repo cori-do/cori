@@ -398,6 +398,9 @@ input[type="text"],
 input[type="number"],
 input[type="email"],
 input[type="time"],
+input[type="password"],
+input[type="search"],
+input[type="url"],
 select,
 textarea {
   background: var(--surface-2);
@@ -414,6 +417,9 @@ textarea::placeholder { color: var(--muted); opacity: 0.7; }
 input[type="text"]:focus,
 input[type="number"]:focus,
 input[type="time"]:focus,
+input[type="password"]:focus,
+input[type="search"]:focus,
+input[type="url"]:focus,
 select:focus,
 textarea:focus {
   outline: 1px solid var(--accent);
@@ -1485,6 +1491,10 @@ table.runs td strong {
   background: transparent;
   border: none;
   border-radius: 0;
+  /* The bordered variant clips to keep its rounded corners clean; this
+     one has neither border nor radius, so clipping only served to cut
+     off the `llm` step's provider tooltip. */
+  overflow: visible;
 }
 .timeline.is-flat .step {
   padding: 6px 0;
@@ -2296,3 +2306,241 @@ table.runs td strong {
     transition-duration: 0.001s !important;
   }
 }
+
+/* ─── AI Providers ───────────────────────────────────────────────────
+   One ranked list of places an `llm` step can run. Subscriptions and API
+   keys are the same object here on purpose: the user's question is
+   "which one runs first", and that has a single answer. */
+
+/* The outcome, stated before the controls that produce it. */
+.active-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--green);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.active-banner.is-blocked { border-left-color: var(--amber); }
+.active-banner .pill { flex: none; margin-top: 1px; }
+.active-banner .hint { margin-top: 4px; }
+
+/* Section heading with its explanation and one action on the same line. */
+.section-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 12px;
+  margin-bottom: 10px;
+}
+.section-head h2 {
+  grid-column: 1;
+  margin: 0;
+  font-size: 1.05rem;
+}
+.section-head .hint {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 2px;
+}
+.section-head .btn {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.backend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.backend-row {
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: opacity 150ms ease, border-color 150ms ease;
+}
+/* A disabled provider stays in place and legible — it is still a row the
+   user can rank and re-enable, not a deleted one. */
+.backend-row.is-off { opacity: 0.55; }
+.backend-row.is-off:hover,
+.backend-row.is-off:focus-within { opacity: 1; }
+
+.backend-main {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+/* The three tier models, legible without expanding the row. Mono and
+   muted so the provider name still leads. */
+.backend-models {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 34ch;
+}
+.backend-models .is-custom { color: var(--accent); }
+.backend-models .tooltip-body {
+  left: auto;
+  right: 0;
+  width: auto;
+  min-width: 200px;
+  font-family: var(--font-sans);
+}
+
+.backend-rank {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.backend-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--foreground);
+}
+.icon-btn:disabled { opacity: 0.3; cursor: default; }
+.icon-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.backend-identity { min-width: 0; }
+.backend-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  font-size: 13.5px;
+}
+.backend-identity .hint { margin-top: 3px; }
+
+.backend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.backend-toggle input { cursor: pointer; }
+
+.backend-detail {
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--rule);
+  margin-top: -1px;
+}
+
+.tier-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.tier-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.tier-field input { width: 100%; }
+.tier-field .hint { margin-top: 0; font-size: 11.5px; }
+.tier-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tier-label em {
+  font-style: normal;
+  color: var(--accent);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.backend-key {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+@media (max-width: 640px) {
+  /* Identity takes the full width; the controls tuck under it rather
+     than crushing the provider name. */
+  .backend-main {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    row-gap: 8px;
+  }
+  .backend-identity { grid-column: 3 / -1; }
+  /* Not enough width for the model summary and the controls on one
+     line; the summary is the part the expanded view repeats. */
+  .backend-models { display: none; }
+  .backend-toggle { grid-column: 3; grid-row: 2; }
+}
+
+/* The `llm` kind carries a tooltip naming the provider that will serve
+   the step. Two adjustments for that context: the trigger sits at the
+   right edge of a narrow column, so a left-anchored 340px popover would
+   run off the window; and the trigger's own muted colour must not
+   override the billed accent the kind is deliberately painted in. */
+.step .kind .tooltip-trigger { color: inherit; }
+/* The trigger is a ~90px column near the right edge of a pane the user
+   can drag down to 320px, so a popover anchored to the trigger runs off
+   the left edge and gets clipped by the scroll container. Anchoring to
+   the row instead makes the popover exactly as wide as the row at every
+   pane width — `position: static` on the trigger hands the offset parent
+   to `.step`. */
+.step { position: relative; }
+.step .kind .tooltip-trigger { position: static; }
+.step .kind .tooltip-body {
+  left: 0;
+  right: 0;
+  width: auto;
+  max-width: none;
+  color: var(--muted);
+  font-family: var(--font-sans);
+}
+.step .kind .tooltip-body strong { color: var(--foreground); }

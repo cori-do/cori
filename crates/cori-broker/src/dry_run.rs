@@ -108,18 +108,13 @@ pub fn llm(
     runtime: &Runtime,
     step_file_path: &Path,
     input: &JsonValue,
-    expected_model: Option<&str>,
+    expected_model: &crate::llm::ExpectedModel,
 ) -> Result<ActivityOutcome> {
     let prompt =
         dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::LlmPrompt, input)?;
-    let actual_model = prompt
-        .output
-        .get("model")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| BrokerError::StepFailed {
-            message: "llm step produced no model".to_string(),
-            stack: None,
-        })?;
+    // A step may legitimately declare no model and let the host choose,
+    // so `None` here is a valid answer rather than a malformed step.
+    let actual_model = prompt.output.get("model").and_then(JsonValue::as_str);
     crate::llm::validate_model_boundary(expected_model, actual_model)?;
     let stub = output_stub(runtime, step_file_path)?;
     Ok(ActivityOutcome {
@@ -129,7 +124,10 @@ pub fn llm(
         stderr: combine_stderr(prompt.stderr, stub.stderr),
         cost_eur: Some(0.0),
         usage: None,
-        notes: Vec::new(),
+        notes: vec![format!(
+            "would call an LLM for `{}`",
+            actual_model.unwrap_or("the host default model")
+        )],
     })
 }
 

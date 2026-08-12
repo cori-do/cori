@@ -158,6 +158,12 @@ pub enum BrokerError {
     )]
     LlmUnknownModel { model: String },
 
+    /// Nothing on this machine can serve an `llm` step: no subscription
+    /// backend is signed in and no API key is configured (or the
+    /// configured mode rules out whichever one is available).
+    #[error("no LLM backend can serve `{requested}`.\n{detail}")]
+    LlmNoBackend { requested: String, detail: String },
+
     #[error(
         "LLM credentials missing for provider `{provider}` — set the {env_var} environment variable, or run `cori login {provider}`"
     )]

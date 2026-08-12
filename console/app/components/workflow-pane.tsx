@@ -33,6 +33,7 @@ import {
   type RunEvent,
   type RunListEntry,
   type RunTrace,
+  type StepSummary,
   type WorkflowPreflight,
 } from "../lib/api";
 import { ProviderKeyForm } from "./provider-key-form";
@@ -696,9 +697,7 @@ function Steps({
             <div className="step-body">
               <div className="name">{s.name}</div>
             </div>
-            <div className={s.kind === "llm" ? "kind is-billed" : "kind"}>
-              {s.kind}
-            </div>
+            <StepKind step={s} />
             <div className="right">
               <StepState step={l} />
             </div>
@@ -706,6 +705,67 @@ function Steps({
         );
       })}
     </ol>
+  );
+}
+
+/**
+ * The step's kind, and for `llm` steps the provider that will actually
+ * serve it.
+ *
+ * The resolution comes from preflight, which runs the same resolver the
+ * worker uses — so this tooltip states what will happen rather than
+ * re-deriving it from settings and hoping the two agree. Hovering is how
+ * you answer "which of my providers does this step use?" without leaving
+ * the workflow.
+ */
+function StepKind({ step }: { step: StepSummary }) {
+  const r = step.llm_resolution;
+  if (step.kind !== "llm") return <div className="kind">{step.kind}</div>;
+
+  if (!r) {
+    return (
+      <div className="kind is-billed">
+        <span className="tooltip-trigger" tabIndex={0}>
+          llm
+          <span role="tooltip" className="tooltip-body">
+            No AI provider is ready to serve this step. Open Settings → AI
+            Providers to sign in to a subscription or add an API key.
+          </span>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="kind is-billed">
+      <span className="tooltip-trigger" tabIndex={0}>
+        llm
+        <span role="tooltip" className="tooltip-body">
+          <strong>{r.display_name}</strong> · <code>{r.model}</code>
+          <br />
+          {r.kind === "subscription"
+            ? `Paid for by your ${r.subscription_name} plan — no per-token cost.`
+            : "Billed per token to your API key."}
+          <br />
+          {r.degraded ? (
+            <>
+              This step asks for <code>{r.requested}</code>, which this
+              provider doesn't serve — Cori substitutes an equivalent{" "}
+              <code>{r.tier}</code> model and records it in the run trace.
+            </>
+          ) : step.model ? (
+            <>
+              Step asks for <code>{step.model}</code>.
+            </>
+          ) : (
+            <>
+              Step names no model, so it runs at the <code>{r.tier}</code>{" "}
+              tier.
+            </>
+          )}
+        </span>
+      </span>
+    </div>
   );
 }
 

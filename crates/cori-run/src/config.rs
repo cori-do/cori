@@ -53,13 +53,20 @@ impl Config {
         Some(cur)
     }
 
-    /// Set a dotted key to a string value. Creates intermediate tables.
+    /// Set a dotted key to a string value, coercing bool/int/float.
+    /// Creates intermediate tables.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
+        self.set_value(key, parse_value(value))
+    }
+
+    /// Set a dotted key to an already-typed value. The path for values
+    /// `set`'s string coercion can't express — arrays, in particular
+    /// (`llm.priority`).
+    pub fn set_value(&mut self, key: &str, parsed: Value) -> Result<()> {
         let segments: Vec<&str> = key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
             bail!("invalid config key `{key}`");
         }
-        let parsed = parse_value(value);
         let mut cur = &mut self.doc;
         for seg in &segments[..segments.len() - 1] {
             if !cur.is_table() {

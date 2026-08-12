@@ -454,7 +454,10 @@ fn http_client() -> &'static reqwest::blocking::Client {
     })
 }
 
-fn system_message(strict: bool) -> &'static str {
+/// Shared by the HTTP providers and by [`super::subscription`], which
+/// folds it into the prompt because one-shot CLI mode has no separate
+/// system channel.
+pub(super) fn system_message(strict: bool) -> &'static str {
     if strict {
         "You are an automation backend. Your previous response did not match the required JSON schema. You MUST return a single JSON object that conforms to the schema exactly — no markdown fences, no prose, no trailing commentary."
     } else {

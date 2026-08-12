@@ -297,23 +297,51 @@ pub fn compute_placement(
     }
 }
 
-/// Map an LLM model name to its provider id. Kept here (and not just in
-/// the broker) so the compiler can validate `model: "…"` declarations
-/// without taking a dep on the broker crate.
+/// Map an LLM model name to the API provider that natively serves it.
+/// Kept here (and not just in the broker) so the compiler can record a
+/// step's *preferred* provider without taking a dep on the broker crate.
+///
+/// `None` covers both capability tiers (`"fast"`) and names no vendor
+/// prefix claims. Neither is an error: a model name is a preference, and
+/// the host resolves it against whatever backend it can actually reach
+/// (see `cori_broker::llm::catalog`).
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    if model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-    {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
         Some("openai")
-    } else if model.starts_with("claude-") {
+    } else if m.starts_with("claude-") {
         Some("anthropic")
-    } else if model.starts_with("gemini-") {
+    } else if m.starts_with("gemini-") {
         Some("gemini")
     } else {
         None
     }
+}
+
+/// Capability-tier aliases a step may declare instead of a model name.
+/// Mirrors `cori_broker::llm::catalog::ModelTier::parse`; kept in sync by
+/// [`tests::tier_aliases_match_the_broker`].
+pub const MODEL_TIER_ALIASES: &[&str] = &[
+    "fast",
+    "cheap",
+    "small",
+    "mini",
+    "balanced",
+    "default",
+    "standard",
+    "medium",
+    "deep",
+    "reasoning",
+    "smart",
+    "large",
+    "best",
+];
+
+/// True when a declared `model` is a capability tier rather than a
+/// concrete vendor model.
+pub fn is_model_tier(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    MODEL_TIER_ALIASES.contains(&m.as_str())
 }
 
 /// Compile a workflow directory. Returns the compiled workflow on success or
@@ -436,6 +464,7 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
     let mut required_cli: Vec<String> = Vec::new();
     let mut required_mcp: Vec<String> = Vec::new();
     let mut required_llm: Vec<String> = Vec::new();
+    let mut requires_llm = false;
     for step in &compiled_steps {
         let rel = step.source_path.clone();
         match step.kind {
@@ -495,23 +524,22 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
                 }
             }
             StepKind::Llm => {
-                if let Some(model) = step.metadata.get("model").and_then(|v| v.as_str()) {
-                    let provider = provider_for_model(model);
-                    if let Some(p) = provider {
-                        if !required_llm.iter().any(|x| x == p) {
-                            required_llm.push(p.to_string());
-                        }
-                    } else {
-                        errors.push(
-                            CompileError::new(
-                                &rel,
-                                format!(
-                                    "model `{model}` does not match any known LLM provider (expected prefix: gpt-/o1-/o3-/o4- for OpenAI, claude- for Anthropic, gemini- for Gemini)"
-                                ),
-                            )
-                            .with_field("model"),
-                        );
-                    }
+                // A declared model records a *preferred* provider, not a
+                // hard requirement: the host may serve the step from a
+                // subscription backend or another provider at the same
+                // capability tier. Preflight therefore only checks that
+                // *some* LLM backend is usable — see
+                // `cori_broker::capabilities::validate`.
+                //
+                // Nothing about a model name is a compile error any more.
+                // Tiers ("fast") and models from vendors Cori has no
+                // built-in prefix for are both legitimate.
+                requires_llm = true;
+                if let Some(model) = step.metadata.get("model").and_then(|v| v.as_str())
+                    && let Some(p) = provider_for_model(model)
+                    && !required_llm.iter().any(|x| x == p)
+                {
+                    required_llm.push(p.to_string());
                 }
             }
             _ => {}
@@ -560,6 +588,7 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         required_cli_binaries: required_cli,
         required_mcp_servers: required_mcp,
         required_llm_providers: required_llm,
+        requires_llm,
     })
 }
 
@@ -694,6 +723,89 @@ mod tests {
     }
 
     const OK_MANIFEST: &str = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\ntools_required: [echo]\n---\n# body\n";
+
+    const LLM_MANIFEST: &str =
+        "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\n---\n# body\n";
+
+    fn compile_llm_step(args: &str) -> CompiledWorkflow {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[(
+                "01_ask.ts",
+                &format!(
+                    "import {{ step }} from \"@cori-do/sdk\";\nexport default step.llm({{ description: \"ask\", {args}prompt: () => `hi` }});"
+                ),
+            )],
+        );
+        compile(tmp.path()).expect("llm workflow compiles")
+    }
+
+    #[test]
+    fn exact_model_records_a_preferred_provider() {
+        let c = compile_llm_step("model: \"gpt-4o-mini\", ");
+        assert_eq!(c.required_llm_providers, vec!["openai".to_string()]);
+        assert!(c.requires_llm);
+    }
+
+    #[test]
+    fn tier_declaration_needs_an_llm_but_no_specific_provider() {
+        // The point of tiers: any backend can serve it, so preflight must
+        // not demand one vendor's key.
+        let c = compile_llm_step("model: \"fast\", ");
+        assert!(c.required_llm_providers.is_empty());
+        assert!(c.requires_llm);
+    }
+
+    #[test]
+    fn absent_model_still_marks_the_workflow_as_needing_an_llm() {
+        let c = compile_llm_step("");
+        assert!(c.required_llm_providers.is_empty());
+        assert!(
+            c.requires_llm,
+            "preflight must still check that some backend exists"
+        );
+    }
+
+    #[test]
+    fn unknown_vendor_models_are_no_longer_a_compile_error() {
+        // "no matter which llm is available will be used" — a name Cori
+        // has no prefix for is a preference, not a failure.
+        let c = compile_llm_step("model: \"llama-3.1-70b\", ");
+        assert!(c.required_llm_providers.is_empty());
+        assert!(c.requires_llm);
+    }
+
+    #[test]
+    fn workflow_without_llm_steps_requires_no_llm() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            OK_MANIFEST,
+            &[(
+                "01_x.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"e\", command: () => [\"echo\", \"hi\"] });",
+            )],
+        );
+        let c = compile(tmp.path()).expect("compiles");
+        assert!(!c.requires_llm);
+    }
+
+    #[test]
+    fn tier_aliases_match_the_broker() {
+        // `MODEL_TIER_ALIASES` mirrors ModelTier::parse in the broker's
+        // catalog; this is the reminder to update both together.
+        for alias in MODEL_TIER_ALIASES {
+            assert!(is_model_tier(alias), "{alias} should parse as a tier");
+            assert!(
+                provider_for_model(alias).is_none(),
+                "{alias} is a tier, not a vendor model"
+            );
+        }
+        assert!(!is_model_tier("gpt-4o-mini"));
+        assert!(is_model_tier("  FAST  "));
+    }
 
     #[test]
     fn missing_manifest() {

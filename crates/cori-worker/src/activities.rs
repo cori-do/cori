@@ -272,25 +272,20 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                 )
             }
             (BrokerKind::Llm, false) => {
-                let expected_model =
-                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
+                // `model` is optional, so absence is a real declaration
+                // rather than malformed metadata — see `ExpectedModel`.
+                let expected_model = expected_model(frozen_step.as_ref());
                 llm::run(
                     &ctx.runtime,
                     &absolute_path,
                     &step_input,
                     &ctx.llm_opts,
-                    expected_model.as_deref(),
+                    &expected_model,
                 )
             }
             (BrokerKind::Llm, true) => {
-                let expected_model =
-                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
-                dry_run::llm(
-                    &ctx.runtime,
-                    &absolute_path,
-                    &step_input,
-                    expected_model.as_deref(),
-                )
+                let expected_model = expected_model(frozen_step.as_ref());
+                dry_run::llm(&ctx.runtime, &absolute_path, &step_input, &expected_model)
             }
         }
     })
@@ -414,6 +409,13 @@ fn expected_cli_binary(
     })
 }
 
+/// The `model` a step froze at compile time. Unlike `server` / `tool`,
+/// an absent value is legitimate: the step declared no model and lets
+/// the host pick one.
+fn expected_model(frozen: Option<&FrozenStep>) -> llm::ExpectedModel {
+    llm::ExpectedModel::from_frozen(frozen.map(|f| &f.metadata))
+}
+
 fn expected_metadata_string(
     frozen: Option<&FrozenStep>,
     key: &str,
@@ -521,6 +523,12 @@ fn classify(err: &BrokerError) -> Category {
         },
         LlmMissingCredentials { .. } => Category::NonRetryable {
             type_name: "AuthenticationError",
+        },
+        // Nothing on this machine can serve an `llm` step. Retrying
+        // cannot conjure a signed-in CLI or an API key — the user has to
+        // act, and the error text says how.
+        LlmNoBackend { .. } => Category::NonRetryable {
+            type_name: "MissingCapabilityError",
         },
         LlmUnknownModel { .. } => Category::NonRetryable {
             type_name: "InvalidInputError",

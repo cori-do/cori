@@ -96,12 +96,24 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
 
     let identity = OsUser
         .resolve()
         .context("resolving OS user identity for preflight")?;
     let user_task_queue = task_queue_for(&identity);
+
+    // Subscription backends count as usable capabilities only when the
+    // policy allows them for this identity.
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &loaded.compiled.required_cli_binaries,
+        &credentials,
+        &cori_run::resolve_llm_policy(&identity),
+        capabilities::LlmProbe::for_workflow(
+            loaded.compiled.requires_llm,
+            &loaded.compiled.required_llm_providers,
+        ),
+    );
 
     let mut cluster = planner::ClusterView::load().unwrap_or_default();
     let self_report = CapabilityReport::from_capabilities_with(

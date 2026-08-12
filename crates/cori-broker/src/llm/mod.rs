@@ -3,22 +3,36 @@
 //! The LLM dispatch path follows this flow:
 //!
 //! 1. Invoke the runner in `llm_prompt` mode to materialise the prompt
-//!    string, the model name, the (optional) batch config, and the
-//!    (optional) output JSON Schema.
-//! 2. Pick a [`providers::LlmProvider`] from the model-name prefix.
-//! 3. Resolve credentials for the provider (env > config > interactive
-//!    prompt).
-//! 4. If `batch` was declared and the input has an array under the named
+//!    string, the declared model (if any), the (optional) batch config,
+//!    and the (optional) output JSON Schema.
+//! 2. Resolve a backend ([`resolve`]) from what the step asked for, the
+//!    user's policy ([`policy`]), and what is usable on this machine —
+//!    a signed-in subscription CLI ([`subscription`]) or a metered API
+//!    key ([`providers`]).
+//! 3. If `batch` was declared and the input has an array under the named
 //!    field, split into chunks of `batch.size`, fan out to N parallel
 //!    threads (default concurrency 4), and merge results.
-//! 5. Validate every response against the output schema. Retry once with
+//! 4. Validate every response against the output schema. Retry once with
 //!    a stricter system message on schema-validation failure.
-//! 6. Record cost via [`pricing::cost_eur`] and return an
-//!    [`ActivityOutcome`] whose `output` is the (merged) parsed JSON.
+//! 5. Record cost via [`pricing::cost_eur`] and return an
+//!    [`ActivityOutcome`] whose `output` is the (merged) parsed JSON and
+//!    whose notes name the backend that actually answered.
+//!
+//! # What a step declares
+//!
+//! `model` is a *preference*, not a pin (see [`catalog`]). A step may
+//! declare nothing, a capability tier (`"fast"`), or a concrete model
+//! name. The host resolves that to whatever it can actually reach,
+//! degrading within the same tier and recording both the requested and
+//! the served model in the run trace.
 
+pub mod catalog;
 pub mod credentials;
+pub mod policy;
 mod pricing;
-mod providers;
+pub mod providers;
+pub mod resolve;
+pub mod subscription;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -33,6 +47,7 @@ use crate::runtime::Runtime;
 use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result, TokenUsage, TriggerContext};
 
 pub use credentials::LlmCredentials;
+pub use policy::{Deployment, LlmConfig, LlmMode, LlmPolicy};
 
 /// Default fan-out for batched LLM calls.
 const DEFAULT_BATCH_CONCURRENCY: usize = 4;
@@ -42,11 +57,17 @@ const DEFAULT_BATCH_CONCURRENCY: usize = 4;
 pub struct LlmOptions {
     pub credentials: LlmCredentials,
     pub trigger: Option<TriggerContext>,
+    /// Which backends may serve a step, and in what order. Built from
+    /// `~/.cori/config.toml` and gated by the worker's identity — see
+    /// [`policy`].
+    pub policy: LlmPolicy,
 }
 
 #[derive(Debug, Deserialize)]
 struct PromptSpec {
-    model: String,
+    /// Absent when the step declared no `model` — the host picks.
+    #[serde(default)]
+    model: Option<String>,
     prompt: String,
     #[serde(default, rename = "batchPrompts")]
     batch_prompts: Vec<String>,
@@ -69,7 +90,7 @@ pub fn run(
     step_file_path: &Path,
     input: &JsonValue,
     opts: &LlmOptions,
-    expected_model: Option<&str>,
+    expected_model: &ExpectedModel,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -82,9 +103,21 @@ pub fn run(
             envelope: initial.output.to_string(),
             source: e,
         })?;
-    validate_model_boundary(expected_model, &spec.model)?;
+    validate_model_boundary(expected_model, spec.model.as_deref())?;
 
-    let provider = pick_provider(&spec.model, &opts.credentials)?;
+    // What the step asked for, resolved against what this machine can
+    // actually reach right now.
+    let request = catalog::parse_request(spec.model.as_deref());
+    let resolution = resolve_with_prompt(&request, opts)?;
+    let provider = &*resolution.provider;
+    // The name sent on the wire. Subscription backends may take `None`
+    // (use the CLI's own default), in which case the declared name is
+    // only a label.
+    let wire_model = resolution
+        .selection
+        .resolved_model
+        .clone()
+        .unwrap_or_else(|| request.requested().to_string());
     let output_schema = spec.output_schema.as_ref();
 
     let mut combined_stderr = initial.stderr;
@@ -92,13 +125,13 @@ pub fn run(
     let (text_responses, total_usage) = if spec.batch_prompts.is_empty() {
         // No batching — single call, reuse the prompt we already rendered.
         let req = providers::LlmRequest {
-            model: &spec.model,
+            model: &wire_model,
             prompt: &spec.prompt,
             output_schema,
             strict_retry: false,
         };
         let resp = call_with_schema_retry(
-            &*provider,
+            provider,
             &req,
             runtime,
             step_file_path,
@@ -110,8 +143,8 @@ pub fn run(
         // before transformed values cross the JSON process boundary. Parallel
         // provider dispatch can then use those frozen prompt strings directly.
         fan_out(
-            &*provider,
-            &spec.model,
+            provider,
+            &wire_model,
             &spec.batch_prompts,
             output_schema,
             runtime,
@@ -151,11 +184,12 @@ pub fn run(
         combined_stderr.push_str(&validated.stderr);
     }
 
-    let cost = pricing::cost_eur(
-        &spec.model,
-        total_usage.input_tokens,
-        total_usage.output_tokens,
-    );
+    // Subscription calls are covered by a flat fee the user already
+    // paid, so `cost_model()` returns `None` for them and the run is not
+    // charged API rates for tokens that cost nothing extra.
+    let cost = resolution.cost_model().and_then(|model| {
+        pricing::cost_eur(model, total_usage.input_tokens, total_usage.output_tokens)
+    });
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
@@ -164,56 +198,103 @@ pub fn run(
         stderr: combined_stderr,
         cost_eur: cost,
         usage: Some(total_usage),
-        notes: Vec::new(),
+        notes: vec![resolution.trace_note()],
     })
 }
 
-/// Enforce the compiler's literal model before provider and credential
-/// selection. `None` is retained only for legacy Temporal histories.
-pub(crate) fn validate_model_boundary(expected: Option<&str>, actual: &str) -> Result<()> {
-    if let Some(expected) = expected
-        && expected != actual
-    {
-        return Err(BrokerError::CapabilityDenied {
-            kind: "LLM model",
-            name: actual.to_string(),
-            hint: format!(
-                "step was compiled for model `{expected}` but runtime evaluation produced `{actual}`; the model must remain the directly declared literal"
-            ),
-        });
+/// Resolve a backend, and on an interactive run give the user one
+/// chance to fix a machine with nothing usable on it — sign in to an
+/// agent CLI, or set an API key — rather than failing the run outright.
+fn resolve_with_prompt(
+    request: &catalog::ModelRequest,
+    opts: &LlmOptions,
+) -> Result<resolve::Resolution> {
+    match resolve::resolve(request, &opts.policy, &opts.credentials) {
+        Ok(resolution) => Ok(resolution),
+        Err(BrokerError::LlmNoBackend { requested, detail }) => {
+            let Some(refreshed) = credentials::prompt_for_backend(&detail) else {
+                return Err(BrokerError::LlmNoBackend { requested, detail });
+            };
+            resolve::resolve(request, &opts.policy, &refreshed)
+        }
+        Err(other) => Err(other),
     }
-    Ok(())
 }
 
-/// Pick a provider implementation by model-name prefix.
-fn pick_provider(model: &str, creds: &LlmCredentials) -> Result<Box<dyn providers::LlmProvider>> {
-    let provider_name = provider_for_model(model).ok_or_else(|| BrokerError::LlmUnknownModel {
-        model: model.to_string(),
-    })?;
-    let key = credentials::require(creds, provider_name)?;
-    Ok(match provider_name {
-        "openai" => Box::new(providers::OpenAiProvider::new(key)),
-        "anthropic" => Box::new(providers::AnthropicProvider::new(key)),
-        "gemini" => Box::new(providers::GeminiProvider::new(key)),
-        _ => unreachable!("provider_for_model returned unknown provider"),
+/// Enforce the compiler's declared model before backend selection.
+///
+/// This guards the same boundary it always has: the model a step
+/// declares must be a literal frozen at compile time, not something
+/// runtime evaluation can swap. Backend *resolution* happens after this
+/// check and is a host-side decision recorded in the trace — a workflow
+/// still cannot choose its own model at runtime.
+///
+/// `model` being optional makes "the step declared nothing" a real
+/// state, distinct from "this history predates frozen metadata" — see
+/// [`ExpectedModel`]. Conflating them would either reject every
+/// model-less step or silently drop the check for every legacy one.
+pub(crate) fn validate_model_boundary(
+    expected: &ExpectedModel,
+    actual: Option<&str>,
+) -> Result<()> {
+    let expected_desc = match expected {
+        // Legacy Temporal history recorded before the model was frozen:
+        // there is nothing to compare against.
+        ExpectedModel::Unknown => return Ok(()),
+        ExpectedModel::Undeclared => {
+            if actual.is_none() {
+                return Ok(());
+            }
+            "no model".to_string()
+        }
+        ExpectedModel::Declared(model) => {
+            if actual == Some(model.as_str()) {
+                return Ok(());
+            }
+            format!("`{model}`")
+        }
+    };
+    let actual_desc = actual.unwrap_or("no model");
+    Err(BrokerError::CapabilityDenied {
+        kind: "LLM model",
+        name: actual_desc.to_string(),
+        hint: format!(
+            "step was compiled for {expected_desc} but runtime evaluation produced `{actual_desc}`; the model must remain the directly declared literal"
+        ),
     })
 }
 
-/// Map a model name to a provider id. Returns `None` for unknown prefixes.
+/// What the compiler froze into a step's metadata for `model`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedModel {
+    /// No frozen metadata at all — a Temporal history from before
+    /// source-boundary enforcement. The check is skipped.
+    Unknown,
+    /// Frozen metadata exists and carries no `model`: the step declared
+    /// none, and must still declare none at runtime.
+    Undeclared,
+    /// The step declared this literal.
+    Declared(String),
+}
+
+impl ExpectedModel {
+    /// Build from a step's frozen metadata. `frozen_metadata` is `None`
+    /// only for legacy histories.
+    pub fn from_frozen(frozen_metadata: Option<&serde_json::Map<String, JsonValue>>) -> Self {
+        match frozen_metadata {
+            None => ExpectedModel::Unknown,
+            Some(metadata) => match metadata.get("model").and_then(JsonValue::as_str) {
+                Some(model) => ExpectedModel::Declared(model.to_string()),
+                None => ExpectedModel::Undeclared,
+            },
+        }
+    }
+}
+
+/// Map a model name to the API provider that serves it. Kept as a
+/// re-export so existing callers don't have to reach into [`catalog`].
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    if model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-    {
-        Some("openai")
-    } else if model.starts_with("claude-") {
-        Some("anthropic")
-    } else if model.starts_with("gemini-") {
-        Some("gemini")
-    } else {
-        None
-    }
+    catalog::api_provider_for_model(model)
 }
 
 /// Fan out one provider call per prompt across worker threads.
@@ -446,17 +527,74 @@ mod tests {
         assert_eq!(provider_for_model("llama-3"), None);
     }
 
+    fn declared(model: &str) -> ExpectedModel {
+        ExpectedModel::Declared(model.to_string())
+    }
+
     #[test]
     fn rejects_runtime_model_switches() {
-        validate_model_boundary(Some("gpt-4o-mini"), "gpt-4o-mini").expect("matching frozen model");
-        let error = validate_model_boundary(Some("gpt-4o-mini"), "claude-3-5-sonnet")
+        validate_model_boundary(&declared("gpt-4o-mini"), Some("gpt-4o-mini"))
+            .expect("matching frozen model");
+        let error = validate_model_boundary(&declared("gpt-4o-mini"), Some("claude-3-5-sonnet"))
             .expect_err("runtime model switch must fail");
         assert!(matches!(
             error,
             BrokerError::CapabilityDenied { kind: "LLM model", name, .. }
                 if name == "claude-3-5-sonnet"
         ));
-        validate_model_boundary(None, "legacy-model").expect("legacy compatibility");
+    }
+
+    #[test]
+    fn legacy_histories_without_frozen_metadata_still_run() {
+        validate_model_boundary(&ExpectedModel::Unknown, Some("legacy-model"))
+            .expect("legacy compatibility");
+        validate_model_boundary(&ExpectedModel::Unknown, None).expect("legacy compatibility");
+    }
+
+    #[test]
+    fn undeclared_model_stays_undeclared() {
+        // A step compiled with no `model` must not acquire one at
+        // runtime — and must not be mistaken for a legacy history.
+        validate_model_boundary(&ExpectedModel::Undeclared, None)
+            .expect("nothing declared either side");
+        let error = validate_model_boundary(&ExpectedModel::Undeclared, Some("gpt-4o"))
+            .expect_err("acquiring a model at runtime must fail");
+        assert!(matches!(
+            error,
+            BrokerError::CapabilityDenied { kind: "LLM model", name, .. } if name == "gpt-4o"
+        ));
+
+        let error = validate_model_boundary(&declared("fast"), None)
+            .expect_err("dropping the declared model must fail");
+        assert!(matches!(
+            error,
+            BrokerError::CapabilityDenied {
+                kind: "LLM model",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tier_declarations_survive_the_boundary() {
+        validate_model_boundary(&declared("balanced"), Some("balanced")).expect("frozen tier");
+        validate_model_boundary(&declared("fast"), Some("deep"))
+            .expect_err("tier switch must fail");
+    }
+
+    #[test]
+    fn expected_model_distinguishes_absent_metadata_from_absent_model() {
+        assert_eq!(ExpectedModel::from_frozen(None), ExpectedModel::Unknown);
+        assert_eq!(
+            ExpectedModel::from_frozen(Some(&JsonMap::new())),
+            ExpectedModel::Undeclared
+        );
+        let mut metadata = JsonMap::new();
+        metadata.insert("model".into(), json!("fast"));
+        assert_eq!(
+            ExpectedModel::from_frozen(Some(&metadata)),
+            declared("fast")
+        );
     }
 
     #[test]
@@ -472,6 +610,24 @@ mod tests {
         .expect("prompt spec");
         assert_eq!(spec.batch_prompts, vec!["rows 1-2", "row 3"]);
         assert_eq!(spec.batch.expect("batch").by, "rows");
+    }
+
+    #[test]
+    fn prompt_spec_accepts_a_step_with_no_model() {
+        // The runner emits `model: null` for a step that declared none.
+        let spec: PromptSpec = serde_json::from_value(json!({
+            "model": null,
+            "prompt": "summarise",
+            "batchPrompts": [],
+            "outputSchema": null,
+            "hasOutputSchema": false
+        }))
+        .expect("prompt spec");
+        assert_eq!(spec.model, None);
+        assert_eq!(
+            catalog::parse_request(spec.model.as_deref()),
+            catalog::ModelRequest::Tier(catalog::DEFAULT_TIER)
+        );
     }
 
     #[test]

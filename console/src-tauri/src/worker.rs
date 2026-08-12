@@ -72,11 +72,21 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
 
     let credentials = cori_run::resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
+    // The Console is the launcher: it runs on the user's own machine as
+    // their own identity, so subscription backends are available here.
+    let policy = cori_run::resolve_llm_policy(&identity);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &[],
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::Probe,
+    );
 
     let llm_opts = LlmOptions {
         credentials,
         trigger: Some(TriggerContext::Cli),
+        policy,
     };
 
     let cwd = std::env::current_dir().context("reading current working directory")?;

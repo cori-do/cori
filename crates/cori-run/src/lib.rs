@@ -29,7 +29,7 @@ use chrono::Utc;
 use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_broker::llm::{LlmCredentials, LlmOptions};
+use cori_broker::llm::{Deployment, LlmConfig, LlmCredentials, LlmOptions, LlmPolicy};
 use cori_protocol::{
     ActivityTrace, CostSummary, RunTrace, StepKind, TokenUsage, WorkerIdentity,
     bounded_activity_attempts, identity_from_queue, task_queue_for,
@@ -169,10 +169,20 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
     let identity = OsUser
         .resolve()
         .context("resolving OS user identity for preflight")?;
+    let policy = resolve_llm_policy(&identity);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &loaded.compiled.required_cli_binaries,
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::for_workflow(
+            loaded.compiled.requires_llm,
+            &loaded.compiled.required_llm_providers,
+        ),
+    );
     let cap_report =
         CapabilityReport::from_capabilities_with(identity, &caps, Some(&paths::credentials_dir()?));
 
@@ -181,6 +191,7 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
         &loaded.compiled.required_cli_binaries,
         &loaded.compiled.required_mcp_servers,
         &loaded.compiled.required_llm_providers,
+        loaded.compiled.requires_llm,
     )
     .into_iter()
     .map(|m| m.to_string())
@@ -278,22 +289,40 @@ pub async fn run_workflow(
 
     // 4. Capabilities
     let credentials = resolve_llm_credentials();
+    // `cori run` always executes as the invoking person, so this is the
+    // local deployment — personal subscriptions are on the table, subject
+    // to the mode configured in `~/.cori/config.toml`.
+    let run_identity = OsUser
+        .resolve()
+        .context("resolving OS user identity for the LLM policy")?;
+    let policy = resolve_llm_policy(&run_identity);
     let llm_opts = LlmOptions {
         credentials: credentials.clone(),
         trigger: Some(match trigger {
             Trigger::Cli => TriggerContext::Cli,
             Trigger::Console | Trigger::Schedule | Trigger::Mcp => TriggerContext::Cli,
         }),
+        policy: policy.clone(),
     };
 
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &loaded.compiled.required_cli_binaries,
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::for_workflow(
+            loaded.compiled.requires_llm,
+            &loaded.compiled.required_llm_providers,
+        ),
+    );
 
     let missing: Vec<String> = capabilities::validate(
         &caps,
         &loaded.compiled.required_cli_binaries,
         &loaded.compiled.required_mcp_servers,
         &loaded.compiled.required_llm_providers,
+        loaded.compiled.requires_llm,
     )
     .into_iter()
     .map(|m| m.to_string())
@@ -744,6 +773,33 @@ pub fn resolve_llm_credentials() -> LlmCredentials {
             .flatten();
     }
     LlmCredentials::from_env().or_fill_from(&from_store)
+}
+
+/// Read the `[llm]` table from `~/.cori/config.toml`.
+///
+/// Unlike API keys this is not a secret — it is preference (which
+/// backend pays, in what order), which is exactly what belongs in the
+/// config file. A missing or malformed table yields defaults rather than
+/// an error: a typo in a preference must never stop a run.
+pub fn resolve_llm_config() -> LlmConfig {
+    let Ok(config) = config::Config::load() else {
+        return LlmConfig::default();
+    };
+    config
+        .get("llm")
+        .cloned()
+        .and_then(|v| v.try_into::<LlmConfig>().ok())
+        .unwrap_or_default()
+}
+
+/// Resolve the LLM policy for a worker identity.
+///
+/// The identity is what decides whether subscriptions are available at
+/// all: a `Person` runs on their own machine and may spend their own
+/// subscription; a `Service` pool worker is API-only regardless of
+/// config. See `cori_broker::llm::policy`.
+pub fn resolve_llm_policy(identity: &WorkerIdentity) -> LlmPolicy {
+    LlmPolicy::for_deployment(&resolve_llm_config(), Deployment::from_identity(identity))
 }
 
 /// Build the initial params JSON from manifest defaults overlaid with
