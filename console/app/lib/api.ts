@@ -99,6 +99,53 @@ export interface ActivityTrace {
   notes?: string | null;
 }
 
+export type ResultFieldFormat =
+  | "auto"
+  | "number"
+  | "currency"
+  | "percent"
+  | "duration";
+export type ResultFieldTone = "neutral" | "success" | "warning" | "danger";
+export type ResultSectionDisplay = "auto" | "table" | "list" | "text";
+
+export interface ResolvedResultField {
+  label: string;
+  value: unknown;
+  format: ResultFieldFormat;
+  currency?: string | null;
+  tone: ResultFieldTone;
+}
+
+export interface ResolvedResultSection {
+  label: string;
+  value: unknown;
+  display: ResultSectionDisplay;
+}
+
+export interface ResolvedResultArtifact {
+  label: string;
+  url: string;
+}
+
+export interface ResultIssue {
+  item: string;
+  type:
+    | "missing_value"
+    | "type_mismatch"
+    | "non_scalar_template"
+    | "invalid_url";
+  message: string;
+}
+
+export interface ResolvedResult {
+  headline: string;
+  description?: string | null;
+  fields?: ResolvedResultField[];
+  sections?: ResolvedResultSection[];
+  artifacts?: ResolvedResultArtifact[];
+  issues?: ResultIssue[];
+}
+
 export interface RunTrace {
   run_id: string;
   workflow_id: string;
@@ -112,14 +159,25 @@ export interface RunTrace {
   requesting_identity?: WorkerIdentity;
   source?: unknown;
   params: unknown;
+  result?: ResolvedResult | null;
   activities: ActivityTrace[];
   cost: { total_eur: number; input_tokens: number; output_tokens: number };
   error?: string | null;
 }
 
-export interface RunListEntry extends RunTrace {
+export interface RunListEntry {
   key: string;
   utc: string;
+  run_id: string;
+  workflow_id: string;
+  status: string;
+  trigger: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  cost: { total_eur: number; input_tokens: number; output_tokens: number };
+  error?: string | null;
+  result_headline?: string | null;
 }
 
 /** Mirrors `cori_protocol::trace::WorkflowSource` — kind-tagged. */
@@ -144,6 +202,7 @@ export interface RecentWorkflow {
   source?: WorkflowSource | null;
   last_run_at: string;
   last_status: string;
+  result_headline?: string;
   run_count: number;
 }
 

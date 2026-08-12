@@ -15,6 +15,7 @@ pub mod cron_driver;
 pub mod paths;
 pub mod planner;
 pub mod remote;
+pub mod result;
 pub mod runtime;
 pub mod schedules;
 pub mod temporal_endpoint;
@@ -510,6 +511,12 @@ pub async fn run_workflow(
 
     let ended_at = Utc::now();
     let total = start_instant.elapsed();
+    let resolved_result = result::resolve_result(
+        loaded.compiled.manifest.result.as_ref(),
+        &params,
+        &activities,
+        dry_run,
+    );
     let trace = RunTrace {
         run_id: run_id.clone(),
         workflow_id: loaded.compiled.manifest.id.clone(),
@@ -523,6 +530,7 @@ pub async fn run_workflow(
         duration_ms: total.as_millis(),
         source: Some(loaded.source.clone()),
         params,
+        result: resolved_result,
         activities,
         cost: CostSummary {
             total_eur: total_cost_eur,

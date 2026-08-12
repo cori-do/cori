@@ -192,9 +192,18 @@ fn print_runs_dir(dir: &std::path::Path) -> Result<()> {
             String::new()
         };
         println!(
-            "  · {when:<20}  {status:<10}  {dur:>8}{cost}  {id}",
+            "  · {when:<20}  {status:<10}  {dur:>8}{cost}  {id}{headline}",
             status = t.status,
             id = t.run_id,
+            headline = t
+                .result
+                .as_ref()
+                .filter(|result| !result.headline.is_empty())
+                .map(|result| format!(
+                    "  — {}",
+                    result.headline.chars().take(60).collect::<String>()
+                ))
+                .unwrap_or_default(),
         );
     }
     Ok(())

@@ -51,6 +51,7 @@ async fn runs_a_trivial_builtin_workflow() {
             route_default: None,
             schedule: None,
             schedule_tz: None,
+            result: None,
             body: String::new(),
         },
         steps: vec![CompiledStep {

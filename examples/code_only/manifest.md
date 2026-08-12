@@ -12,6 +12,8 @@ parameters:
 tools_required: []
 mcp_servers: []
 tags: [demo, code]
+result:
+  headline: "Squared value: {{ result }}"
 ---
 
 # Code-only demo
@@ -25,5 +27,5 @@ runner subprocess and that step outputs chain into the next step's input.
 2. **stringify** (code) — render the result as a decimal string
 
 ## Verification
-- `cori run code_only x=12` prints `Output: {"result":"144"}`
-- The trace recorded in SQLite has two `code` activities, both `ok`
+- `cori run code_only x=12` prints `Squared value: 144`
+- The trace on disk has two `code` activities, both `ok`

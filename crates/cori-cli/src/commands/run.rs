@@ -206,7 +206,61 @@ fn print_step_summary(summary: &cori_worker::workflow::ActivitySummary) {
     }
 }
 
-fn print_final_output(trace: &RunTrace) {
+pub(crate) fn print_final_output(trace: &RunTrace) {
+    if let Some(result) = &trace.result {
+        println!();
+        if trace.status == "failed" {
+            println!("Partial result");
+        } else {
+            println!("Result");
+        }
+        println!(
+            "{}",
+            if result.headline.is_empty() {
+                "(headline unavailable)"
+            } else {
+                &result.headline
+            }
+        );
+        if let Some(description) = &result.description {
+            println!("{description}");
+        }
+        if !result.fields.is_empty() {
+            println!();
+            for field in &result.fields {
+                println!(
+                    "  {}: {}",
+                    field.label,
+                    format_result_field(&field.value, field.format, field.currency.as_deref())
+                );
+            }
+        }
+        if !result.artifacts.is_empty() {
+            println!();
+            println!("Artifacts:");
+            for artifact in &result.artifacts {
+                println!("  {}: {}", artifact.label, artifact.url);
+            }
+        }
+        for section in &result.sections {
+            println!();
+            println!("{}:", section.label);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&section.value)
+                    .unwrap_or_else(|_| section.value.to_string())
+            );
+        }
+        if !result.issues.is_empty() {
+            println!();
+            println!("Result issues:");
+            for issue in &result.issues {
+                println!("  {}: {}", issue.item, issue.message);
+            }
+        }
+        return;
+    }
+
     let final_output = trace
         .activities
         .iter()
@@ -217,6 +271,56 @@ fn print_final_output(trace: &RunTrace) {
         .unwrap_or(JsonValue::Null);
     let pretty = serde_json::to_string(&final_output).unwrap_or_else(|_| final_output.to_string());
     println!("Output: {pretty}");
+}
+
+fn format_result_field(
+    value: &JsonValue,
+    format: cori_protocol::ResultFieldFormat,
+    currency: Option<&str>,
+) -> String {
+    use cori_protocol::ResultFieldFormat;
+
+    match format {
+        ResultFieldFormat::Auto => match value {
+            JsonValue::String(value) => value.clone(),
+            _ => value.to_string(),
+        },
+        ResultFieldFormat::Number => value
+            .as_f64()
+            .map(format_number)
+            .unwrap_or_else(|| value.to_string()),
+        ResultFieldFormat::Currency => value
+            .as_f64()
+            .map(|number| format!("{} {number:.2}", currency.unwrap_or("")))
+            .unwrap_or_else(|| value.to_string()),
+        ResultFieldFormat::Percent => value
+            .as_f64()
+            .map(|number| format!("{}%", format_number(number)))
+            .unwrap_or_else(|| value.to_string()),
+        ResultFieldFormat::Duration => value
+            .as_f64()
+            .map(format_duration_result)
+            .unwrap_or_else(|| value.to_string()),
+    }
+}
+
+fn format_number(number: f64) -> String {
+    if number.fract() == 0.0 {
+        format!("{number:.0}")
+    } else {
+        format!("{number}")
+    }
+}
+
+fn format_duration_result(milliseconds: f64) -> String {
+    if milliseconds < 1_000.0 {
+        format!("{}ms", format_number(milliseconds))
+    } else if milliseconds < 60_000.0 {
+        format!("{:.2}s", milliseconds / 1_000.0)
+    } else {
+        let seconds = (milliseconds / 1_000.0).round() as u64;
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    }
 }
 
 fn kind_label(kind: cori_protocol::StepKind) -> &'static str {

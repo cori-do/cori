@@ -921,6 +921,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -948,6 +949,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -988,6 +990,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "url",
  "uuid",
  "walkdir",
 ]

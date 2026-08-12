@@ -1589,6 +1589,11 @@ function RecentRow({
             />
           )}
         </div>
+        {r.result_headline && (
+          <div className="result-row-desc" title={r.result_headline}>
+            {r.result_headline}
+          </div>
+        )}
       </div>
     </button>
   );

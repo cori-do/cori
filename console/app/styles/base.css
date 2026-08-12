@@ -1911,6 +1911,157 @@ table.runs td strong {
   padding: 18px 22px 48px;
   min-height: 0;
 }
+
+/* ─── Declared workflow result ────────────────────────────────────── */
+.result-card {
+  margin: 0 0 18px;
+  padding: 20px;
+  background: linear-gradient(145deg, var(--surface-2), var(--background));
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.result-card.is-compact {
+  margin: 0 0 12px;
+  padding: 14px;
+}
+.result-card-kicker,
+.result-metric-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.result-card-headline {
+  margin: 4px 0 0;
+  font-family: var(--font-sans);
+  font-size: clamp(18px, 3vw, 26px);
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+.result-card.is-compact .result-card-headline { font-size: 16px; }
+.result-card-description,
+.result-prose {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.result-card-description { margin: 8px 0 0; color: var(--muted-strong); }
+.result-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 18px;
+}
+.result-metric {
+  min-width: 0;
+  padding: 12px;
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+}
+.result-metric.tone-success { border-left: 2px solid var(--green); }
+.result-metric.tone-warning { border-left: 2px solid var(--amber); }
+.result-metric.tone-danger { border-left: 2px solid var(--red); }
+.result-metric-value {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.result-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.result-artifact { display: inline-flex; gap: 12px; }
+.result-open-error { margin: 8px 0 0; color: var(--red); font-size: 12px; }
+.result-sections { margin-top: 20px; }
+.result-section { margin-top: 18px; }
+.result-section h3 { margin: 0 0 8px; }
+.result-list { margin: 0; padding-left: 20px; }
+.result-list li { margin: 5px 0; overflow-wrap: anywhere; }
+.result-kv { margin: 0; }
+.result-kv > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.result-kv dt { color: var(--muted); font-family: var(--font-mono); }
+.result-kv dd { margin: 0; overflow-wrap: anywhere; }
+.result-table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius-sm); }
+.result-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.result-table th,
+.result-table td {
+  max-width: 320px;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--rule);
+  overflow-wrap: anywhere;
+}
+.result-table th {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.result-table tr:last-child td { border-bottom: 0; }
+.result-expand {
+  margin-top: 7px;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.result-tree summary,
+.result-raw summary,
+.result-issues summary { cursor: pointer; color: var(--muted); }
+.result-tree pre,
+.result-raw pre {
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+.result-issues,
+.result-raw { margin-top: 16px; }
+.result-issues { color: var(--red); }
+.result-issues ul { margin-bottom: 0; padding-left: 20px; }
+.result-issues li { margin-top: 5px; }
+.pane-history-headline {
+  display: block;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 11.5px;
+}
+.run-result-headline {
+  max-width: 36ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* ─── Parameter fields (launcher's right pane) ───────────────────── */
 .param-row { margin-bottom: 16px; }
 .param-row:last-child { margin-bottom: 0; }

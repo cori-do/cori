@@ -291,6 +291,14 @@ fn runs_list_and_show_read_persisted_traces() {
         duration_ms: 42,
         source: None,
         params: json!({}),
+        result: Some(cori_protocol::ResolvedResult {
+            headline: "200 rows ready".into(),
+            description: None,
+            fields: vec![],
+            sections: vec![],
+            artifacts: vec![],
+            issues: vec![],
+        }),
         activities: vec![cori_protocol::ActivityTrace {
             activity_id: "01_bulk".into(),
             step_name: "bulk".into(),
@@ -333,6 +341,7 @@ fn runs_list_and_show_read_persisted_traces() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["run_id"], "run-test-0001");
     assert_eq!(rows[0]["workflow_id"], "fixture_wf");
+    assert_eq!(rows[0]["result_headline"], "200 rows ready");
 
     // Default: bulky output elided, summary intact, fetch hint present.
     let shown = c.call_tool(3, "runs_show", json!({ "run_id": "run-test-0001" }));
@@ -340,6 +349,12 @@ fn runs_list_and_show_read_persisted_traces() {
     assert_eq!(
         shown.pointer("/result/structuredContent/status").unwrap(),
         "succeeded"
+    );
+    assert_eq!(
+        shown
+            .pointer("/result/structuredContent/result/headline")
+            .unwrap(),
+        "200 rows ready"
     );
     assert_eq!(
         shown
