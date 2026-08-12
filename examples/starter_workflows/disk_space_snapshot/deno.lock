@@ -1,0 +1,24 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:@cori-do/sdk@~0.2.4": "0.2.4_zod@4.4.3",
+    "npm:zod@^4.4.3": "4.4.3"
+  },
+  "npm": {
+    "@cori-do/sdk@0.2.4_zod@4.4.3": {
+      "integrity": "sha512-Smy4yxwq+eTLH3p2LEPA9WGGMWIxJlYLOss/qcuZb7m6rM1MZmuqpRHfPJ2bTWEJkQ1l5LjZ8a1wqYbsqve2Dw==",
+      "dependencies": [
+        "zod"
+      ]
+    },
+    "zod@4.4.3": {
+      "integrity": "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:@cori-do/sdk@~0.2.4",
+      "npm:zod@^4.4.3"
+    ]
+  }
+}

@@ -48,6 +48,15 @@ import {
   type StatusResponse,
 } from "../lib/api";
 import { fuzzyFilter } from "../lib/fuzzy";
+import {
+  STARTER_CATEGORIES,
+  STARTER_WORKFLOWS,
+  starterCategory,
+  starterEffectLabel,
+  startersInCategory,
+  type StarterCategory,
+  type StarterWorkflow,
+} from "../lib/starter-workflows";
 import { openRun, openSettings } from "../lib/windows";
 import { Inbox } from "./manage.approvals";
 import { ScheduleList } from "./manage.schedules";
@@ -105,6 +114,7 @@ export async function clientLoader(): Promise<LauncherData> {
 
 type LauncherContext =
   | { kind: "recents" }
+  | { kind: "library"; category: StarterCategory }
   | {
       kind: "local";
       path: string;
@@ -129,6 +139,7 @@ type LauncherSection = "workflows" | "inbox" | "schedules";
  */
 type ListedItem =
   | { kind: "recent"; recent: RecentWorkflow; key: string }
+  | { kind: "starter"; starter: StarterWorkflow; key: string }
   | { kind: "dir-entry"; entry: DirEntry; key: string }
   | {
       kind: "remote-entry";
@@ -144,7 +155,11 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   const [peek, setPeek] = useState<PeekResult | null>(null);
   const [selIndex, setSelIndex] = useState(0);
   const [stack, setStack] = useState<StackStatus | undefined>(undefined);
-  const [ctx, setCtx] = useState<LauncherContext>({ kind: "recents" });
+  const [ctx, setCtx] = useState<LauncherContext>(() =>
+    recents.length === 0
+      ? { kind: "library", category: "all" }
+      : { kind: "recents" },
+  );
   const [dragOver, setDragOver] = useState(false);
   const [listWidth, setListWidth] = useState(readLauncherListWidth);
   const [listResizing, setListResizing] = useState(false);
@@ -411,6 +426,24 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     setSelIndex(0);
   }, []);
 
+  const enterLibraryContext = useCallback((category: StarterCategory) => {
+    contextRequestId.current += 1;
+    setCtx({ kind: "library", category });
+    setSection("workflows");
+    setPicked(null);
+    setInput("");
+    setSelIndex(0);
+  }, []);
+
+  const showFrequentlyRun = useCallback(() => {
+    contextRequestId.current += 1;
+    setCtx({ kind: "recents" });
+    setSection("workflows");
+    setPicked(null);
+    setInput("");
+    setSelIndex(0);
+  }, []);
+
   // Drop-a-folder support. Workflow folder → openLaunch directly;
   // plain folder → enter the local-browse context. Multi-path drops:
   // pick the first path that classifies as a local directory.
@@ -471,8 +504,8 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
   const items = useMemo<ListedItem[]>(() => {
     if (ctx.kind === "recents") {
-      const uniqueRecents = dedupeRecentWorkflows(recents);
-      return fuzzyFilter(uniqueRecents, input.trim(), (r) => [
+      const frequentWorkflows = rankFrequentlyRunWorkflows(recents);
+      return fuzzyFilter(frequentWorkflows, input.trim(), (r) => [
         r.name ?? "",
         r.workflow_id,
         describeRecentSource(r),
@@ -480,6 +513,23 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         kind: "recent",
         recent: r,
         key: `${r.key}-${i}`,
+      }));
+    }
+    if (ctx.kind === "library") {
+      return fuzzyFilter(
+        startersInCategory(ctx.category),
+        input.trim(),
+        (workflow) => [
+          workflow.name,
+          workflow.description,
+          ...workflow.tags,
+          ...workflow.tools,
+          ...(workflow.google_services ?? []),
+        ],
+      ).map((starter) => ({
+        kind: "starter",
+        starter,
+        key: `starter:${starter.id}`,
       }));
     }
     if (ctx.kind === "local") {
@@ -548,6 +598,11 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       }
       return;
     }
+    if (item.kind === "starter") {
+      setPicked(item.starter.source);
+      setSection("workflows");
+      return;
+    }
     if (item.kind === "dir-entry") {
       const e = item.entry;
       if (e.kind === "workflow") {
@@ -573,6 +628,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   function sourceOf(item: ListedItem | undefined): string | null {
     if (!item) return null;
     if (item.kind === "recent") return sourceToCli(item.recent.source);
+    if (item.kind === "starter") return item.starter.source;
     if (item.kind === "dir-entry")
       return item.entry.kind === "workflow" ? item.entry.path : null;
     return buildRemoteSource(item.listing, item.entry);
@@ -796,8 +852,11 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         <div className="launcher-list">
           <LauncherSectionNav
             section={section}
+            context={ctx}
             pendingApprovals={approvals.length}
-            onSelect={setSection}
+            onSelectSection={setSection}
+            onShowFrequentlyRun={showFrequentlyRun}
+            onShowLibrary={enterLibraryContext}
           />
 
           {ctx.kind !== "recents" && (
@@ -825,6 +884,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
             onHover={setSelIndex}
             inputIsEmpty={input.length === 0}
             recentsCount={recents.length}
+            onOpenLibrary={() => enterLibraryContext("all")}
           />
         </div>
 
@@ -855,11 +915,31 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
         <div className="launcher-detail">
           {section === "workflows" && (
-            <WorkflowPane
-              source={picked}
-              handleRef={paneRef}
-              onLocateMissing={locateMissingWorkflow}
-            />
+            ctx.kind === "library" && picked === null ? (
+              <StarterLibraryHome
+                category={ctx.category}
+                searchQuery={input.trim()}
+                visibleWorkflows={items.flatMap((item) =>
+                  item.kind === "starter" ? [item.starter] : [],
+                )}
+                onChangeCategory={enterLibraryContext}
+                onPick={(starter) => {
+                  const index = items.findIndex(
+                    (item) =>
+                      item.kind === "starter" &&
+                      item.starter.id === starter.id,
+                  );
+                  if (index >= 0) setSelIndex(index);
+                  setPicked(starter.source);
+                }}
+              />
+            ) : (
+              <WorkflowPane
+                source={picked}
+                handleRef={paneRef}
+                onLocateMissing={locateMissingWorkflow}
+              />
+            )
           )}
           {section === "inbox" && (
             <LauncherSectionContent title="Inbox">
@@ -894,50 +974,126 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
 function LauncherSectionNav({
   section,
+  context,
   pendingApprovals,
-  onSelect,
+  onSelectSection,
+  onShowFrequentlyRun,
+  onShowLibrary,
 }: {
   section: LauncherSection;
+  context: LauncherContext;
   pendingApprovals: number;
-  onSelect: (section: LauncherSection) => void;
+  onSelectSection: (section: LauncherSection) => void;
+  onShowFrequentlyRun: () => void;
+  onShowLibrary: (category: StarterCategory) => void;
 }) {
-  const entries: Array<{ id: LauncherSection; label: string }> = [
-    { id: "workflows", label: "Workflows" },
-    { id: "inbox", label: "Inbox" },
-    { id: "schedules", label: "Schedules" },
-  ];
+  const workflowActive = section === "workflows";
+  const frequentActive = workflowActive && context.kind === "recents";
+  const libraryActive =
+    workflowActive && context.kind === "library" && context.category === "all";
+  const workspaceActive =
+    workflowActive &&
+    context.kind === "library" &&
+    context.category === "google_workspace";
+  const localActive =
+    workflowActive && context.kind === "library" && context.category === "local";
+
   return (
     <nav className="launcher-sections" aria-label="Launcher sections">
-      {entries.map((entry) => (
+      <div className="launcher-nav-group">
+        <div className="launcher-nav-label">My workflows</div>
         <button
-          key={entry.id}
           type="button"
-          className={`launcher-section${section === entry.id ? " is-active" : ""}`}
-          aria-current={section === entry.id ? "page" : undefined}
-          onClick={() => onSelect(entry.id)}
+          className={`launcher-section${frequentActive ? " is-active" : ""}`}
+          aria-current={frequentActive ? "page" : undefined}
+          onClick={onShowFrequentlyRun}
         >
-          <LauncherSectionIcon section={entry.id} />
-          <span>{entry.label}</span>
-          {entry.id === "inbox" && pendingApprovals > 0 && (
-            <span className="launcher-section-count" aria-label={`${pendingApprovals} pending`}>
+          <LauncherSectionIcon kind="frequent" />
+          <span>Frequently run</span>
+        </button>
+      </div>
+
+      <div className="launcher-nav-group">
+        <div className="launcher-nav-label">Discover</div>
+        <button
+          type="button"
+          className={`launcher-section${libraryActive ? " is-active" : ""}`}
+          aria-current={libraryActive ? "page" : undefined}
+          onClick={() => onShowLibrary("all")}
+        >
+          <LauncherSectionIcon kind="library" />
+          <span>Starter library</span>
+        </button>
+        <button
+          type="button"
+          className={`launcher-section${workspaceActive ? " is-active" : ""}`}
+          aria-current={workspaceActive ? "page" : undefined}
+          onClick={() => onShowLibrary("google_workspace")}
+        >
+          <LauncherSectionIcon kind="google" />
+          <span>Google Workspace</span>
+        </button>
+        <button
+          type="button"
+          className={`launcher-section${localActive ? " is-active" : ""}`}
+          aria-current={localActive ? "page" : undefined}
+          onClick={() => onShowLibrary("local")}
+        >
+          <LauncherSectionIcon kind="local" />
+          <span>Local computer</span>
+        </button>
+      </div>
+
+      <div className="launcher-nav-group">
+        <div className="launcher-nav-label">Activity</div>
+        <button
+          type="button"
+          className={`launcher-section${section === "inbox" ? " is-active" : ""}`}
+          aria-current={section === "inbox" ? "page" : undefined}
+          onClick={() => onSelectSection("inbox")}
+        >
+          <LauncherSectionIcon kind="inbox" />
+          <span>Inbox</span>
+          {pendingApprovals > 0 && (
+            <span
+              className="launcher-section-count"
+              aria-label={`${pendingApprovals} pending`}
+            >
               {pendingApprovals}
             </span>
           )}
         </button>
-      ))}
+        <button
+          type="button"
+          className={`launcher-section${section === "schedules" ? " is-active" : ""}`}
+          aria-current={section === "schedules" ? "page" : undefined}
+          onClick={() => onSelectSection("schedules")}
+        >
+          <LauncherSectionIcon kind="schedules" />
+          <span>Schedules</span>
+        </button>
+      </div>
     </nav>
   );
 }
 
-function LauncherSectionIcon({ section }: { section: LauncherSection }) {
-  if (section === "inbox") {
+type LauncherNavIconKind =
+  | "frequent"
+  | "library"
+  | "google"
+  | "local"
+  | "inbox"
+  | "schedules";
+
+function LauncherSectionIcon({ kind }: { kind: LauncherNavIconKind }) {
+  if (kind === "inbox") {
     return (
       <svg viewBox="0 0 16 16" aria-hidden>
         <path d="M2.5 3.5h11v8.5h-11zM2.5 9h3l1 1.5h3L10.5 9h3" />
       </svg>
     );
   }
-  if (section === "schedules") {
+  if (kind === "schedules") {
     return (
       <svg viewBox="0 0 16 16" aria-hidden>
         <circle cx="8" cy="8.5" r="5.5" />
@@ -945,9 +1101,34 @@ function LauncherSectionIcon({ section }: { section: LauncherSection }) {
       </svg>
     );
   }
+  if (kind === "library") {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <path d="m8 2 .8 2.2L11 5l-2.2.8L8 8l-.8-2.2L5 5l2.2-.8zM12.2 8.2l.5 1.3 1.3.5-1.3.5-.5 1.3-.5-1.3-1.3-.5 1.3-.5zM3.5 9.5v3h5" />
+      </svg>
+    );
+  }
+  if (kind === "google") {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+        <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+        <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+        <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+      </svg>
+    );
+  }
+  if (kind === "local") {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <rect x="2.5" y="3" width="11" height="8" rx="1.5" />
+        <path d="M6 13h4M8 11v2" />
+      </svg>
+    );
+  }
   return (
     <svg viewBox="0 0 16 16" aria-hidden>
-      <path d="M2.5 4h4l1-1.5h6v10h-11z" />
+      <path d="M3 11.5V8.7M6.3 11.5V6M9.7 11.5V3.5M13 11.5V5" />
     </svg>
   );
 }
@@ -1184,6 +1365,8 @@ function approvalPill(kind: ApprovalRequest["kind"]): string {
 }
 
 function placeholderFor(ctx: LauncherContext): string {
+  if (ctx.kind === "library")
+    return `Search ${starterCategory(ctx.category).label.toLowerCase()}`;
   if (ctx.kind === "local")
     return "Filter folder, or type a new path to navigate";
   if (ctx.kind === "remote")
@@ -1316,6 +1499,27 @@ function Breadcrumb({
       </div>
     );
   }
+  if (context.kind === "library") {
+    return (
+      <div className="crumb">
+        <button
+          type="button"
+          className="crumb-pop"
+          onClick={onPop}
+          title="Back to frequently run workflows (Esc)"
+          aria-label="Back to frequently run workflows"
+        >
+          ←
+        </button>
+        <span className="crumb-value">
+          {starterCategory(context.category).label}
+        </span>
+        <span className="crumb-count">
+          {startersInCategory(context.category).length}
+        </span>
+      </div>
+    );
+  }
   if (context.kind === "local") {
     return (
       <div className="crumb">
@@ -1402,6 +1606,7 @@ interface ResultsPaneProps {
   onHover: (index: number) => void;
   inputIsEmpty: boolean;
   recentsCount: number;
+  onOpenLibrary: () => void;
 }
 
 function ResultsPane({
@@ -1414,6 +1619,7 @@ function ResultsPane({
   onHover,
   inputIsEmpty,
   recentsCount,
+  onOpenLibrary,
 }: ResultsPaneProps) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   useEffect(() => {
@@ -1479,6 +1685,16 @@ function ResultsPane({
     }
   }
 
+  if (ctx.kind === "library" && items.length === 0) {
+    return (
+      <div className="results">
+        <div className="results-empty" role="status">
+          No starter matches that search.
+        </div>
+      </div>
+    );
+  }
+
   if (ctx.kind === "recents" && items.length === 0) {
     if (!inputIsEmpty) {
       return (
@@ -1492,7 +1708,7 @@ function ResultsPane({
     if (recentsCount === 0) {
       return (
         <div className="results">
-          <Welcome />
+          <EmptyHistory onOpenLibrary={onOpenLibrary} />
         </div>
       );
     }
@@ -1536,6 +1752,9 @@ function ItemRow(props: ItemRowProps) {
   if (props.item.kind === "recent") {
     return <RecentRow {...props} item={props.item} />;
   }
+  if (props.item.kind === "starter") {
+    return <StarterRow {...props} item={props.item} />;
+  }
   if (props.item.kind === "dir-entry") {
     return <DirEntryRow {...props} item={props.item} />;
   }
@@ -1576,19 +1795,69 @@ function RecentRow({
       </span>
       <div className="result-row-body">
         <div className="result-row-name">{displayName}</div>
-        <div className="result-row-location">
+        <div className="result-row-meta">
+          <span>
+            {r.run_count} {r.run_count === 1 ? "run" : "runs"}
+          </span>
           {sourceLabel && (
-            <MiddleTruncate
-              text={sourceLabel}
-              tail={Math.min(18, Math.floor(sourceLabel.length / 2))}
-              className={
-                r.source?.kind === "remote"
-                  ? "result-row-source is-remote"
-                  : "result-row-source"
-              }
-            />
+            <>
+              <span aria-hidden>·</span>
+              <MiddleTruncate
+                text={sourceLabel}
+                tail={Math.min(18, Math.floor(sourceLabel.length / 2))}
+                className={
+                  r.source?.kind === "remote"
+                    ? "result-row-source is-remote"
+                    : "result-row-source"
+                }
+              />
+            </>
           )}
         </div>
+      </div>
+    </button>
+  );
+}
+
+function StarterRow({
+  item,
+  selected,
+  open,
+  onClick,
+  onHover,
+  buttonRef,
+}: ItemRowProps & { item: Extract<ListedItem, { kind: "starter" }> }) {
+  const workflow = item.starter;
+  const category = starterCategory(workflow.category);
+  return (
+    <button
+      type="button"
+      ref={buttonRef}
+      className={rowClass(selected, open)}
+      onClick={onClick}
+      onMouseEnter={onHover}
+      role="option"
+      aria-selected={selected}
+      aria-label={`${workflow.name}, ${category.label}, ${starterEffectLabel(workflow.effect)}`}
+      title={`${workflow.name} — preview this starter`}
+    >
+      <span className="result-row-icon" aria-hidden>
+        <StarterIcon category={workflow.category} />
+      </span>
+      <div className="result-row-body">
+        <div className="result-row-name">{workflow.name}</div>
+        <div className="result-row-meta">
+          <span className="result-row-category">{category.shortLabel}</span>
+          <span aria-hidden>·</span>
+          <span>{starterEffectLabel(workflow.effect)}</span>
+          {workflow.requires_llm && (
+            <>
+              <span aria-hidden>·</span>
+              <span>AI</span>
+            </>
+          )}
+        </div>
+        <div className="result-row-desc">{workflow.description}</div>
       </div>
     </button>
   );
@@ -1700,38 +1969,148 @@ function RemoteEntryRow({
   );
 }
 
-function Welcome() {
+function StarterLibraryHome({
+  category,
+  searchQuery,
+  visibleWorkflows,
+  onChangeCategory,
+  onPick,
+}: {
+  category: StarterCategory;
+  searchQuery: string;
+  visibleWorkflows: readonly StarterWorkflow[];
+  onChangeCategory: (category: StarterCategory) => void;
+  onPick: (workflow: StarterWorkflow) => void;
+}) {
+  const activeCategory = starterCategory(category);
+  const workflows = [...visibleWorkflows].sort((a, b) => {
+    if (category === "all" && Boolean(a.featured) !== Boolean(b.featured)) {
+      return a.featured ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
   return (
-    <div className="welcome">
-      <h2 className="welcome-title">Welcome to Cori</h2>
+    <section className="library-home" aria-labelledby="library-title">
+      <header className="library-home-head">
+        <div className="library-eyebrow">Ready-made workflows</div>
+        <div className="library-title-row">
+          <div>
+            <h1 id="library-title">{activeCategory.label}</h1>
+            <p>{activeCategory.description}</p>
+          </div>
+          <span className="library-total">
+            {searchQuery
+              ? `${workflows.length} ${workflows.length === 1 ? "match" : "matches"}`
+              : category === "all"
+              ? `${STARTER_WORKFLOWS.length} starters`
+              : `${workflows.length} in this collection`}
+          </span>
+        </div>
+        <div className="library-categories" aria-label="Starter categories">
+          {STARTER_CATEGORIES.map((candidate) => (
+            <button
+              key={candidate.id}
+              type="button"
+              className={candidate.id === category ? "is-active" : ""}
+              aria-pressed={candidate.id === category}
+              onClick={() => onChangeCategory(candidate.id)}
+            >
+              {candidate.shortLabel}
+            </button>
+          ))}
+        </div>
+      </header>
 
-      <section className="welcome-section">
-        <h3 className="welcome-subtitle">Run an existing workflow</h3>
-        <p className="welcome-body">
-          Open one you already have on your machine — click the folder
-          icon at the right of the search bar, or drag a folder onto
-          this window. To run a workflow from a git repository, paste
-          a reference like <code>github.com/cori-do/workflows</code> and press
-          Enter.
-        </p>
-      </section>
+      <div className="library-grid">
+        {workflows.length === 0 && (
+          <div className="library-no-results" role="status">
+            No starter matches “{searchQuery}”. Try a product name such as
+            Calendar, Sheets, Drive, or Gmail.
+          </div>
+        )}
+        {workflows.map((workflow) => (
+          <button
+            key={workflow.id}
+            type="button"
+            className="library-card"
+            onClick={() => onPick(workflow)}
+            aria-label={`Preview ${workflow.name}`}
+          >
+            <span className="library-card-icon" aria-hidden>
+              <StarterIcon category={workflow.category} />
+            </span>
+            <span className="library-card-main">
+              <span className="library-card-topline">
+                <span className="library-card-name">{workflow.name}</span>
+                {workflow.featured && (
+                  <span className="library-featured">Featured</span>
+                )}
+              </span>
+              <span className="library-card-description">
+                {workflow.description}
+              </span>
+              <span className="library-card-meta">
+                <span
+                  className={`library-effect is-${workflow.effect.replace("_", "-")}`}
+                >
+                  {starterEffectLabel(workflow.effect)}
+                </span>
+                {workflow.google_services && (
+                  <span>{workflow.google_services.join(" + ")}</span>
+                )}
+                {workflow.min_tool_version && (
+                  <span>gws ≥ {workflow.min_tool_version}</span>
+                )}
+                {!workflow.google_services && workflow.tools.length > 0 && (
+                  <span>{workflow.tools.join(" + ")}</span>
+                )}
+                {workflow.platforms && (
+                  <span>{workflow.platforms.join(" / ")}</span>
+                )}
+                {workflow.tools.length === 0 && <span>No credentials</span>}
+                {workflow.requires_llm && <span>AI step</span>}
+              </span>
+            </span>
+            <span className="library-card-arrow" aria-hidden>
+              →
+            </span>
+          </button>
+        ))}
+      </div>
 
-      <section className="welcome-section">
-        <h3 className="welcome-subtitle">Create your first workflow</h3>
-        <p className="welcome-body">
-          Install the <code>cori-save-workflow</code> agent skill, then
-          ask your AI assistant to save a workflow with you.
-        </p>
-        <button
-          type="button"
-          className="welcome-link"
-          onClick={() => {
-            void openUrl("https://docs.cori.do/getting-started/capture-from-agent");
-          }}
-        >
-          Learn more →
-        </button>
-      </section>
+      <aside className="library-trust-note">
+        <span aria-hidden>◇</span>
+        <span>
+          Starters are bundled with Cori or pinned to a versioned git source.
+          You can inspect their steps, permissions, and parameters before the
+          first run.
+        </span>
+      </aside>
+    </section>
+  );
+}
+
+function EmptyHistory({ onOpenLibrary }: { onOpenLibrary: () => void }) {
+  return (
+    <div className="empty-history">
+      <div className="empty-history-icon" aria-hidden>
+        <WorkflowIcon />
+      </div>
+      <div className="empty-history-title">No runs yet</div>
+      <p>Choose a starter, open a local folder, or paste a git ref above.</p>
+      <button type="button" className="welcome-link" onClick={onOpenLibrary}>
+        Open starter library →
+      </button>
+      <button
+        type="button"
+        className="welcome-link is-muted"
+        onClick={() => {
+          void openUrl("https://docs.cori.do/getting-started/capture-from-agent");
+        }}
+      >
+        Create with an agent →
+      </button>
     </div>
   );
 }
@@ -1748,19 +2127,38 @@ function describeRecentSource(r: RecentWorkflow): string {
 }
 
 /**
- * Run history can contain multiple directory keys for the same workflow
- * after migrations or path normalization changes. The sidebar is a recent
- * workflow picker, so keep only the newest entry for each name + source path.
- * `list_recent_workflows` is newest-first, making first-seen the right one.
+ * Rank this user's workflows by valid local run history. Path migrations can
+ * leave more than one history directory for the same source, so merge their
+ * counts and retain the newest metadata before sorting by use, then recency.
  */
-function dedupeRecentWorkflows(recents: RecentWorkflow[]): RecentWorkflow[] {
-  const seen = new Set<string>();
-  return recents.filter((recent) => {
-    const name = recent.name ?? recent.workflow_id;
-    const identity = `${name}\u0000${recentSourcePath(recent)}`;
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
+function rankFrequentlyRunWorkflows(
+  recents: RecentWorkflow[],
+): RecentWorkflow[] {
+  const merged = new Map<string, RecentWorkflow>();
+
+  for (const recent of recents) {
+    // The path/ref is the workflow identity. Its display name can legitimately
+    // change between versions without splitting one user's frequency history.
+    const identity = recentSourcePath(recent);
+    const existing = merged.get(identity);
+    if (!existing) {
+      merged.set(identity, { ...recent });
+      continue;
+    }
+
+    const recentIsNewer =
+      Date.parse(recent.last_run_at) > Date.parse(existing.last_run_at);
+    const newest = recentIsNewer ? recent : existing;
+    merged.set(identity, {
+      ...newest,
+      run_count: existing.run_count + recent.run_count,
+    });
+  }
+
+  return [...merged.values()].sort((a, b) => {
+    const byCount = b.run_count - a.run_count;
+    if (byCount !== 0) return byCount;
+    return Date.parse(b.last_run_at) - Date.parse(a.last_run_at);
   });
 }
 
@@ -2080,6 +2478,55 @@ function WorkflowIcon() {
       aria-hidden
     >
       <path d="M7 5.5v13l11-6.5z" />
+    </svg>
+  );
+}
+
+function StarterIcon({
+  category,
+}: {
+  category: StarterWorkflow["category"];
+}) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {category === "local" && (
+        <>
+          <rect x="3" y="4" width="18" height="13" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </>
+      )}
+      {category === "google_workspace" && (
+        <>
+          <rect x="3" y="3" width="7" height="7" rx="1.5" />
+          <rect x="14" y="3" width="7" height="7" rx="1.5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </>
+      )}
+      {category === "developer" && (
+        <>
+          <circle cx="6" cy="5" r="2" />
+          <circle cx="18" cy="8" r="2" />
+          <circle cx="8" cy="19" r="2" />
+          <path d="M6 7v4a6 6 0 0 0 6 6h4M8 17V9a3 3 0 0 1 3-3h5" />
+        </>
+      )}
+      {category === "essentials" && (
+        <>
+          <path d="m12 3 1.5 4.2L18 9l-4.5 1.8L12 15l-1.5-4.2L6 9l4.5-1.8z" />
+          <path d="m18.5 15 .7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7zM5 15v5h7" />
+        </>
+      )}
     </svg>
   );
 }

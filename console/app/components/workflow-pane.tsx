@@ -44,6 +44,7 @@ import {
 } from "../lib/format";
 import { openRun } from "../lib/windows";
 import { ConnectOffer } from "./run-view";
+import { resultsFromTrace, WorkflowResults } from "./workflow-results";
 
 /** What the launcher can ask of the pane from its own key handling. */
 export interface WorkflowPaneHandle {
@@ -371,6 +372,10 @@ export function WorkflowPane({
           <Steps preflight={preflight} run={run} />
 
           <RunSummary run={run} />
+
+          {run?.trace && resultsFromTrace(run.trace) !== null && (
+            <WorkflowResults results={resultsFromTrace(run.trace)} />
+          )}
 
           <WorkflowHistory
             runs={history}

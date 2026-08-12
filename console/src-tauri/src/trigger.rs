@@ -15,12 +15,13 @@ use cori_run::{
 use cori_worker::workflow::ActivitySummary;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
 use tracing::warn;
 
 use crate::error::{ConsentDetails, IpcError, IpcResult};
 use crate::runs::{PlanStep, RunChannel, RunEvent};
+use crate::starter;
 use crate::state::AppState;
 
 // ---------- resolve_workflow ----------
@@ -52,9 +53,11 @@ pub struct StepSummary {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn resolve_workflow(
+    app: AppHandle,
     source: String,
     update: Option<bool>,
 ) -> IpcResult<WorkflowPreflight> {
+    let source = starter::resolve_source(&app, &source)?;
     let update = update.unwrap_or(false);
     let error_source = source.clone();
     let outcome = tokio::task::spawn_blocking(move || preflight(&source, update, false))
@@ -206,6 +209,7 @@ pub struct StartRunResponse {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn start_run(
+    app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     params: Value,
@@ -213,6 +217,7 @@ pub async fn start_run(
     update: Option<bool>,
     on_event: Channel<RunEvent>,
 ) -> IpcResult<StartRunResponse> {
+    let source = starter::resolve_source(&app, &source)?;
     let update = update.unwrap_or(false);
     let run_id = new_run_id();
 

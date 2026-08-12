@@ -16,6 +16,7 @@ mod llm_cmd;
 mod remote_browse;
 mod runs;
 mod sidecars;
+mod starter;
 mod state;
 mod supervisor;
 mod temporal;

@@ -306,13 +306,16 @@ fn collect_recents(runs_root: &Path) -> anyhow::Result<Vec<RecentWorkflow>> {
             {
                 continue;
             }
-            count += 1;
             let Ok(bytes) = std::fs::read(&p) else {
                 continue;
             };
             let Ok(t) = serde_json::from_slice::<RunTrace>(&bytes) else {
                 continue;
             };
+            // Frequency is a count of real runs, not merely files with a
+            // `.json` suffix. Ignore partial/corrupt traces just as the run
+            // history view does.
+            count += 1;
             match &latest {
                 Some(cur) if t.started_at <= cur.started_at => {}
                 _ => latest = Some(t),
@@ -368,6 +371,78 @@ fn manifest_name_for_source(source: &WorkflowSource) -> Option<String> {
         None
     } else {
         Some(name.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cori_protocol::trace::CostSummary;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn trace(run_id: &str, started_at: DateTime<Utc>, status: &str) -> RunTrace {
+        RunTrace {
+            run_id: run_id.to_string(),
+            workflow_id: "demo".to_string(),
+            workflow_content_hash: None,
+            status: status.to_string(),
+            trigger: "manual".to_string(),
+            dry_run: false,
+            requesting_identity: None,
+            started_at,
+            ended_at: started_at,
+            duration_ms: 1,
+            source: Some(WorkflowSource::Local {
+                path: "/tmp/demo".to_string(),
+            }),
+            params: json!({}),
+            activities: Vec::new(),
+            cost: CostSummary::default(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn recents_count_only_valid_visible_traces_and_keep_latest() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cori-console-recents-{}-{nonce}",
+            std::process::id()
+        ));
+        let history = root.join("demo-12345678");
+        std::fs::create_dir_all(&history).expect("create temp history");
+
+        let older = "2026-08-10T08:00:00Z".parse().expect("valid timestamp");
+        let newer = "2026-08-11T08:00:00Z".parse().expect("valid timestamp");
+        std::fs::write(
+            history.join("older.json"),
+            serde_json::to_vec(&trace("older", older, "succeeded")).expect("serialize older trace"),
+        )
+        .expect("write older trace");
+        std::fs::write(
+            history.join("newer.json"),
+            serde_json::to_vec(&trace("newer", newer, "failed")).expect("serialize newer trace"),
+        )
+        .expect("write newer trace");
+        std::fs::write(history.join("broken.json"), b"{not-json").expect("write broken trace");
+        std::fs::write(
+            history.join(".partial.json"),
+            serde_json::to_vec(&trace("hidden", newer, "succeeded"))
+                .expect("serialize hidden trace"),
+        )
+        .expect("write hidden trace");
+        std::fs::write(history.join("note.txt"), b"ignore me").expect("write non-json file");
+
+        let recents = collect_recents(&root).expect("collect recents");
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].run_count, 2);
+        assert_eq!(recents[0].last_status, "failed");
+        assert_eq!(recents[0].last_run_at, newer);
+
+        std::fs::remove_dir_all(&root).expect("remove temp history");
     }
 }
 

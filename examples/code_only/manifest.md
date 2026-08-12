@@ -26,4 +26,4 @@ runner subprocess and that step outputs chain into the next step's input.
 
 ## Verification
 - `cori run code_only x=12` prints `Output: {"result":"144"}`
-- The trace recorded in SQLite has two `code` activities, both `ok`
+- The JSON run trace has two successful `code` activities
