@@ -28,6 +28,7 @@ import {
   formatRelative,
 } from "../lib/format";
 import { openSettings } from "../lib/windows";
+import { resultsFromTrace, WorkflowResults } from "./workflow-results";
 
 export interface RunViewProps {
   /** Always known: from URL in live mode, from trace.run_id in historical. */
@@ -232,6 +233,7 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
 // ── Trace body (post-completion or historical) ───────────────────────
 
 function TraceBody({ trace }: { trace: RunTrace }) {
+  const results = resultsFromTrace(trace);
   return (
     <>
       <div className="card">
@@ -270,6 +272,8 @@ function TraceBody({ trace }: { trace: RunTrace }) {
         </dl>
         {trace.error && <ConnectOffer error={trace.error} />}
       </div>
+
+      {results !== null && <WorkflowResults results={results} />}
 
       <h2>Steps</h2>
       {trace.activities.length === 0 ? (

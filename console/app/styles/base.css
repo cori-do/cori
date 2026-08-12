@@ -884,6 +884,18 @@ table.runs td strong {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.crumb-count {
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+  background: var(--glass-content);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-align: center;
+}
 .crumb-pop,
 .crumb-refresh {
   background: transparent;
@@ -956,16 +968,30 @@ table.runs td strong {
 .launcher-sections {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 7px;
+  gap: 9px;
+  padding: 8px 7px;
   border-bottom: 1px solid var(--glass-line);
+}
+.launcher-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.launcher-nav-label {
+  padding: 0 9px 3px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
 }
 .launcher-section {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 7px 9px;
+  padding: 6px 9px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
@@ -1185,6 +1211,7 @@ table.runs td strong {
   min-width: 0;
 }
 .result-row-meta > * { min-width: 0; }
+.result-row-category { color: var(--accent); }
 .result-row-location {
   display: flex;
   align-items: baseline;
@@ -1214,6 +1241,235 @@ table.runs td strong {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* ─── Starter library ───────────────────────────────────────────────
+   Discovery lives in the roomy detail pane. Catalog entries are normal git
+   workflow refs, so selecting a card hands off to the standard preview and
+   trust flow rather than introducing a second execution path. */
+.library-home {
+  max-width: 980px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 25px 26px 40px;
+}
+.library-home-head {
+  padding-bottom: 19px;
+  border-bottom: 1px solid var(--rule);
+}
+.library-eyebrow {
+  margin-bottom: 7px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.library-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.library-title-row h1 {
+  margin: 0 0 6px;
+  font-size: clamp(21px, 3vw, 28px);
+  font-weight: 520;
+  letter-spacing: -0.035em;
+}
+.library-title-row p {
+  max-width: 620px;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.library-total {
+  flex-shrink: 0;
+  margin-top: 3px;
+  padding: 4px 8px;
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+  background: var(--glass-raised);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+.library-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 17px;
+}
+.library-categories button {
+  padding: 5px 9px;
+  border: 1px solid var(--glass-line);
+  border-radius: 7px;
+  background: var(--glass-content);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease,
+    background 120ms ease;
+}
+.library-categories button:hover {
+  border-color: var(--rule-strong);
+  background: var(--glass-hover);
+  color: var(--foreground);
+}
+.library-categories button.is-active {
+  border-color: rgb(var(--accent-rgb) / 0.45);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.library-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  padding: 18px 0;
+}
+.library-no-results {
+  grid-column: 1 / -1;
+  padding: 24px 18px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: 10px;
+  background: var(--glass-content);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+.library-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 11px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--glass-line);
+  border-radius: 10px;
+  background: var(--glass-raised);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease,
+    background 140ms ease, box-shadow 140ms ease;
+}
+.library-card:hover {
+  transform: translateY(-1px);
+  border-color: rgb(var(--accent-rgb) / 0.35);
+  background: var(--glass-hover);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 8px 24px rgba(7, 14, 28, 0.07);
+}
+.library-card:focus-visible,
+.library-categories button:focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb) / 0.55);
+  outline-offset: 2px;
+}
+.library-card-icon {
+  width: 29px;
+  height: 29px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(var(--accent-rgb) / 0.18);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.library-card-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.library-card-topline {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.library-card-name {
+  min-width: 0;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.library-featured {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.library-card-description {
+  color: var(--muted-strong);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.library-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.library-card-meta > span {
+  padding: 1px 5px;
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+}
+.library-card-meta .library-effect.is-read-only {
+  border-color: rgb(35 146 99 / 0.25);
+  color: var(--green);
+}
+.library-card-meta .library-effect.is-writes,
+.library-card-meta .library-effect.is-sends {
+  border-color: rgb(200 128 35 / 0.28);
+  color: var(--amber);
+}
+.library-card-arrow {
+  margin-top: 5px;
+  color: var(--rule-strong);
+  font-family: var(--font-mono);
+  transition: color 120ms ease, transform 120ms ease;
+}
+.library-card:hover .library-card-arrow {
+  color: var(--accent);
+  transform: translateX(2px);
+}
+.library-trust-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 13px;
+  border: 1px solid var(--glass-line);
+  border-radius: 9px;
+  background: var(--glass-content);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+.library-trust-note > span:first-child {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+@media (max-width: 820px) {
+  .library-home { padding-inline: 18px; }
+  .library-grid { grid-template-columns: minmax(0, 1fr); }
+  .library-total { display: none; }
 }
 
 /* ─── Launcher: the picked workflow ──────────────────────────────────
@@ -1534,6 +1790,163 @@ table.runs td strong {
   font-variant-numeric: tabular-nums;
 }
 
+/* Typed workflow output. Starters return their human-facing payload under
+   `results`; both the launcher pane and the full run window share this view. */
+.workflow-results {
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+.workflow-results-head {
+  padding: 15px 16px 14px;
+  border-bottom: 1px solid var(--rule);
+  background: linear-gradient(135deg, var(--accent-soft), transparent 62%);
+}
+.workflow-results-kicker {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+.workflow-results h2 {
+  margin: 0;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+.workflow-results-head p {
+  margin: 6px 0 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.workflow-results-body { padding: 14px 16px 16px; }
+.workflow-result-object,
+.workflow-result-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.workflow-result-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--rule);
+}
+.workflow-result-facts > div {
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--surface);
+}
+.workflow-result-facts > div:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+.workflow-result-facts dt,
+.workflow-result-group h3 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.workflow-result-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.workflow-result-group h3 { margin-bottom: 7px; }
+.workflow-result-card {
+  padding: 11px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.workflow-result-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-strong);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.workflow-result-empty,
+.workflow-result-value.is-muted { color: var(--muted); }
+.workflow-result-link {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent-2);
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.workflow-result-link:hover { text-decoration: underline; }
+.workflow-result-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.workflow-result-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.workflow-result-table th,
+.workflow-result-table td {
+  padding: 7px 9px;
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.workflow-result-table th:last-child,
+.workflow-result-table td:last-child { border-right: none; }
+.workflow-result-table tbody tr:last-child td { border-bottom: none; }
+.workflow-result-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.workflow-result-overflow {
+  padding: 7px 9px;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+@media (max-width: 820px) {
+  .workflow-result-facts { grid-template-columns: minmax(0, 1fr); }
+}
+
 .pane-history {
   margin-top: 18px;
   padding-top: 14px;
@@ -1645,41 +2058,41 @@ table.runs td strong {
 }
 .pane-history-empty.is-error { color: var(--red); }
 
-/* First-run welcome — shown when there are no recents yet. */
-.welcome {
-  margin: 8px 6px;
-  padding: 16px 14px;
+/* Empty personal history — compact because discovery gets the roomy pane. */
+.empty-history {
+  margin: 10px 6px;
+  padding: 16px 13px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-}
-.welcome-title {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 14px;
-  font-weight: 400;
-  letter-spacing: -0.005em;
-  color: var(--foreground);
-  text-transform: none;
-}
-.welcome-section {
-  display: flex;
-  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
 }
-.welcome-subtitle {
-  margin: 0;
+.empty-history-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--accent-soft);
   color: var(--accent);
 }
-.welcome-body {
+.empty-history-title {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.empty-history p {
   margin: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--muted-strong);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 .welcome-link {
   align-self: flex-start;
-  margin-top: 2px;
   background: transparent;
   border: none;
   padding: 0;
@@ -1689,6 +2102,7 @@ table.runs td strong {
   cursor: pointer;
 }
 .welcome-link:hover { text-decoration: underline; }
+.welcome-link.is-muted { color: var(--muted); }
 
 /* ─── Launcher: footer ───────────────────────────────────────────────
    A mono status strip — where this machine is, then what you can open.

@@ -39,6 +39,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "../../examples/starter_workflows": "starter_workflows"
+    },
     "externalBin": ["binaries/temporal", "binaries/deno", "binaries/cori-cli"],
     "macOS": {
       "hardenedRuntime": true,
