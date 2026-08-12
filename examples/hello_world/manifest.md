@@ -8,6 +8,12 @@ parameters: []
 tools_required: [curl]
 mcp_servers: []
 tags: [demo]
+result:
+  headline: "{{ message }}"
+  fields:
+    - label: Words
+      path: word_count
+      format: number
 ---
 
 # Hello World

@@ -524,6 +524,7 @@ fn tool_runs_list(args: &JsonValue) -> Result<JsonValue> {
                     "duration_ms": t.duration_ms,
                     "cost_eur": t.cost.total_eur,
                     "error": t.error,
+                    "result_headline": t.result.as_ref().map(|result| &result.headline),
                 })
             })
             .collect::<Vec<_>>()

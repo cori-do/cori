@@ -18,10 +18,30 @@ ended_at           DateTime<Utc>
 duration_ms        u128
 source             WorkflowSource?   where the workflow came from
 params             json       user-supplied parameters
+result             ResolvedResult?  declared user-facing result, absent on legacy/undeclared runs
 activities         ActivityTrace[]
 cost               CostSummary
 error              string?    top-level error message if status = "failed"
 ```
+
+## ResolvedResult
+
+`result` is resolved after execution from parameters and successful object
+outputs. It is persisted in the trace, so it remains available if the workflow
+source later moves. Resolution issues never change run success.
+
+```
+headline           string
+description        string?
+fields             { label, value, format, currency?, tone }[]
+sections           { label, value, display }[]
+artifacts          { label, url }[]
+issues             { item, type, message }[]
+```
+
+On failed runs, the result contains whatever earlier successful steps made
+available and should be presented as a partial result. Runs written before this
+field existed deserialize without migration.
 
 ## ActivityTrace (per step)
 

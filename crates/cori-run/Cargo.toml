@@ -27,6 +27,7 @@ tokio.workspace = true
 temporalio-client.workspace = true
 futures.workspace = true
 walkdir.workspace = true
+url.workspace = true
 
 cori-protocol.workspace = true
 cori-manifest.workspace = true

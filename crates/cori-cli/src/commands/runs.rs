@@ -82,7 +82,7 @@ pub fn list(workflow_filter: Option<&str>, limit: u32, json_out: bool) -> Result
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header(vec![
-        "When", "Workflow", "Status", "Duration", "Cost", "Run id",
+        "When", "Workflow", "Status", "Result", "Duration", "Cost", "Run id",
     ]);
     for e in &entries {
         let when = HumanTime::from(e.trace.started_at).to_string();
@@ -96,6 +96,13 @@ pub fn list(workflow_filter: Option<&str>, limit: u32, json_out: bool) -> Result
             Cell::new(when),
             Cell::new(&e.trace.workflow_id),
             Cell::new(&e.trace.status),
+            Cell::new(
+                e.trace
+                    .result
+                    .as_ref()
+                    .map(|result| truncate_headline(&result.headline, 48))
+                    .unwrap_or_else(|| "—".into()),
+            ),
             Cell::new(duration),
             Cell::new(cost),
             Cell::new(&e.trace.run_id),
@@ -150,6 +157,10 @@ pub fn show(run_id: &str, activity_filter: Option<&str>, full: bool, json_out: b
         println!("  error      {err}");
     }
     println!("  trace      {}", entry.path.display());
+
+    if activity_filter.is_none() {
+        super::run::print_final_output(trace);
+    }
 
     let acts: Vec<_> = trace
         .activities
@@ -210,6 +221,15 @@ fn format_duration_ms(ms: u128) -> String {
         let s = secs % 60;
         format!("{m}m{s:02}s")
     }
+}
+
+fn truncate_headline(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
 }
 
 #[allow(dead_code)]

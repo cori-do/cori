@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_protocol::trace::{RunTrace, WorkflowSource};
+use cori_protocol::trace::{CostSummary, RunTrace, WorkflowSource};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 use cori_run::{paths, planner, remote, resolve_llm_credentials};
 use cori_worker::runtime::preflight_check;
@@ -117,8 +117,18 @@ fn collect_status(published_target: Option<String>) -> anyhow::Result<Value> {
 pub struct RunListEntry {
     pub key: String,
     pub utc: String,
-    #[serde(flatten)]
-    pub trace: RunTrace,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+    pub trigger: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+    pub duration_ms: u128,
+    pub cost: CostSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_headline: Option<String>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -194,11 +204,22 @@ fn collect_traces(
             out.push(RunListEntry {
                 key: key.clone(),
                 utc,
-                trace,
+                run_id: trace.run_id,
+                workflow_id: trace.workflow_id,
+                status: trace.status,
+                trigger: trace.trigger,
+                started_at: trace.started_at,
+                ended_at: trace.ended_at,
+                duration_ms: trace.duration_ms,
+                cost: trace.cost,
+                error: trace.error,
+                result_headline: trace
+                    .result
+                    .and_then(|result| (!result.headline.is_empty()).then_some(result.headline)),
             });
         }
     }
-    out.sort_by_key(|e| Reverse(e.trace.started_at));
+    out.sort_by_key(|e| Reverse(e.started_at));
     out.truncate(limit);
     Ok(out)
 }
@@ -262,6 +283,8 @@ pub struct RecentWorkflow {
     pub source: Option<Value>,
     pub last_run_at: DateTime<Utc>,
     pub last_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_headline: Option<String>,
     pub run_count: usize,
 }
 
@@ -321,6 +344,10 @@ fn collect_recents(runs_root: &Path) -> anyhow::Result<Vec<RecentWorkflow>> {
 
         if let Some(t) = latest {
             let name = t.source.as_ref().and_then(manifest_name_for_source);
+            let result_headline = t
+                .result
+                .as_ref()
+                .and_then(|result| (!result.headline.is_empty()).then(|| result.headline.clone()));
             out.push(RecentWorkflow {
                 key,
                 workflow_id: t.workflow_id,
@@ -328,6 +355,7 @@ fn collect_recents(runs_root: &Path) -> anyhow::Result<Vec<RecentWorkflow>> {
                 source: serde_json::to_value(&t.source).ok(),
                 last_run_at: t.started_at,
                 last_status: t.status,
+                result_headline,
                 run_count: count,
             });
         }
@@ -381,4 +409,58 @@ pub async fn get_stack_status(state: State<'_, AppState>) -> IpcResult<StackStat
         .map_err(|e| IpcError::Internal(anyhow::anyhow!("stack status poisoned: {e}")))?
         .clone();
     Ok(snap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_traces;
+    use serde_json::json;
+
+    #[test]
+    fn run_list_payload_is_compact_and_keeps_result_headline() {
+        let root = tempfile::tempdir().unwrap();
+        let history = root.path().join("report-12345678");
+        std::fs::create_dir_all(&history).unwrap();
+        let trace = json!({
+            "run_id": "run_compact",
+            "workflow_id": "report",
+            "status": "succeeded",
+            "trigger": "console",
+            "started_at": "2026-08-04T10:00:00Z",
+            "ended_at": "2026-08-04T10:00:01Z",
+            "duration_ms": 1000,
+            "params": { "large": "input" },
+            "result": { "headline": "12 rows ready" },
+            "activities": [{
+                "activity_id": "01_large",
+                "step_name": "large",
+                "kind": "code",
+                "status": "ok",
+                "started_at": "2026-08-04T10:00:00Z",
+                "ended_at": "2026-08-04T10:00:01Z",
+                "duration_ms": 1000,
+                "attempts": 1,
+                "input_summary": null,
+                "output_summary": { "type": "object" },
+                "output": { "rows": ["large activity output"] },
+                "error": null,
+                "notes": null
+            }],
+            "cost": { "total_eur": 0.0, "input_tokens": 0, "output_tokens": 0 },
+            "error": null
+        });
+        std::fs::write(
+            history.join("2026-08-04T10-00-00Z.json"),
+            serde_json::to_vec(&trace).unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_traces(root.path(), None, None, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        let payload = serde_json::to_value(&entries[0]).unwrap();
+        assert_eq!(payload["result_headline"], "12 rows ready");
+        assert!(payload.get("activities").is_none());
+        assert!(payload.get("params").is_none());
+        assert!(!payload.to_string().contains("large activity output"));
+    }
 }

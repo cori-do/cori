@@ -18,6 +18,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use thiserror::Error;
+use url::Url;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -48,6 +49,8 @@ pub struct Manifest {
     pub schedule: Option<String>,
     #[serde(default)]
     pub schedule_tz: Option<String>,
+    #[serde(default)]
+    pub result: Option<ResultDeclaration>,
 
     /// Prose body following the frontmatter. Not interpreted by this crate.
     /// `skip_deserializing` is intentionally absent — JSON round-trips
@@ -84,6 +87,83 @@ pub struct Parameter {
     pub min: Option<f64>,
     #[serde(default)]
     pub max: Option<f64>,
+}
+
+/// Declarative, user-facing presentation resolved after a workflow run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResultDeclaration {
+    pub headline: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<ResultFieldDeclaration>,
+    #[serde(default)]
+    pub sections: Vec<ResultSectionDeclaration>,
+    #[serde(default)]
+    pub artifacts: Vec<ResultArtifactDeclaration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResultFieldDeclaration {
+    pub label: String,
+    pub path: String,
+    #[serde(default)]
+    pub format: ResultFieldFormat,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub tone: ResultFieldTone,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultFieldFormat {
+    #[default]
+    Auto,
+    Number,
+    Currency,
+    Percent,
+    Duration,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultFieldTone {
+    #[default]
+    Neutral,
+    Success,
+    Warning,
+    Danger,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResultSectionDeclaration {
+    pub label: String,
+    pub path: String,
+    #[serde(default)]
+    pub display: ResultSectionDisplay,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultSectionDisplay {
+    #[default]
+    Auto,
+    Table,
+    List,
+    Text,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResultArtifactDeclaration {
+    pub label: String,
+    pub url: String,
+    #[serde(default = "default_true")]
+    pub required: bool,
 }
 
 fn default_true() -> bool {
@@ -211,6 +291,95 @@ const ID_MAX_LEN: usize = 64;
 
 fn snake_case_re() -> Regex {
     Regex::new(r"^[a-z][a-z0-9_]*$").expect("static regex")
+}
+
+fn result_path_re() -> Regex {
+    Regex::new(r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.(?:[A-Za-z_][A-Za-z0-9_-]*|[0-9]+))*$")
+        .expect("static regex")
+}
+
+/// Validate a dot-notation result path and return a concise reason on failure.
+pub fn validate_result_path(path: &str) -> Result<(), &'static str> {
+    if path.trim().is_empty() {
+        return Err("must not be empty");
+    }
+    if !result_path_re().is_match(path) {
+        return Err(
+            "must use dot notation with identifier keys and numeric array segments (for example `summary.rows.0.name`)",
+        );
+    }
+    Ok(())
+}
+
+/// Visit every `{{ path }}` placeholder in a scalar-only result template.
+/// Literal braces are rejected so expressions and malformed placeholders do
+/// not degrade into surprising presentation text at runtime.
+fn template_paths(template: &str) -> Result<Vec<&str>, &'static str> {
+    let mut paths = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        if rest[..start].contains(['{', '}']) {
+            return Err("contains an unmatched template brace");
+        }
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            return Err("contains an unclosed `{{` placeholder");
+        };
+        let path = after_open[..end].trim();
+        validate_result_path(path)?;
+        paths.push(path);
+        rest = &after_open[end + 2..];
+    }
+    if rest.contains(['{', '}']) {
+        return Err("contains an unmatched template brace");
+    }
+    Ok(paths)
+}
+
+fn validate_template(field: &str, template: &str, errors: &mut Vec<ManifestError>) {
+    if template.trim().is_empty() {
+        errors.push(ManifestError::new(field, "must not be empty"));
+    } else if let Err(reason) = template_paths(template) {
+        errors.push(ManifestError::new(field, reason));
+    }
+}
+
+fn validate_artifact_url_template(field: &str, template: &str, errors: &mut Vec<ManifestError>) {
+    validate_template(field, template, errors);
+    if !template.starts_with("https://") && !template.starts_with("http://") {
+        errors.push(ManifestError::new(
+            field,
+            "must be an explicit absolute HTTP(S) URL template",
+        ));
+        return;
+    }
+    if template_paths(template).is_err() {
+        return;
+    }
+    let sample = template_sample(template);
+    match Url::parse(&sample) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {}
+        _ => errors.push(ManifestError::new(
+            field,
+            "must resolve to an absolute HTTP(S) URL with a host",
+        )),
+    }
+}
+
+fn template_sample(template: &str) -> String {
+    let mut sample = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        sample.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            break;
+        };
+        sample.push_str("placeholder");
+        rest = &after_open[end + 2..];
+    }
+    sample.push_str(rest);
+    sample
 }
 
 fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
@@ -344,6 +513,71 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
         }
     }
 
+    if let Some(result) = &m.result {
+        validate_template("result.headline", &result.headline, errors);
+        if let Some(description) = &result.description {
+            validate_template("result.description", description, errors);
+        }
+
+        for (idx, field) in result.fields.iter().enumerate() {
+            let prefix = format!("result.fields[{idx}]");
+            if field.label.trim().is_empty() {
+                errors.push(ManifestError::new(
+                    format!("{prefix}.label"),
+                    "must not be empty",
+                ));
+            }
+            if let Err(reason) = validate_result_path(&field.path) {
+                errors.push(ManifestError::new(format!("{prefix}.path"), reason));
+            }
+            match (field.format, field.currency.as_deref()) {
+                (ResultFieldFormat::Currency, None) => errors.push(ManifestError::new(
+                    format!("{prefix}.currency"),
+                    "currency format requires a three-letter currency code",
+                )),
+                (ResultFieldFormat::Currency, Some(code))
+                    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_uppercase()) =>
+                {
+                    errors.push(ManifestError::new(
+                        format!("{prefix}.currency"),
+                        "must be a three-letter uppercase currency code (for example `EUR`)",
+                    ));
+                }
+                (ResultFieldFormat::Currency, Some(_)) | (_, None) => {}
+                (_, Some(_)) => errors.push(ManifestError::new(
+                    format!("{prefix}.currency"),
+                    "is only valid when format is `currency`",
+                )),
+            }
+        }
+
+        for (idx, section) in result.sections.iter().enumerate() {
+            let prefix = format!("result.sections[{idx}]");
+            if section.label.trim().is_empty() {
+                errors.push(ManifestError::new(
+                    format!("{prefix}.label"),
+                    "must not be empty",
+                ));
+            }
+            if let Err(reason) = validate_result_path(&section.path) {
+                errors.push(ManifestError::new(format!("{prefix}.path"), reason));
+            }
+        }
+
+        for (idx, artifact) in result.artifacts.iter().enumerate() {
+            let prefix = format!("result.artifacts[{idx}]");
+            if artifact.label.trim().is_empty() {
+                errors.push(ManifestError::new(
+                    format!("{prefix}.label"),
+                    "must not be empty",
+                ));
+            }
+            validate_artifact_url_template(&format!("{prefix}.url"), &artifact.url, errors);
+        }
+
+        validate_result_unknown_fields(raw, errors);
+    }
+
     // Reject unknown top-level fields so typos surface early.
     if let YamlValue::Mapping(map) = raw {
         const KNOWN: &[&str] = &[
@@ -360,6 +594,7 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
             "route_default",
             "schedule",
             "schedule_tz",
+            "result",
         ];
         for key in map.keys() {
             if let YamlValue::String(k) = key
@@ -370,6 +605,56 @@ fn validate(m: &Manifest, raw: &YamlValue, errors: &mut Vec<ManifestError>) {
                     "unknown manifest field",
                 ));
             }
+        }
+    }
+}
+
+fn validate_result_unknown_fields(raw: &YamlValue, errors: &mut Vec<ManifestError>) {
+    let Some(result) = raw.get("result").and_then(YamlValue::as_mapping) else {
+        return;
+    };
+    validate_mapping_keys(
+        result,
+        "result",
+        &["headline", "description", "fields", "sections", "artifacts"],
+        errors,
+    );
+    for (list_name, known) in [
+        (
+            "fields",
+            &["label", "path", "format", "currency", "tone", "required"][..],
+        ),
+        ("sections", &["label", "path", "display", "required"][..]),
+        ("artifacts", &["label", "url", "required"][..]),
+    ] {
+        let Some(items) = result
+            .get(YamlValue::String(list_name.to_string()))
+            .and_then(YamlValue::as_sequence)
+        else {
+            continue;
+        };
+        for (idx, item) in items.iter().enumerate() {
+            if let Some(map) = item.as_mapping() {
+                validate_mapping_keys(map, &format!("result.{list_name}[{idx}]"), known, errors);
+            }
+        }
+    }
+}
+
+fn validate_mapping_keys(
+    map: &serde_yaml::Mapping,
+    prefix: &str,
+    known: &[&str],
+    errors: &mut Vec<ManifestError>,
+) {
+    for key in map.keys() {
+        if let YamlValue::String(key) = key
+            && !known.contains(&key.as_str())
+        {
+            errors.push(ManifestError::new(
+                format!("{prefix}.{key}"),
+                "unknown result field",
+            ));
         }
     }
 }
@@ -405,6 +690,103 @@ mod tests {
         assert_eq!(m.parameters[1].ty, ParameterType::Enum);
         assert_eq!(m.schedule.as_deref(), Some("0 3 * * *"));
         assert_eq!(m.schedule_tz.as_deref(), Some("Europe/Paris"));
+    }
+
+    #[test]
+    fn parses_complete_result_declaration() {
+        let src = "---\nid: report\nname: Report\ndescription: Build a report.\ncreated: 2026-08-04\nversion: 1\nresult:\n  headline: '{{ summary.row_count }} rows ready'\n  description: 'Report for {{ account.name }}'\n  fields:\n    - label: Total\n      path: summary.total\n      format: currency\n      currency: EUR\n      tone: success\n    - label: Duration\n      path: timings.0.duration_ms\n      format: duration\n      required: false\n  sections:\n    - label: Rows\n      path: rows\n      display: table\n  artifacts:\n    - label: Open report\n      url: 'https://example.com/reports/{{ report_id }}'\n---\n";
+        let manifest = parse_manifest(src).unwrap();
+        let result = manifest.result.unwrap();
+        assert_eq!(result.fields.len(), 2);
+        assert_eq!(result.fields[0].format, ResultFieldFormat::Currency);
+        assert_eq!(result.fields[0].tone, ResultFieldTone::Success);
+        assert!(!result.fields[1].required);
+        assert_eq!(result.sections[0].display, ResultSectionDisplay::Table);
+        assert!(result.artifacts[0].required);
+    }
+
+    #[test]
+    fn parses_minimal_result_declaration() {
+        let src = "---\nid: report\nname: Report\ndescription: Build a report.\ncreated: 2026-08-04\nversion: 1\nresult:\n  headline: Done\n---\n";
+        let result = parse_manifest(src).unwrap().result.unwrap();
+        assert_eq!(result.headline, "Done");
+        assert!(result.fields.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_result_paths_and_templates() {
+        for (fragment, expected_field) in [
+            (
+                "headline: Done\n  fields:\n    - label: Bad\n      path: rows[0]",
+                "result.fields[0].path",
+            ),
+            ("headline: '{{ total + tax }}'", "result.headline"),
+            ("headline: '{{ missing'", "result.headline"),
+        ] {
+            let src = format!(
+                "---\nid: report\nname: Report\ndescription: Build a report.\ncreated: 2026-08-04\nversion: 1\nresult:\n  {fragment}\n---\n"
+            );
+            let errors = parse_manifest(&src).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.field == expected_field),
+                "errors for {fragment:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_result_format_currency_mismatches() {
+        for fragment in [
+            "format: currency",
+            "format: currency\n      currency: euro",
+            "format: number\n      currency: EUR",
+        ] {
+            let src = format!(
+                "---\nid: report\nname: Report\ndescription: Build a report.\ncreated: 2026-08-04\nversion: 1\nresult:\n  headline: Done\n  fields:\n    - label: Total\n      path: total\n      {fragment}\n---\n"
+            );
+            let errors = parse_manifest(&src).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.field.ends_with(".currency")),
+                "errors for {fragment:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_result_enums_urls_and_unknown_fields() {
+        for (fragment, needle) in [
+            (
+                "fields:\n    - label: Total\n      path: total\n      tone: loud",
+                "unknown variant",
+            ),
+            (
+                "sections:\n    - label: Rows\n      path: rows\n      display: chart",
+                "unknown variant",
+            ),
+            (
+                "artifacts:\n    - label: File\n      url: 'file:///tmp/report'",
+                "HTTP(S)",
+            ),
+            (
+                "artifacts:\n    - label: File\n      url: '{{ report_url }}'",
+                "HTTP(S)",
+            ),
+            (
+                "fields:\n    - label: Total\n      path: total\n      mystery: true",
+                "unknown result field",
+            ),
+        ] {
+            let src = format!(
+                "---\nid: report\nname: Report\ndescription: Build a report.\ncreated: 2026-08-04\nversion: 1\nresult:\n  headline: Done\n  {fragment}\n---\n"
+            );
+            let errors = parse_manifest(&src).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.reason.contains(needle)),
+                "errors for {fragment:?}: {errors:?}"
+            );
+        }
     }
 
     #[test]

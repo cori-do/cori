@@ -16,3 +16,4 @@ chrono.workspace = true
 chrono-tz.workspace = true
 cron.workspace = true
 regex.workspace = true
+url.workspace = true

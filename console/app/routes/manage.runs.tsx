@@ -56,6 +56,7 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
               <th>When</th>
               <th>Workflow</th>
               <th>Status</th>
+              <th>Result</th>
               <th>Duration</th>
               <th>Cost</th>
               <th>Run id</th>
@@ -79,6 +80,9 @@ export default function Runs({ loaderData }: { loaderData: LoaderData }) {
                 </td>
                 <td>
                   <span className={`pill ${pillFor(r.status)}`}>{r.status}</span>
+                </td>
+                <td className="run-result-headline" title={r.result_headline ?? undefined}>
+                  {r.result_headline ?? "—"}
                 </td>
                 {/* Duration and cost are numbers, so they read as numbers:
                     tabular, cyan, aligned down the column. */}
