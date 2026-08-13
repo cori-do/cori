@@ -71,6 +71,7 @@ async fn runs_a_trivial_builtin_workflow() {
         required_cli_binaries: vec![],
         required_mcp_servers: vec![],
         required_llm_providers: vec![],
+        requires_llm: false,
     };
 
     let input = WorkflowInput {
@@ -85,6 +86,7 @@ async fn runs_a_trivial_builtin_workflow() {
         // the smoke test sets up directly.
         source_root: String::new(),
         source_bundle: None,
+        llm_config: None,
     };
 
     let out = run_workflow_once(&rt, "cori-smoke".to_string(), input)

@@ -5,7 +5,6 @@
 //! GUI is the Cori Console desktop app.
 
 use anyhow::{Context, Result, bail};
-use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::LlmOptions;
@@ -31,11 +30,21 @@ pub fn work(opts: WorkOpts) -> Result<()> {
 
     let credentials = resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
+    // `cori work --shared <pool>` is a Service identity, and the policy
+    // gate makes it API-only: a shared worker must never spend one
+    // person's subscription on behalf of everyone routed to it.
+    let policy = cori_run::resolve_llm_policy(&identity);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &[],
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::Probe,
+    );
 
     let llm_opts = LlmOptions {
         credentials,
-        trigger: Some(TriggerContext::Cli),
+        policy,
     };
 
     let cwd = std::env::current_dir().context("reading current working directory")?;

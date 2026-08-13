@@ -105,6 +105,10 @@ pub struct ActivityInput {
     /// worker materializes and verifies it before resolving `source_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bundle: Option<SourceBundle>,
+    /// Run-start snapshot of the active AI provider and its level mappings.
+    /// Missing only for histories created before provider snapshotting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_config: Option<llm::LlmConfig>,
     /// Compile-time source digest and metadata. Missing only for Temporal
     /// histories created before source-boundary enforcement was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +209,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
     let user_id = input.user_id.clone();
     let frozen_step = input.frozen_step.clone();
     let bundled_source = input.source_bundle.clone();
+    let llm_config = input.llm_config.clone();
     let source_path = input.source_path.clone();
     let source_cache_dir = ctx.source_cache_dir.clone();
     let credentials_dir = ctx.credentials_dir.clone();
@@ -272,25 +277,27 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                 )
             }
             (BrokerKind::Llm, false) => {
-                let expected_model =
-                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
+                let expected_level = expected_level(frozen_step.as_ref())?;
+                // Keep API keys out of the long-lived worker context. This
+                // is the first point at which an LLM step can actually run,
+                // so it is the right time to unlock the keychain.
+                let mut llm_opts = ctx.llm_opts.clone();
+                llm_opts.credentials = llm::credentials::from_env_and_store();
+                if let Some(config) = llm_config.as_ref() {
+                    llm_opts.policy =
+                        llm::LlmPolicy::for_deployment(config, ctx.llm_opts.policy.deployment());
+                }
                 llm::run(
                     &ctx.runtime,
                     &absolute_path,
                     &step_input,
-                    &ctx.llm_opts,
-                    expected_model.as_deref(),
+                    &llm_opts,
+                    &expected_level,
                 )
             }
             (BrokerKind::Llm, true) => {
-                let expected_model =
-                    expected_metadata_string(frozen_step.as_ref(), "model", "LLM model")?;
-                dry_run::llm(
-                    &ctx.runtime,
-                    &absolute_path,
-                    &step_input,
-                    expected_model.as_deref(),
-                )
+                let expected_level = expected_level(frozen_step.as_ref())?;
+                dry_run::llm(&ctx.runtime, &absolute_path, &step_input, &expected_level)
             }
         }
     })
@@ -414,6 +421,12 @@ fn expected_cli_binary(
     })
 }
 
+/// The level frozen at compile time, with a compatibility branch for
+/// Temporal histories that still carry legacy `model` metadata.
+fn expected_level(frozen: Option<&FrozenStep>) -> Result<llm::ExpectedLevel, BrokerError> {
+    llm::ExpectedLevel::from_frozen(frozen.map(|f| &f.metadata))
+}
+
 fn expected_metadata_string(
     frozen: Option<&FrozenStep>,
     key: &str,
@@ -522,8 +535,11 @@ fn classify(err: &BrokerError) -> Category {
         LlmMissingCredentials { .. } => Category::NonRetryable {
             type_name: "AuthenticationError",
         },
-        LlmUnknownModel { .. } => Category::NonRetryable {
-            type_name: "InvalidInputError",
+        // Nothing on this machine can serve an `llm` step. Retrying
+        // cannot conjure a signed-in CLI or an API key — the user has to
+        // act, and the error text says how.
+        LlmNoBackend { .. } => Category::NonRetryable {
+            type_name: "MissingCapabilityError",
         },
         LlmSchemaMismatch { .. } => Category::NonRetryable {
             type_name: "SchemaValidationError",

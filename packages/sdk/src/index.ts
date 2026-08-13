@@ -148,9 +148,22 @@ export interface LlmBatchOpts {
   readonly by: string;
 }
 
+/**
+ * How much model capability an LLM step needs, independent of provider.
+ *
+ * - `low` — classification, extraction, and short rewrites
+ * - `medium` — the default; most workflow model calls
+ * - `high` — multi-constraint reasoning and long synthesis
+ */
+export type LlmLevel = "low" | "medium" | "high";
+
 export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
   extends BaseStepOpts {
-  readonly model: string;
+  /**
+   * Optional. Omission means `medium`. The active provider on the worker
+   * maps this portable level to one of its own models.
+   */
+  readonly level?: LlmLevel;
   readonly input?: I;
   readonly output?: O;
   readonly prompt: (input: ZodOutput<I>) => string;
@@ -158,7 +171,9 @@ export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 }
 
 export interface LlmStepDef extends StepDef<"llm"> {
-  readonly model: string;
+  readonly level: LlmLevel;
+  /** Runtime-only bridge for Temporal activities started by older builds. */
+  readonly __legacyModel?: string;
   readonly prompt: (input: unknown) => string;
   readonly batch?: LlmBatchOpts;
   readonly input?: ZodTypeAny;
@@ -279,9 +294,14 @@ export const step = {
   llm<I extends ZodTypeAny, O extends ZodTypeAny>(
     opts: LlmStepOpts<I, O>,
   ): LlmStepDef {
+    // New source cannot type-check or compile with `model`, but retaining
+    // the value at runtime lets an already-started Temporal activity resume
+    // safely after an upgrade.
+    const legacyModel = (opts as unknown as { model?: string }).model;
     return {
       ...base("llm", opts),
-      model: opts.model,
+      level: opts.level ?? "medium",
+      __legacyModel: legacyModel,
       prompt: opts.prompt as (input: unknown) => string,
       batch: opts.batch,
       input: opts.input,

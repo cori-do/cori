@@ -5,15 +5,10 @@
 //! via [`LlmCredentials`]. Env vars (`OPENAI_API_KEY` etc.) take
 //! precedence over stored values so users can override per-shell.
 //!
-//! If neither source supplies a key and the run is interactive (stdin is
-//! a TTY), [`require`] writes to stderr asking the user to set the env
-//! var or run `cori login <provider>`, then waits for Enter and re-reads
-//! the env. Non-interactive runs surface
-//! [`BrokerError::LlmMissingCredentials`] immediately.
+//! Missing credentials are always reported immediately. Provider setup is a
+//! machine setting and never an interactive workflow preflight prompt.
 
-use std::io::{self, BufRead, IsTerminal, Write};
-
-use crate::{BrokerError, Result};
+use crate::BrokerError;
 
 /// Resolution sources, in priority order: env > config-supplied.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +19,15 @@ pub struct LlmCredentials {
 }
 
 impl LlmCredentials {
+    /// A credential set with nothing in it.
+    pub const fn empty() -> Self {
+        Self {
+            openai_api_key: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+        }
+    }
+
     /// Read credentials only from environment variables (no config). The
     /// CLI overlays config values on top via the public setters.
     pub fn from_env() -> Self {
@@ -51,6 +55,12 @@ impl LlmCredentials {
     }
 
     pub fn key_for(&self, provider: &'static str) -> Option<&str> {
+        self.key_for_str(provider)
+    }
+
+    /// Same lookup, for a provider id whose lifetime isn't `'static`
+    /// (config values, iteration over the provider table).
+    pub fn key_for_str(&self, provider: &str) -> Option<&str> {
         match provider {
             "openai" => self.openai_api_key.as_deref(),
             "anthropic" => self.anthropic_api_key.as_deref(),
@@ -58,49 +68,57 @@ impl LlmCredentials {
             _ => None,
         }
     }
+
+    /// Providers with a usable key, in [`super::catalog::API_PROVIDERS`]
+    /// order.
+    pub fn configured_providers(&self) -> Vec<&'static str> {
+        super::catalog::API_PROVIDERS
+            .iter()
+            .filter(|id| self.key_for_str(id).is_some())
+            .copied()
+            .collect()
+    }
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// If the credential for `provider` is missing, either prompt the user
-/// (interactive) or return an error (non-interactive). On success, returns
-/// the resolved key.
-pub fn require(creds: &LlmCredentials, provider: &'static str) -> Result<String> {
-    if let Some(k) = creds.key_for(provider) {
-        return Ok(k.to_string());
-    }
-    let env_var = match provider {
+/// The env var carrying a provider's API key.
+pub fn env_var_for(provider: &str) -> &'static str {
+    match provider {
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
         "gemini" => "GEMINI_API_KEY",
         _ => "",
-    };
-
-    if !io::stdin().is_terminal() {
-        return Err(BrokerError::LlmMissingCredentials { provider, env_var });
     }
+}
 
-    let mut stderr = io::stderr();
-    let _ = writeln!(
-        stderr,
-        "\nThis step requires an {provider} API key.\n  · Set {env_var}=<your-key> in your environment, OR\n  · Run `cori login {provider}` in another terminal\nPress Enter once the key is set (or Ctrl-C to abort)…",
-    );
-    let _ = stderr.flush();
-    let mut line = String::new();
-    let _ = io::stdin().lock().read_line(&mut line);
+/// Read every provider key from the shared secret store (OS keychain,
+/// file fallback), with env vars layered on top.
+pub fn from_env_and_store() -> LlmCredentials {
+    let mut stored = LlmCredentials::empty();
+    if let Ok(store) = cori_secrets::SecretStore::open_default() {
+        stored.openai_api_key = store
+            .get(&cori_secrets::llm_account("openai"))
+            .ok()
+            .flatten();
+        stored.anthropic_api_key = store
+            .get(&cori_secrets::llm_account("anthropic"))
+            .ok()
+            .flatten();
+        stored.gemini_api_key = store
+            .get(&cori_secrets::llm_account("gemini"))
+            .ok()
+            .flatten();
+    }
+    LlmCredentials::from_env().or_fill_from(&stored)
+}
 
-    // Re-read the env and the secret store — handles both `export …`
-    // in this shell's parent and `cori login <provider>` run in
-    // another terminal while we waited.
-    if let Some(k) = env_nonempty(env_var) {
-        return Ok(k);
+/// Non-interactive callers still get the structured error.
+pub fn missing_credentials(provider: &'static str) -> BrokerError {
+    BrokerError::LlmMissingCredentials {
+        provider,
+        env_var: env_var_for(provider),
     }
-    if let Ok(store) = cori_secrets::SecretStore::open_default()
-        && let Ok(Some(k)) = store.get(&cori_secrets::llm_account(provider))
-    {
-        return Ok(k);
-    }
-    Err(BrokerError::LlmMissingCredentials { provider, env_var })
 }

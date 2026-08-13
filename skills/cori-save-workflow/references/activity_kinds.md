@@ -308,7 +308,7 @@ export default step.llm({
   description: "Translate product rows EN → FR",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   batch: { size: 50, by: "rows" },
   prompt: ({ rows }) => `
 You are translating e-commerce product copy from English to French.
@@ -323,7 +323,17 @@ ${JSON.stringify(rows, null, 2)}
 
 Key fields:
 
-- **`model`** is a model identifier. At runtime, Cori uses the org's configured provider for that model class. The first time an `llm` step runs without configured credentials, Cori prompts the user just-in-time.
+- **`level`** is optional and defaults to `"medium"`. It expresses how much capability the runtime task needs, independently of provider:
+
+  | You write | Meaning |
+  |---|---|
+  | *(nothing)* | `medium` — the default for most work. |
+  | `level: "low"` | Classification, extraction, and short rewrites. |
+  | `level: "medium"` | Everyday workflow reasoning. |
+  | `level: "high"` | Multi-constraint reasoning or long synthesis. |
+
+  Model and provider names are not valid workflow fields. The machine's one active provider maps the level to a model; Cori never falls back to another connected provider.
+
 - **`batch`** (optional) lets Cori batch the input list into chunks, parallelize the calls, and merge results. Use whenever the input is a list and items are independent.
 - **`prompt`** returns a string. The output schema is enforced — Cori parses the model response against `Output` and fails the step if it doesn't match.
 

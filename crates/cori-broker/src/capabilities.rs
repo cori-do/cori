@@ -15,6 +15,7 @@ use cori_protocol::{WorkerIdentity, task_queue_for};
 use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmCredentials;
+use crate::llm::policy::Backend;
 use crate::mcp::McpServerConfig;
 
 /// A snapshot of the worker's capabilities, suitable for printing and for
@@ -25,8 +26,17 @@ pub struct Capabilities {
     pub cli_binaries: BTreeMap<String, PathBuf>,
     /// Server name → connection config.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    /// Provider names with usable credentials.
+    /// API provider names with usable credentials.
     pub llm_providers: BTreeSet<String>,
+    /// Subscription backend ids (`claude`, `codex`, `cursor`,
+    /// `gemini-cli`) that are installed *and* signed in, so they can
+    /// serve an `llm` step from the user's own plan.
+    #[serde(default)]
+    pub llm_subscriptions: BTreeSet<String>,
+    /// Focused remediation for the selected provider. Present when an LLM
+    /// probe was requested and the active selection cannot run now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_blocked_reason: Option<String>,
 }
 
 impl Capabilities {
@@ -36,30 +46,113 @@ impl Capabilities {
     pub fn has_mcp(&self, name: &str) -> bool {
         self.mcp_servers.contains_key(name)
     }
+    /// Can this machine serve an `llm` step at all, by either route?
+    pub fn has_any_llm(&self) -> bool {
+        !self.llm_providers.is_empty() || !self.llm_subscriptions.is_empty()
+    }
 }
 
 /// Discover capabilities. `home` is the Cori home directory
 /// (`~/.cori/`); `wanted_clis` is the set of CLI binary names the caller
 /// cares about — only those are probed so we don't enumerate PATH for
 /// nothing. `llm_creds` is the credential set the CLI resolved from
-/// config + env; we report any provider whose key is present.
+/// config + env. Only the explicitly active, usable provider is reported.
 pub fn discover(home: &Path, wanted_clis: &[String], llm_creds: &LlmCredentials) -> Capabilities {
+    discover_with_policy(
+        home,
+        wanted_clis,
+        llm_creds,
+        &crate::llm::LlmPolicy::default(),
+        LlmProbe::Skip,
+    )
+}
+
+/// Whether [`discover_with_policy`] should probe subscription backends.
+///
+/// Probing is not free: one backend (`cursor-agent status`) has no
+/// readable credential file and must be asked, which spawns a process
+/// that talks to the network. That is fine when the user is asking
+/// "what can this machine do", and wrong on the hot path of every run —
+/// so the caller states which situation it is in rather than paying the
+/// cost unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProbe {
+    /// Don't ask. Subscriptions are reported empty. Use when nothing in
+    /// this call depends on them (no `llm` step, worker bootstrap).
+    Skip,
+    /// Ask each backend whether it is signed in. Use when the answer is
+    /// the point: `cori status`, the Console's settings tab, or a
+    /// preflight for a workflow that actually has an `llm` step.
+    Probe,
+}
+
+impl LlmProbe {
+    /// Probe only when the workflow being checked needs an LLM.
+    ///
+    /// Takes the same two fields [`validate`] reads, via
+    /// [`workflow_needs_llm`], so the two can't disagree — skipping the
+    /// probe for a workflow that `validate` then checks would report
+    /// "no LLM backend" on a machine that has one.
+    pub fn for_workflow(requires_llm: bool, required_llm_providers: &[String]) -> Self {
+        if workflow_needs_llm(requires_llm, required_llm_providers) {
+            LlmProbe::Probe
+        } else {
+            LlmProbe::Skip
+        }
+    }
+}
+
+/// Does this workflow need an LLM backend to run?
+///
+/// `requires_llm` is the compiler's answer. The `required_llm_providers`
+/// fallback covers DAGs compiled before that flag existed — those always
+/// named a concrete model.
+pub fn workflow_needs_llm(requires_llm: bool, required_llm_providers: &[String]) -> bool {
+    requires_llm || !required_llm_providers.is_empty()
+}
+
+/// [`discover`] with an explicit LLM policy, so a shared worker reports
+/// no subscription backends even when the agent CLIs happen to be
+/// installed on its host — a service worker must never advertise a
+/// capability it is not allowed to use (see `crate::llm::policy`).
+pub fn discover_with_policy(
+    home: &Path,
+    wanted_clis: &[String],
+    llm_creds: &LlmCredentials,
+    policy: &crate::llm::LlmPolicy,
+    probe: LlmProbe,
+) -> Capabilities {
     let cli_binaries = discover_clis(wanted_clis);
     let mcp_servers = discover_mcp(home);
-    let mut llm_providers = BTreeSet::new();
-    if llm_creds.openai_api_key.is_some() {
-        llm_providers.insert("openai".to_string());
-    }
-    if llm_creds.anthropic_api_key.is_some() {
-        llm_providers.insert("anthropic".to_string());
-    }
-    if llm_creds.gemini_api_key.is_some() {
-        llm_providers.insert("gemini".to_string());
-    }
+    let llm_providers = match policy.active() {
+        Some(Backend::Api(id)) if llm_creds.key_for_str(id).is_some() => {
+            BTreeSet::from([id.to_string()])
+        }
+        _ => BTreeSet::new(),
+    };
+    let llm_subscriptions = match probe {
+        LlmProbe::Skip => BTreeSet::new(),
+        LlmProbe::Probe => policy
+            .subscription_order()
+            .iter()
+            .filter(|spec| crate::llm::subscription::check(spec).is_ready())
+            .map(|spec| spec.id.to_string())
+            .collect(),
+    };
+    let llm_blocked_reason = match probe {
+        LlmProbe::Skip => None,
+        LlmProbe::Probe => {
+            crate::llm::resolve::preview(crate::llm::LlmLevel::Medium, policy, llm_creds)
+                .err()
+                .map(|error| error.to_string())
+        }
+    };
     Capabilities {
         cli_binaries,
         mcp_servers,
         llm_providers,
+        llm_subscriptions,
+        llm_blocked_reason,
     }
 }
 
@@ -236,11 +329,16 @@ impl std::fmt::Display for MissingCapability {
 
 /// Return every requirement the snapshot does not satisfy. Empty vec ==
 /// ready to run.
+///
+/// `requires_llm` is the workflow's `CompiledWorkflow::requires_llm`.
+/// LLM checking asks whether the explicitly active provider is usable. A
+/// different connected provider is never treated as fallback.
 pub fn validate(
     capabilities: &Capabilities,
     required_clis: &[String],
     required_mcp: &[String],
     required_llm_providers: &[String],
+    requires_llm: bool,
 ) -> Vec<MissingCapability> {
     let mut out = Vec::new();
     for c in required_clis {
@@ -270,20 +368,18 @@ pub fn validate(
             });
         }
     }
-    for p in required_llm_providers {
-        if !capabilities.llm_providers.contains(p) {
-            let env_var = match p.as_str() {
-                "openai" => "OPENAI_API_KEY",
-                "anthropic" => "ANTHROPIC_API_KEY",
-                "gemini" => "GEMINI_API_KEY",
-                _ => "",
-            };
-            out.push(MissingCapability {
-                kind: "LLM provider",
-                name: p.clone(),
-                hint: format!("set {env_var} or run `cori login {p}`"),
-            });
-        }
+    if workflow_needs_llm(requires_llm, required_llm_providers) && !capabilities.has_any_llm() {
+        out.push(MissingCapability {
+            kind: "AI provider",
+            name: required_llm_providers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "active".to_string()),
+            hint: capabilities.llm_blocked_reason.clone().unwrap_or_else(|| {
+                "select or repair the active provider in Cori Console → Settings → AI Providers"
+                    .to_string()
+            }),
+        });
     }
     out
 }
@@ -348,6 +444,20 @@ impl CapabilityReport {
         Self::from_capabilities_with(identity, caps, None)
     }
 
+    /// Build a worker-presence advertisement without opening a credential
+    /// store or spawning CLI auth probes.
+    ///
+    /// This is for a long-lived worker's startup path only. It records what
+    /// the process can dispatch, while the broker still checks credentials
+    /// immediately before an external action. That keeps merely launching a
+    /// desktop worker from unlocking the OS keychain.
+    pub fn from_capabilities_without_auth_probe(
+        identity: WorkerIdentity,
+        caps: &Capabilities,
+    ) -> Self {
+        Self::from_capabilities_inner(identity, caps, None, false)
+    }
+
     /// Variant that consults a token store under `credentials_dir` for
     /// OAuth-configured MCP servers. Pass the absolute path to
     /// `~/.cori/credentials/` (or whatever override is in play).
@@ -355,6 +465,15 @@ impl CapabilityReport {
         identity: WorkerIdentity,
         caps: &Capabilities,
         credentials_dir: Option<&Path>,
+    ) -> Self {
+        Self::from_capabilities_inner(identity, caps, credentials_dir, true)
+    }
+
+    fn from_capabilities_inner(
+        identity: WorkerIdentity,
+        caps: &Capabilities,
+        credentials_dir: Option<&Path>,
+        probe_auth: bool,
     ) -> Self {
         use crate::cli_auth;
         use crate::oauth::{Owner, TokenKey, default_store};
@@ -373,10 +492,11 @@ impl CapabilityReport {
 
         // Per-CLI auth state is best-effort: only known CLIs are probed.
         for (name, path) in &caps.cli_binaries {
-            let authed = !matches!(
-                cli_auth::check_known(name),
-                cli_auth::AuthState::NeedsReauth { .. }
-            );
+            let authed = !probe_auth
+                || !matches!(
+                    cli_auth::check_known(name),
+                    cli_auth::AuthState::NeedsReauth { .. }
+                );
             capabilities.push(Capability {
                 id: name.clone(),
                 kind: CapabilityKind::Cli,
@@ -395,16 +515,20 @@ impl CapabilityReport {
 
         for (name, server_cfg) in &caps.mcp_servers {
             let (kind, authed) = if let Some(_oauth) = &server_cfg.oauth {
-                let authed = match (credentials_dir, &owner) {
-                    (Some(dir), Some(o)) => {
-                        let store = default_store(dir.to_path_buf());
-                        let key = TokenKey::new(name.clone(), o.clone());
-                        match store.get(&key) {
-                            Ok(Some(t)) => !t.is_expiring(0),
-                            _ => false,
+                let authed = if !probe_auth {
+                    true
+                } else {
+                    match (credentials_dir, &owner) {
+                        (Some(dir), Some(o)) => {
+                            let store = default_store(dir.to_path_buf());
+                            let key = TokenKey::new(name.clone(), o.clone());
+                            match store.get(&key) {
+                                Ok(Some(t)) => !t.is_expiring(0),
+                                _ => false,
+                            }
                         }
+                        _ => false,
                     }
-                    _ => false,
                 };
                 (CapabilityKind::McpOauth, authed)
             } else {
@@ -422,7 +546,19 @@ impl CapabilityReport {
                 id: provider.clone(),
                 kind: CapabilityKind::Llm,
                 authed: true,
-                detail: None,
+                detail: Some("API key".to_string()),
+            });
+        }
+        // Subscription backends are advertised the same way, so `cori
+        // status` and the Console show both routes to an `llm` step.
+        for id in &caps.llm_subscriptions {
+            let detail = crate::llm::subscription::spec_for(id)
+                .map(|spec| format!("{} subscription", spec.subscription_name));
+            capabilities.push(Capability {
+                id: id.clone(),
+                kind: CapabilityKind::Llm,
+                authed: true,
+                detail,
             });
         }
 
@@ -446,7 +582,6 @@ pub fn report(identity: WorkerIdentity, caps: &Capabilities) -> CapabilityReport
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     use std::fs;
@@ -473,5 +608,47 @@ mod tests {
 
         let path = std::env::join_paths([shadow_dir, executable_dir]).expect("PATH");
         assert_eq!(which_on_path_in("tool", &path), Some(executable));
+    }
+
+    #[test]
+    fn discovery_advertises_only_the_active_api_provider() {
+        let mut credentials = LlmCredentials::empty();
+        credentials.openai_api_key = Some("openai-test".into());
+        credentials.anthropic_api_key = Some("anthropic-test".into());
+        let policy = crate::llm::LlmPolicy::for_deployment(
+            &crate::llm::LlmConfig {
+                active: Some("anthropic".into()),
+                ..Default::default()
+            },
+            crate::llm::Deployment::Local,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capabilities =
+            discover_with_policy(temp.path(), &[], &credentials, &policy, LlmProbe::Probe);
+        assert_eq!(
+            capabilities.llm_providers,
+            BTreeSet::from(["anthropic".to_string()])
+        );
+    }
+
+    #[test]
+    fn connected_api_is_not_advertised_without_an_active_selection() {
+        let mut credentials = LlmCredentials::empty();
+        credentials.openai_api_key = Some("openai-test".into());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capabilities = discover_with_policy(
+            temp.path(),
+            &[],
+            &credentials,
+            &crate::llm::LlmPolicy::default(),
+            LlmProbe::Probe,
+        );
+        assert!(!capabilities.has_any_llm());
+        assert!(
+            capabilities
+                .llm_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("No AI provider is active"))
+        );
     }
 }

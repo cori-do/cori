@@ -102,25 +102,19 @@ pub fn mcp(
     })
 }
 
-/// Mock an `llm` step: validate its input, prompt builder, and frozen model,
+/// Mock an `llm` step: validate its input, prompt builder, and frozen level,
 /// then synthesize a schema-valid output without contacting a provider.
 pub fn llm(
     runtime: &Runtime,
     step_file_path: &Path,
     input: &JsonValue,
-    expected_model: Option<&str>,
+    expected_level: &crate::llm::ExpectedLevel,
 ) -> Result<ActivityOutcome> {
     let prompt =
         dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::LlmPrompt, input)?;
-    let actual_model = prompt
-        .output
-        .get("model")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| BrokerError::StepFailed {
-            message: "llm step produced no model".to_string(),
-            stack: None,
-        })?;
-    crate::llm::validate_model_boundary(expected_model, actual_model)?;
+    let actual_level = prompt.output.get("level").and_then(JsonValue::as_str);
+    let legacy_model = prompt.output.get("legacyModel").and_then(JsonValue::as_str);
+    let level = crate::llm::validate_level_boundary(expected_level, actual_level, legacy_model)?;
     let stub = output_stub(runtime, step_file_path)?;
     Ok(ActivityOutcome {
         status: ActivityStatus::Skipped,
@@ -129,7 +123,9 @@ pub fn llm(
         stderr: combine_stderr(prompt.stderr, stub.stderr),
         cost_eur: Some(0.0),
         usage: None,
-        notes: Vec::new(),
+        notes: vec![format!(
+            "would call the active AI provider at `{level}` level"
+        )],
     })
 }
 

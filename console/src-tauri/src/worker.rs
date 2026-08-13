@@ -9,10 +9,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_broker::llm::LlmOptions;
+use cori_broker::llm::{LlmCredentials, LlmOptions};
 use cori_protocol::{WorkerIdentity, task_queue_for};
 use cori_run::{paths, planner, runtime as cli_runtime};
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
@@ -70,13 +69,25 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
 
     let runtime = cli_runtime::resolve()?;
 
-    let credentials = cori_run::resolve_llm_credentials();
+    // Starting the tray app must not unlock API keys. A real LLM activity
+    // resolves keychain-backed credentials just before it executes; env
+    // values remain available here without touching the keychain.
+    let credentials = LlmCredentials::from_env();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
+    // The Console is the launcher: it runs on the user's own machine as
+    // their own identity, so subscription backends are available here.
+    let policy = cori_run::resolve_llm_policy(&identity);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &[],
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::Skip,
+    );
 
     let llm_opts = LlmOptions {
         credentials,
-        trigger: Some(TriggerContext::Cli),
+        policy,
     };
 
     let cwd = std::env::current_dir().context("reading current working directory")?;
@@ -119,11 +130,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<WorkerHandles> {
         anyhow::bail!("Temporal server unavailable at {target}: {e}");
     }
 
-    let report = CapabilityReport::from_capabilities_with(
-        identity.clone(),
-        &caps,
-        Some(&paths::credentials_dir()?),
-    );
+    let report = CapabilityReport::from_capabilities_without_auth_probe(identity.clone(), &caps);
     if let Err(e) = planner::publish_report(&report) {
         warn!(error = %format!("{e:#}"), "could not publish capability report");
     }

@@ -21,30 +21,29 @@ import {
 import { Channel } from "@tauri-apps/api/core";
 import {
   isIpcError,
-  listLlmProviders,
   listRuns,
   recordTrust,
   resolveWorkflow,
   startRun,
   type ConsentRequired,
-  type LlmProviderInfo,
   type ParameterDef,
   type PlanStep,
   type RunEvent,
   type RunListEntry,
   type RunTrace,
+  type StepSummary,
   type WorkflowPreflight,
 } from "../lib/api";
-import { ProviderKeyForm } from "./provider-key-form";
 import {
   formatAbsolute,
   formatCost,
   formatDuration,
   formatRelative,
 } from "../lib/format";
-import { openRun } from "../lib/windows";
+import { openRun, openSettings } from "../lib/windows";
 import { ConnectOffer } from "./run-view";
 import { ResultCard } from "./result-card";
+import { BackendLogo } from "./provider-icons";
 
 /** What the launcher can ask of the pane from its own key handling. */
 export interface WorkflowPaneHandle {
@@ -101,7 +100,6 @@ export function WorkflowPane({
   const [history, setHistory] = useState<RunListEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [llmProviders, setLlmProviders] = useState<LlmProviderInfo[]>([]);
 
   // Only the newest resolve is allowed to land: arrowing down a long list
   // and pressing Enter twice must not let a slow first request overwrite
@@ -119,9 +117,6 @@ export function WorkflowPane({
     try {
       const pf = await resolveWorkflow({ source: src, update });
       if (id !== requestId.current) return;
-      if (pf.required_llm_providers.length > 0) {
-        listLlmProviders().then(setLlmProviders).catch(() => {});
-      }
       const defaults: Record<string, unknown> = {};
       for (const p of pf.manifest.parameters) {
         if (p.default !== undefined && p.default !== null) {
@@ -329,24 +324,14 @@ export function WorkflowPane({
             </p>
           )}
 
-          {!run && (
-            <MissingLlmProviders
-              preflight={preflight}
-              providers={llmProviders}
-              onSaved={(updated) => {
-                setLlmProviders((ps) =>
-                  ps.map((p) => (p.id === updated.id ? updated : p)),
-                );
-                // Re-resolve so missing capabilities and readiness pick
-                // up the newly stored key.
-                if (source) void resolve(source);
-              }}
-            />
-          )}
-
-          {nonLlmMissing(preflight, llmProviders).length > 0 && (
+          {preflight.missing_capabilities.length > 0 && (
             <p className="pane-note is-bad">
-              Needs {nonLlmMissing(preflight, llmProviders).join(", ")}
+              Needs {preflight.missing_capabilities.join(", ")}.
+              {preflight.missing_capabilities.some((item) =>
+                item.startsWith("missing AI provider:"),
+              )
+                ? " Open Settings → AI Providers to select or repair the active provider."
+                : null}
             </p>
           )}
 
@@ -369,9 +354,11 @@ export function WorkflowPane({
             </div>
           )}
 
-          <Steps preflight={preflight} run={run} />
-
-          <RunSummary run={run} />
+          <div className={`pane-run-zone${run ? ` is-${runOutcome(run)}` : ""}`}>
+            <Steps preflight={preflight} run={run} />
+            {run && <RunProgress preflight={preflight} run={run} />}
+            <RunSummary run={run} />
+          </div>
 
           <WorkflowHistory
             runs={history}
@@ -380,63 +367,6 @@ export function WorkflowPane({
           />
         </div>
       )}
-    </div>
-  );
-}
-
-/** Required LLM providers with no stored key and no env override. */
-function missingLlmIds(
-  preflight: WorkflowPreflight,
-  providers: LlmProviderInfo[],
-): string[] {
-  if (providers.length === 0) return []; // list not loaded — raw note covers it
-  return preflight.required_llm_providers.filter((id) => {
-    const p = providers.find((x) => x.id === id);
-    return p ? !p.configured && !p.env_override : false;
-  });
-}
-
-/** Missing-capability lines minus the LLM ones we render inline forms
- *  for (format from cori-broker: "missing LLM provider: `id` — hint"). */
-function nonLlmMissing(
-  preflight: WorkflowPreflight,
-  providers: LlmProviderInfo[],
-): string[] {
-  if (missingLlmIds(preflight, providers).length === 0) {
-    return preflight.missing_capabilities;
-  }
-  return preflight.missing_capabilities.filter(
-    (m) => !m.startsWith("missing LLM provider:"),
-  );
-}
-
-function MissingLlmProviders({
-  preflight,
-  providers,
-  onSaved,
-}: {
-  preflight: WorkflowPreflight;
-  providers: LlmProviderInfo[];
-  onSaved: (updated: LlmProviderInfo) => void;
-}) {
-  const missing = missingLlmIds(preflight, providers);
-  if (missing.length === 0) return null;
-  return (
-    <div className="card">
-      <p className="pane-note is-warn" style={{ margin: "0 0 8px" }}>
-        This workflow has LLM steps — paste an API key to continue. It's
-        verified, stored once, and reused by every future run.
-      </p>
-      {missing.map((id) => {
-        const p = providers.find((x) => x.id === id);
-        if (!p) return null;
-        return (
-          <div key={id} style={{ marginBottom: 10 }}>
-            <span className="label">{p.display_name}</span>
-            <ProviderKeyForm provider={p} onChanged={onSaved} />
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -690,15 +620,21 @@ function Steps({
     <ol className="timeline is-flat">
       {preflight.steps.map((s, i) => {
         const l = live[s.activity_id];
+        const stateClass =
+          l?.status === "running"
+            ? " is-running"
+            : l?.status === "failed"
+              ? " failed"
+              : l
+                ? " is-complete"
+                : "";
         return (
-          <li key={s.activity_id} className="step">
+          <li key={s.activity_id} className={`step${stateClass}`}>
             <div className="num">{String(i + 1).padStart(2, "0")}</div>
             <div className="step-body">
               <div className="name">{s.name}</div>
             </div>
-            <div className={s.kind === "llm" ? "kind is-billed" : "kind"}>
-              {s.kind}
-            </div>
+            <StepKind step={s} />
             <div className="right">
               <StepState step={l} />
             </div>
@@ -706,6 +642,114 @@ function Steps({
         );
       })}
     </ol>
+  );
+}
+
+/** One concise state line for the active workflow. The moving accent is the
+ * same small "work is travelling" signal used by the landing-page team map;
+ * terminal states deliberately become quiet, green, or red instead. */
+function RunProgress({
+  preflight,
+  run,
+}: {
+  preflight: WorkflowPreflight;
+  run: RunState;
+}) {
+  const total = preflight.steps.length;
+  const steps = Object.values(run.steps);
+  const finished = steps.filter(
+    (step) => step.status !== "queued" && step.status !== "running",
+  ).length;
+  const active = steps.find((step) => step.status === "running");
+  const outcome = runOutcome(run);
+  const progress =
+    outcome === "running"
+      ? total === 0
+        ? 8
+        : Math.max(8, ((finished + (active ? 0.45 : 0.08)) / total) * 100)
+      : 100;
+  const failedStep = steps.find((step) => step.status === "failed");
+
+  let label: string;
+  if (outcome === "running") {
+    label = active
+      ? `Running ${active.step_name}`
+      : run.runId
+        ? "Preparing steps"
+        : "Starting run";
+  } else if (outcome === "failed") {
+    label = failedStep ? `Stopped at ${failedStep.step_name}` : "Run failed";
+  } else {
+    label = "Run succeeded";
+  }
+
+  return (
+    <div className={`pane-run-progress is-${outcome}`} role="status" aria-live="polite">
+      <div className="pane-run-progress-head">
+        <span className="pane-run-progress-label">{label}</span>
+        <span className="pane-run-progress-meta">
+          {outcome === "running"
+            ? total > 0
+              ? `${finished} of ${total} steps`
+              : "Waiting for plan"
+            : run.trace
+              ? `${run.trace.activities.length} steps · ${formatDuration(run.trace.duration_ms)}`
+              : "No steps completed"}
+        </span>
+      </div>
+      <div className="pane-run-progress-track" aria-hidden>
+        <span
+          className="pane-run-progress-fill"
+          style={{ width: `${Math.min(100, progress)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function runOutcome(run: RunState): "running" | "succeeded" | "failed" {
+  if (!run.closed) return "running";
+  return run.error != null || run.trace?.status === "failed" ? "failed" : "succeeded";
+}
+
+/**
+ * Compact provider/model preview from the same resolver the worker uses.
+ */
+function StepKind({ step }: { step: StepSummary }) {
+  const r = step.llm_resolution;
+  if (step.kind !== "llm") return <div className="kind">{step.kind}</div>;
+
+  if (!r) {
+    return (
+      <div className="kind is-billed">
+        <span className="tooltip-trigger" tabIndex={0}>
+          llm
+          <span role="tooltip" className="tooltip-body llm-tooltip">
+            <strong>No active AI provider</strong>
+            <button type="button" onClick={() => void openSettings("providers")}>
+              Settings → AI Providers
+            </button>
+          </span>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="kind is-billed">
+      <span className="tooltip-trigger" tabIndex={0}>
+        llm
+        <span role="tooltip" className="tooltip-body llm-tooltip">
+          <span className="llm-tooltip-provider">
+            <BackendLogo backendId={r.backend_id} size={16} />
+            <strong>{r.display_name}</strong>
+          </span>
+          <span className="llm-tooltip-model">
+            {r.level.toUpperCase()} → <code>{r.model}</code>
+          </span>
+        </span>
+      </span>
+    </div>
   );
 }
 
@@ -750,7 +794,7 @@ function RunSummary({ run }: { run: RunState | null }) {
   const cost = trace?.cost?.total_eur;
 
   return (
-    <div className="pane-summary">
+    <div className={`pane-summary is-${runOutcome(run)}`}>
       {trace?.result && (
         <ResultCard
           result={trace.result}

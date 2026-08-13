@@ -398,6 +398,9 @@ input[type="text"],
 input[type="number"],
 input[type="email"],
 input[type="time"],
+input[type="password"],
+input[type="search"],
+input[type="url"],
 select,
 textarea {
   background: var(--surface-2);
@@ -409,11 +412,37 @@ textarea {
   font-size: 12.5px;
   transition: border-color 150ms ease;
 }
+/* Native select chrome ignores our palette on some desktop webviews (most
+   visibly the light disclosure button in dark mode). Keep the platform's
+   accessible select behaviour, but draw the closed control with the same
+   compact chevron and surfaces as the rest of the form controls. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 2px),
+    calc(100% - 9px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select:hover { border-color: var(--rule-strong); }
+select option {
+  background: var(--surface-2);
+  color: var(--foreground);
+}
 input::placeholder,
 textarea::placeholder { color: var(--muted); opacity: 0.7; }
 input[type="text"]:focus,
 input[type="number"]:focus,
 input[type="time"]:focus,
+input[type="password"]:focus,
+input[type="search"]:focus,
+input[type="url"]:focus,
 select:focus,
 textarea:focus {
   outline: 1px solid var(--accent);
@@ -580,6 +609,15 @@ table.runs td strong {
   text-transform: none;
   color: var(--foreground);
   margin: 0 0 14px;
+}
+.schedule-mode-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.schedule-mode-picker .btn {
+  padding: 5px 8px;
+  font-size: 11.5px;
 }
 
 /* ─── Window shells ──────────────────────────────────────────────────
@@ -1485,6 +1523,10 @@ table.runs td strong {
   background: transparent;
   border: none;
   border-radius: 0;
+  /* The bordered variant clips to keep its rounded corners clean; this
+     one has neither border nor radius, so clipping only served to cut
+     off the `llm` step's provider tooltip. */
+  overflow: visible;
 }
 .timeline.is-flat .step {
   padding: 6px 0;
@@ -1492,6 +1534,49 @@ table.runs td strong {
   align-items: center;
 }
 .timeline.is-flat .step .right { flex-direction: row; gap: 6px; }
+
+/* Once a workflow is launched, its steps become one visible run zone. The
+   accent wash is intentionally reserved for the currently-live area; a
+   settled run resolves to a calm success/failure state instead of looking
+   permanently active. */
+.pane-run-zone { margin-top: 16px; }
+.pane-run-zone.is-running,
+.pane-run-zone.is-succeeded,
+.pane-run-zone.is-failed {
+  margin: 18px -4px 0;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+}
+.pane-run-zone.is-running {
+  border-color: rgb(var(--accent-rgb) / 0.38);
+  background:
+    radial-gradient(120% 180% at 0 0, var(--accent-soft), transparent 58%),
+    var(--background);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.pane-run-zone.is-succeeded {
+  border-color: var(--green-line);
+  background: linear-gradient(135deg, var(--green-soft), transparent 64%), var(--background);
+  box-shadow: inset 2px 0 0 var(--green);
+}
+.pane-run-zone.is-failed {
+  border-color: var(--red-line);
+  background: linear-gradient(135deg, var(--red-soft), transparent 64%), var(--background);
+  box-shadow: inset 2px 0 0 var(--red);
+}
+.pane-run-zone.is-running .timeline.is-flat,
+.pane-run-zone.is-succeeded .timeline.is-flat,
+.pane-run-zone.is-failed .timeline.is-flat { margin-top: 0; }
+.timeline.is-flat .step.is-running {
+  margin: 0 -6px;
+  padding: 7px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.timeline.is-flat .step.is-running .name { color: var(--foreground); }
+.timeline.is-flat .step.is-complete .name { color: var(--foreground); }
 
 .step-pending { color: var(--rule-strong); }
 .step-mark.is-ok { color: var(--green); }
@@ -1506,6 +1591,87 @@ table.runs td strong {
   background: var(--accent);
   animation: pulse 1.2s ease-in-out infinite;
 }
+
+.pane-run-progress {
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-mono);
+}
+.pane-run-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 7px;
+}
+.pane-run-progress-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-run-progress-label::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 7px 1px 0;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+.pane-run-progress-meta {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pane-run-progress-track {
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--rule);
+}
+.pane-run-progress-fill {
+  position: relative;
+  display: block;
+  height: 100%;
+  min-width: 8px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1), background-color 220ms ease;
+}
+.pane-run-progress.is-running .pane-run-progress-fill::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 42px;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.7), transparent);
+  animation: pane-progress-travel 1.2s ease-in-out infinite;
+}
+@keyframes pane-progress-travel {
+  from { left: -42px; }
+  to { left: 100%; }
+}
+.pane-run-progress.is-succeeded .pane-run-progress-label { color: var(--green); }
+.pane-run-progress.is-succeeded .pane-run-progress-label::before {
+  background: var(--green);
+  animation: none;
+}
+.pane-run-progress.is-succeeded .pane-run-progress-fill { background: var(--green); }
+.pane-run-progress.is-failed .pane-run-progress-label { color: var(--red); }
+.pane-run-progress.is-failed .pane-run-progress-label::before {
+  background: var(--red);
+  animation: none;
+}
+.pane-run-progress.is-failed .pane-run-progress-fill { background: var(--red); }
 
 .pane-summary {
   margin-top: 14px;
@@ -1533,11 +1699,13 @@ table.runs td strong {
   color: var(--accent-2);
   font-variant-numeric: tabular-nums;
 }
+.pane-summary.is-succeeded .pane-summary-text { color: var(--green); }
+.pane-summary.is-failed .pane-summary-text { color: var(--red); }
 
 .pane-history {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--rule);
+  margin-top: 36px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule-strong);
 }
 .pane-history-head {
   display: flex;
@@ -2177,6 +2345,28 @@ table.runs td strong {
 .step details summary::before { content: "▸ "; }
 .step details[open] summary::before { content: "▾ "; }
 .step details summary:hover { color: var(--accent); }
+.step-input-preview {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.step-input-preview > span:first-child {
+  flex: 0 0 auto;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.step-input-preview > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .step pre {
   background: var(--surface-2);
   padding: 10px 12px;
@@ -2192,6 +2382,11 @@ table.runs td strong {
 .step.failed {
   background: var(--red-soft);
   box-shadow: inset 2px 0 0 var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-run-progress-label::before,
+  .pane-run-progress.is-running .pane-run-progress-fill::after { animation: none; }
 }
 
 /* ─── Capability grid ────────────────────────────────────────────── */
@@ -2250,10 +2445,12 @@ table.runs td strong {
 
 /* ─── Custom scrollbars (desktop polish) ─────────────────────────── */
 .results::-webkit-scrollbar,
+.launcher-detail::-webkit-scrollbar,
 .run-window-body::-webkit-scrollbar,
 .manage-body::-webkit-scrollbar,
 .modal::-webkit-scrollbar { width: 10px; height: 10px; }
 .results::-webkit-scrollbar-thumb,
+.launcher-detail::-webkit-scrollbar-thumb,
 .run-window-body::-webkit-scrollbar-thumb,
 .manage-body::-webkit-scrollbar-thumb,
 .modal::-webkit-scrollbar-thumb {
@@ -2263,6 +2460,7 @@ table.runs td strong {
   background-clip: content-box;
 }
 .results::-webkit-scrollbar-thumb:hover,
+.launcher-detail::-webkit-scrollbar-thumb:hover,
 .run-window-body::-webkit-scrollbar-thumb:hover,
 .manage-body::-webkit-scrollbar-thumb:hover,
 .modal::-webkit-scrollbar-thumb:hover {
@@ -2270,9 +2468,18 @@ table.runs td strong {
   background-clip: content-box;
 }
 .results::-webkit-scrollbar-track,
+.launcher-detail::-webkit-scrollbar-track,
 .run-window-body::-webkit-scrollbar-track,
 .manage-body::-webkit-scrollbar-track,
-.modal::-webkit-scrollbar-track { background: transparent; }
+.modal::-webkit-scrollbar-track { background: var(--surface-2); }
+.results,
+.launcher-detail,
+.run-window-body,
+.manage-body,
+.modal {
+  scrollbar-color: var(--rule-strong) var(--surface-2);
+  scrollbar-width: thin;
+}
 
 /* ─── Responsive (narrow windows) ────────────────────────────────── */
 @media (max-width: 640px) {
@@ -2295,4 +2502,310 @@ table.runs td strong {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001s !important;
   }
+}
+
+/* ─── AI Providers ───────────────────────────────────────────────────
+   Multiple connections, one explicit active provider. */
+
+/* The outcome, stated before the controls that produce it. */
+.active-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--green);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.active-banner.is-blocked { border-left-color: var(--amber); }
+.active-banner .pill { flex: none; margin-top: 1px; }
+.active-banner .hint { margin-top: 4px; }
+
+/* Section heading with its explanation and one action on the same line. */
+.section-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 12px;
+  margin-bottom: 10px;
+}
+.section-head h2 {
+  grid-column: 1;
+  margin: 0;
+  font-size: 1.05rem;
+}
+.section-head .hint {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 2px;
+}
+.section-head .btn {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.backend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.backend-row {
+  background: var(--background);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: opacity 150ms ease, border-color 150ms ease;
+}
+.backend-row.is-active { border-color: color-mix(in srgb, var(--green) 45%, var(--rule)); }
+
+.provider-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 18px;
+}
+.provider-group { min-width: 0; }
+.provider-card-main {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.provider-card-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.provider-remedy,
+.backend-row > .backend-key,
+.advanced-models {
+  margin: 0 14px 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+.provider-remedy p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.command-copy-row,
+.model-input-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.command-copy-row code {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow-wrap: anywhere;
+}
+.model-input-row input { min-width: 0; flex: 1; }
+.advanced-models summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 500;
+}
+/* A disabled provider stays in place and legible — it is still a row the
+   user can rank and re-enable, not a deleted one. */
+.backend-row.is-off { opacity: 0.55; }
+.backend-row.is-off:hover,
+.backend-row.is-off:focus-within { opacity: 1; }
+
+.backend-main {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.backend-rank {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.backend-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--foreground);
+}
+.icon-btn:disabled { opacity: 0.3; cursor: default; }
+.icon-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.backend-identity { min-width: 0; }
+.backend-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  font-size: 13.5px;
+}
+.backend-identity .hint { margin-top: 3px; }
+
+/* The three tier models, on their own line under the name so a full
+   default list — a vendor's own model names can run 60+ characters
+   combined — has the identity column's full width to wrap into,
+   instead of being squeezed into a narrow side column and ellipsised.
+   Mono and muted so the provider name still leads. */
+.backend-models {
+  margin: 3px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.backend-models .is-custom { color: var(--accent); }
+
+/* The vendor mark, recessed like an input rather than floating free —
+   a quiet chip that identifies the row at a glance without competing
+   with the provider name for weight. `currentColor` inside inherits
+   this, so the mark and the pills around it stay one value in both
+   themes. */
+.backend-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--muted-strong);
+}
+.active-banner .backend-logo {
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+}
+
+.backend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.backend-toggle input { cursor: pointer; }
+
+.backend-detail {
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--rule);
+  margin-top: -1px;
+}
+
+.tier-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.tier-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.tier-field input { width: 100%; }
+.tier-field .hint { margin-top: 0; font-size: 11.5px; }
+.tier-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tier-label em {
+  font-style: normal;
+  color: var(--accent);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.backend-key {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+@media (max-width: 640px) {
+  .provider-groups { grid-template-columns: 1fr; }
+  .backend-main.provider-card-main { grid-template-columns: minmax(0, 1fr); }
+  .provider-card-action { justify-content: flex-start; }
+}
+
+/* Compact LLM resolution tooltip, right-aligned to remain visible in a
+   narrow workflow pane. */
+.step .kind .tooltip-trigger { color: inherit; }
+.step { position: relative; }
+.step .kind .tooltip-body {
+  left: auto;
+  right: 0;
+  width: min(250px, calc(100vw - 32px));
+  max-width: 250px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  text-align: left;
+}
+.step .kind .tooltip-body strong { color: var(--foreground); }
+.llm-tooltip-provider,
+.llm-tooltip-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.llm-tooltip-provider { margin-bottom: 7px; }
+.llm-tooltip-model {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.llm-tooltip button {
+  display: block;
+  margin-top: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
 }

@@ -26,16 +26,15 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
-use cori_broker::llm::{LlmCredentials, LlmOptions};
+use cori_broker::llm::{Deployment, LlmConfig, LlmCredentials, LlmOptions, LlmPolicy};
 use cori_protocol::{
     ActivityTrace, CostSummary, RunTrace, StepKind, TokenUsage, WorkerIdentity,
     bounded_activity_attempts, identity_from_queue, task_queue_for,
 };
 use cori_worker::broker_ctx::{BrokerCtx, set_broker_ctx};
-use cori_worker::runner::run_workflow_once;
+use cori_worker::runner::{ActivityProgressSink, run_workflow_once_with_progress};
 use cori_worker::runtime::{CoriTemporalRuntime, DEFAULT_NAMESPACE, preflight_check};
 use cori_worker::workflow::{ActivitySummary, WorkflowInput};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -93,12 +92,116 @@ pub enum ConsentCallback {
 }
 
 /// Sink for live step events during a run.
-/// Phase 0: called in sequence after the workflow completes.
-/// Phase 3: will be called live as each activity starts/finishes.
+///
+/// The run layer forwards activity lifecycle changes from Temporal history as
+/// they arrive. Once the workflow result lands, it backfills only an event
+/// that history observation could not see (for example a terminal failure).
 pub trait ProgressSink: Send + Sync {
     fn on_plan(&self, plan: &[planner::StepAssignment]);
     fn on_step_start(&self, summary: &ActivitySummary);
     fn on_step_finish(&self, summary: &ActivitySummary);
+}
+
+/// Bridges durable Temporal activity events into the surface-specific
+/// [`ProgressSink`]. It retains the IDs already sent so the final workflow
+/// trace can fill only lifecycle events a remote history observation missed.
+struct StreamingProgressReporter {
+    sink: Arc<dyn ProgressSink>,
+    steps: std::collections::HashMap<String, LiveStepTemplate>,
+    started: std::sync::Mutex<std::collections::HashSet<String>>,
+    completed: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+#[derive(Clone)]
+struct LiveStepTemplate {
+    step_name: String,
+    kind: StepKind,
+    route: Option<String>,
+}
+
+impl StreamingProgressReporter {
+    fn new(sink: Arc<dyn ProgressSink>, compiled: &cori_protocol::CompiledWorkflow) -> Self {
+        let steps = compiled
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.activity_id.clone(),
+                    LiveStepTemplate {
+                        step_name: step.name.clone(),
+                        kind: step.kind,
+                        route: step.route.clone(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            sink,
+            steps,
+            started: std::sync::Mutex::new(std::collections::HashSet::new()),
+            completed: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    fn synthetic(&self, activity_id: &str, status: &str) -> Option<ActivitySummary> {
+        let step = self.steps.get(activity_id)?;
+        Some(ActivitySummary {
+            activity_id: activity_id.to_string(),
+            step_name: step.step_name.clone(),
+            kind: step.kind,
+            status: status.to_string(),
+            started_at: None,
+            ended_at: None,
+            duration_ms: 0,
+            attempts: 1,
+            route: step.route.clone(),
+            input: JsonValue::Null,
+            output: JsonValue::Null,
+            cost_eur: None,
+            usage: None,
+            error: None,
+            notes: Vec::new(),
+        })
+    }
+
+    fn mark_started(&self, activity_id: &str) -> bool {
+        self.started
+            .lock()
+            .is_ok_and(|mut seen| seen.insert(activity_id.to_string()))
+    }
+
+    fn mark_completed(&self, activity_id: &str) -> bool {
+        self.completed
+            .lock()
+            .is_ok_and(|mut seen| seen.insert(activity_id.to_string()))
+    }
+
+    fn emit_missing(&self, summary: &ActivitySummary) {
+        if self.mark_started(&summary.activity_id) {
+            self.sink.on_step_start(summary);
+        }
+        if self.mark_completed(&summary.activity_id) {
+            self.sink.on_step_finish(summary);
+        }
+    }
+}
+
+impl ActivityProgressSink for StreamingProgressReporter {
+    fn on_activity_started(&self, activity_id: &str) {
+        if self.mark_started(activity_id)
+            && let Some(summary) = self.synthetic(activity_id, "running")
+        {
+            self.sink.on_step_start(&summary);
+        }
+    }
+
+    fn on_activity_completed(&self, activity_id: &str) {
+        if self.mark_completed(activity_id)
+            && let Some(summary) = self.synthetic(activity_id, "ok")
+        {
+            self.sink.on_step_finish(&summary);
+        }
+    }
 }
 
 /// A no-op [`ProgressSink`] for callers that don't need live events.
@@ -167,12 +270,30 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
         let _ = build_source_bundle_for_execution(&loaded)?;
     }
 
-    let credentials = resolve_llm_credentials();
+    let requires_llm = capabilities::workflow_needs_llm(
+        loaded.compiled.requires_llm,
+        &loaded.compiled.required_llm_providers,
+    );
+    let credentials = if requires_llm {
+        resolve_llm_credentials()
+    } else {
+        LlmCredentials::from_env()
+    };
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
     let identity = OsUser
         .resolve()
         .context("resolving OS user identity for preflight")?;
+    let policy = resolve_llm_policy(&identity);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &loaded.compiled.required_cli_binaries,
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::for_workflow(
+            loaded.compiled.requires_llm,
+            &loaded.compiled.required_llm_providers,
+        ),
+    );
     let cap_report =
         CapabilityReport::from_capabilities_with(identity, &caps, Some(&paths::credentials_dir()?));
 
@@ -181,6 +302,7 @@ pub fn preflight(source: &str, update: bool, assume_yes: bool) -> Result<Preflig
         &loaded.compiled.required_cli_binaries,
         &loaded.compiled.required_mcp_servers,
         &loaded.compiled.required_llm_providers,
+        loaded.compiled.requires_llm,
     )
     .into_iter()
     .map(|m| m.to_string())
@@ -277,23 +399,45 @@ pub async fn run_workflow(
     runtime::validate_workflow_sources(&runtime, &loaded.execution_root, &loaded.compiled)?;
 
     // 4. Capabilities
-    let credentials = resolve_llm_credentials();
+    let requires_llm = capabilities::workflow_needs_llm(
+        loaded.compiled.requires_llm,
+        &loaded.compiled.required_llm_providers,
+    );
+    let credentials = if requires_llm {
+        resolve_llm_credentials()
+    } else {
+        LlmCredentials::from_env()
+    };
+    // Freeze the machine-owned selection once. The same bytes drive
+    // preflight, preview, and every Temporal activity in this run.
+    let run_identity = OsUser
+        .resolve()
+        .context("resolving OS user identity for the LLM policy")?;
+    let llm_config = resolve_llm_config();
+    let policy = LlmPolicy::for_deployment(&llm_config, Deployment::from_identity(&run_identity));
     let llm_opts = LlmOptions {
         credentials: credentials.clone(),
-        trigger: Some(match trigger {
-            Trigger::Cli => TriggerContext::Cli,
-            Trigger::Console | Trigger::Schedule | Trigger::Mcp => TriggerContext::Cli,
-        }),
+        policy: policy.clone(),
     };
 
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &loaded.compiled.required_cli_binaries, &credentials);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &loaded.compiled.required_cli_binaries,
+        &credentials,
+        &policy,
+        capabilities::LlmProbe::for_workflow(
+            loaded.compiled.requires_llm,
+            &loaded.compiled.required_llm_providers,
+        ),
+    );
 
     let missing: Vec<String> = capabilities::validate(
         &caps,
         &loaded.compiled.required_cli_binaries,
         &loaded.compiled.required_mcp_servers,
         &loaded.compiled.required_llm_providers,
+        loaded.compiled.requires_llm,
     )
     .into_iter()
     .map(|m| m.to_string())
@@ -409,8 +553,13 @@ pub async fn run_workflow(
         // `source_root` remains for old histories and in-memory smoke tests.
         source_root: loaded.execution_root.display().to_string(),
         source_bundle,
+        llm_config: Some(llm_config),
     };
 
+    let streaming_progress = Arc::new(StreamingProgressReporter::new(
+        Arc::clone(&progress),
+        &loaded.compiled,
+    ));
     let workflow_output_res = {
         let temporal_rt = CoriTemporalRuntime::connect(
             endpoint.target.clone(),
@@ -418,7 +567,13 @@ pub async fn run_workflow(
             task_queue.clone(),
         )
         .await?;
-        run_workflow_once(&temporal_rt, run_id.clone(), workflow_input).await
+        run_workflow_once_with_progress(
+            &temporal_rt,
+            run_id.clone(),
+            workflow_input,
+            Some(streaming_progress.clone()),
+        )
+        .await
     };
 
     let mut run_status = "succeeded".to_string();
@@ -449,10 +604,6 @@ pub async fn run_workflow(
         .map(|a| (a.activity_id.as_str(), a))
         .collect();
 
-    for summary in &workflow_output.activities {
-        progress.on_step_start(summary);
-    }
-
     for summary in workflow_output.activities {
         let step_started_at = summary.started_at.unwrap_or(cursor);
         let duration_ms = summary.duration_ms as u128;
@@ -469,7 +620,7 @@ pub async fn run_workflow(
             total_tokens = total_tokens + u;
         }
 
-        progress.on_step_finish(&summary);
+        streaming_progress.emit_missing(&summary);
 
         let note = (!summary.notes.is_empty()).then(|| summary.notes.join("; "));
 
@@ -728,22 +879,34 @@ pub fn persist_trace(
 /// fallback) and overlay env vars on top. Resolution is two layers:
 /// env > keychain. Secrets never live in `config.toml`.
 pub fn resolve_llm_credentials() -> LlmCredentials {
-    let mut from_store = LlmCredentials::default();
-    if let Ok(store) = cori_secrets::SecretStore::open_default() {
-        from_store.openai_api_key = store
-            .get(&cori_secrets::llm_account("openai"))
-            .ok()
-            .flatten();
-        from_store.anthropic_api_key = store
-            .get(&cori_secrets::llm_account("anthropic"))
-            .ok()
-            .flatten();
-        from_store.gemini_api_key = store
-            .get(&cori_secrets::llm_account("gemini"))
-            .ok()
-            .flatten();
-    }
-    LlmCredentials::from_env().or_fill_from(&from_store)
+    cori_broker::llm::credentials::from_env_and_store()
+}
+
+/// Read the `[llm]` table from `~/.cori/config.toml`.
+///
+/// Unlike API keys this is not a secret — it is the explicit active
+/// backend and its per-level model mappings, which belong in the
+/// config file. A missing or malformed table yields defaults rather than
+/// an error: a typo in a preference must never stop a run.
+pub fn resolve_llm_config() -> LlmConfig {
+    let Ok(config) = config::Config::load() else {
+        return LlmConfig::default();
+    };
+    config
+        .get("llm")
+        .cloned()
+        .and_then(|v| v.try_into::<LlmConfig>().ok())
+        .unwrap_or_default()
+}
+
+/// Resolve the LLM policy for a worker identity.
+///
+/// The identity is what decides whether subscriptions are available at
+/// all: a `Person` runs on their own machine and may spend their own
+/// subscription; a `Service` pool worker is API-only regardless of
+/// config. See `cori_broker::llm::policy`.
+pub fn resolve_llm_policy(identity: &WorkerIdentity) -> LlmPolicy {
+    LlmPolicy::for_deployment(&resolve_llm_config(), Deployment::from_identity(identity))
 }
 
 /// Build the initial params JSON from manifest defaults overlaid with

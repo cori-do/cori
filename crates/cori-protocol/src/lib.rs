@@ -195,11 +195,26 @@ pub struct CompiledWorkflow {
     /// MCP server names referenced anywhere in the steps. Exactly matches
     /// `manifest.mcp_servers` after validation.
     pub required_mcp_servers: Vec<String>,
-    /// LLM providers (`openai` / `anthropic` / `gemini`) referenced by
-    /// any `llm` step's model name. The CLI validates each one against
-    /// the credentials it could resolve before any step runs.
+    /// LLM providers (`openai` / `anthropic` / `gemini`) *preferred* by
+    /// any `llm` step that named a concrete vendor model.
+    ///
+    /// This is a preference, not a requirement: a model name resolves
+    /// against whatever backend the host can reach, so a step naming
+    /// `gpt-4o-mini` can be served by a Claude subscription at the same
+    /// capability tier. Preflight uses [`Self::requires_llm`] to decide
+    /// whether to check anything at all, and this list only to rank and
+    /// explain. Empty when every `llm` step declared a tier or nothing.
     #[serde(default)]
     pub required_llm_providers: Vec<String>,
+    /// The workflow has at least one `llm` step, so *some* LLM backend —
+    /// a signed-in subscription CLI or an API key — must be usable
+    /// before the run starts.
+    ///
+    /// Defaulted for compatibility with DAGs compiled before tiers
+    /// existed; those always named a model, so a non-empty
+    /// `required_llm_providers` implies it.
+    #[serde(default)]
+    pub requires_llm: bool,
 }
 
 // ---------------------------------------------------------------------------

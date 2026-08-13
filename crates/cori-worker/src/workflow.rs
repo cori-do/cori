@@ -83,6 +83,11 @@ pub struct WorkflowInput {
     /// no host affinity, including when multiple workers poll the same queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bundle: Option<SourceBundle>,
+    /// Machine-owned AI provider selection and level mappings frozen when
+    /// the run starts. Activities use this snapshot even if Console settings
+    /// change while the workflow is waiting or retrying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_config: Option<cori_broker::llm::LlmConfig>,
 }
 
 /// Output of [`CoriWorkflow`].
@@ -217,6 +222,7 @@ impl CoriWorkflow {
                 dry_run: input.dry_run,
                 source_root: input.source_root.clone(),
                 source_bundle: input.source_bundle.clone(),
+                llm_config: input.llm_config.clone(),
                 frozen_step: step.source_sha256.as_ref().map(|source_sha256| FrozenStep {
                     source_sha256: source_sha256.clone(),
                     workflow_content_hash: input.workflow_content_hash.clone(),
@@ -515,6 +521,11 @@ fn activity_options_for_step(step: &cori_protocol::CompiledStep) -> ActivityOpti
     // 30s schedule_to_start surfaces missing-worker fast with an
     // actionable error rather than blocking the workflow.
     ActivityOptions::with_start_to_close_timeout(timeout)
+        // Preserve Cori's stable step id in Temporal history. Besides making
+        // the history inspectable, this lets the initiating Console map live
+        // activity events back onto its already-rendered step rows.
+        .activity_id(step.activity_id.clone())
+        .summary(step.name.clone())
         .retry_policy(retry_policy)
         .maybe_task_queue(step.task_queue.clone())
         .schedule_to_start_timeout(Duration::from_secs(30))

@@ -22,7 +22,7 @@ export default step.llm({
   description: "Extract the stated seat count, timeline, and buying process from each enquiry",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   prompt: ({ message_bodies, as_of }) =>
     `For each enquiry below, return the organisation the sender writes on behalf of, the number of people who would use the product as an integer, the whole number of days from ${as_of} until they want to be live, and whether they indicate that a security, legal, procurement, or compliance review is part of their process.\n\nWhen a range is given use its upper bound. When a count is expressed as a sum of teams, add them. Ignore numbers that refer to anything other than users of the product. When no count or no timeline is indicated, use 0.\n\nReturn JSON only.\n\n${JSON.stringify(message_bodies)}`,
 });

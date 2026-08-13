@@ -168,7 +168,7 @@ Rules that matter:
   re-emit it from `parse`.
 - **Syntax-check generated inline interpreter programs as their final assembled string.** In particular, never join multiline Python containing compound statements (`if`, `for`, `while`, `with`, `try`, `def`, `class`) with `"; "`; Python rejects compound statements after semicolons. Join those lines with `"\n"` and validate the resulting snippet before saving.
 - **`llm` steps must declare a typed output schema.** Free-form text returns aren't a Cori step — they're a bug. If you used an LLM in the conversation to extract structured info, the step's output type *is* that structure, and the prompt enforces it.
-- **Pick `llm` models from a provider the machine is actually signed into.** Before writing an `llm` step, run `cori status` (or the MCP `status` tool) and read the capabilities list: choose a model id from a family showing `authed: true`. Never default to a habitual model id — a step targeting an unauthenticated provider is the single most common reason `cori check` comes back not-ready, and swapping the `model` field yourself is a one-line fix, whereas asking the user to `cori login` a whole new provider is a much bigger ask. Record in `## Notes` which provider the step was validated against.
+- **Declare only the workflow's LLM level.** Use `level: "low" | "medium" | "high"` (or omit it for `medium`). Never put a provider or model name in workflow source. Before validation, run `cori status` (or the MCP `status` tool) and confirm this machine has one active, ready AI provider; if not, direct the user to Console → Settings → AI Providers. Cori never falls back to another connected provider.
 - **Capabilities are mandatory.** Any `cli` step that uses `gws` must declare `tools_required: [gws]`. Any `mcp_tool` step must declare its server in `mcp_servers`. The compiler enforces this — placement inference depends on it.
 
 Order the steps. Number filenames `01_`, `02_`, `03_`, … so the `steps/` directory reads in execution order.
@@ -407,10 +407,10 @@ One offer per conversation, max. Don't nag.
 
 **`cori check` says a CLI binary is missing from `tools_required`.** The compiler enforces the declaration. Add the binary to the manifest's `tools_required` list and re-check.
 
-**`cori check` not ready, or an `llm` step fails at run time, on a provider/model problem.** Two failure modes look alike but need opposite fixes — the trace's `error` field distinguishes them (see `references/trace_interpretation.md`):
+**`cori check` not ready, or an `llm` step fails at run time, on a provider/model problem.** The trace's `error` field distinguishes the fixes (see `references/trace_interpretation.md`):
 
-- **Auth/permission error** → the provider capability isn't signed in on that machine. Prefer switching the step's `model` to a family that `cori status` shows as `authed: true`; only suggest `cori login <provider>` if no authed family can do the job.
-- **404 / "model not found"** → the provider is fine; the model id doesn't exist (plausible-looking ids, including dated snapshots, routinely don't). Pick a valid id from the *same* family. Do not respond to a 404 by switching providers or asking for a login.
+- **No active provider / auth / missing-key error** → select or repair the active provider in Console → Settings → AI Providers. Do not modify the workflow level and do not expect another connected provider to take over.
+- **404 / "model not found"** → the active provider is fine, but its advanced model mapping is invalid. Reset that level under the active provider's **Advanced models** section or choose a valid model from the same provider.
 
 After the fix, loop: edit → re-check → (if running) re-run, until green.
 

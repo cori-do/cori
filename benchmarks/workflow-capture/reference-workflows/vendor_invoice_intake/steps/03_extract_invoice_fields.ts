@@ -25,7 +25,7 @@ export default step.llm({
   description: "Read the stated invoice fields whatever layout the supplier used",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   prompt: ({ documents }) =>
     `Read each supplier invoice below and return the vendor name, the supplier's own invoice number, the ISO 4217 currency code, the net amount, the tax amount, the gross amount, and the payment due date as YYYY-MM-DD.\n\nReport every amount exactly as the document states it, as a plain number. Do not recalculate, correct, or reconcile any figure, even where the stated amounts do not add up.\n\nReturn JSON only.\n\n${JSON.stringify(documents)}`,
 });

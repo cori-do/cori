@@ -297,25 +297,6 @@ pub fn compute_placement(
     }
 }
 
-/// Map an LLM model name to its provider id. Kept here (and not just in
-/// the broker) so the compiler can validate `model: "…"` declarations
-/// without taking a dep on the broker crate.
-pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    if model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-    {
-        Some("openai")
-    } else if model.starts_with("claude-") {
-        Some("anthropic")
-    } else if model.starts_with("gemini-") {
-        Some("gemini")
-    } else {
-        None
-    }
-}
-
 /// Compile a workflow directory. Returns the compiled workflow on success or
 /// a non-empty list of structured errors.
 pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError>> {
@@ -435,7 +416,8 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
     // 4. Cross-validation.
     let mut required_cli: Vec<String> = Vec::new();
     let mut required_mcp: Vec<String> = Vec::new();
-    let mut required_llm: Vec<String> = Vec::new();
+    let required_llm: Vec<String> = Vec::new();
+    let mut requires_llm = false;
     for step in &compiled_steps {
         let rel = step.source_path.clone();
         match step.kind {
@@ -495,24 +477,9 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
                 }
             }
             StepKind::Llm => {
-                if let Some(model) = step.metadata.get("model").and_then(|v| v.as_str()) {
-                    let provider = provider_for_model(model);
-                    if let Some(p) = provider {
-                        if !required_llm.iter().any(|x| x == p) {
-                            required_llm.push(p.to_string());
-                        }
-                    } else {
-                        errors.push(
-                            CompileError::new(
-                                &rel,
-                                format!(
-                                    "model `{model}` does not match any known LLM provider (expected prefix: gpt-/o1-/o3-/o4- for OpenAI, claude- for Anthropic, gemini- for Gemini)"
-                                ),
-                            )
-                            .with_field("model"),
-                        );
-                    }
-                }
+                // Provider choice is machine configuration. Compiled LLM
+                // steps carry only their portable low/medium/high level.
+                requires_llm = true;
             }
             _ => {}
         }
@@ -560,6 +527,7 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         required_cli_binaries: required_cli,
         required_mcp_servers: required_mcp,
         required_llm_providers: required_llm,
+        requires_llm,
     })
 }
 
@@ -694,6 +662,73 @@ mod tests {
     }
 
     const OK_MANIFEST: &str = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\ntools_required: [echo]\n---\n# body\n";
+
+    const LLM_MANIFEST: &str =
+        "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\n---\n# body\n";
+
+    fn compile_llm_step(args: &str) -> CompiledWorkflow {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[(
+                "01_ask.ts",
+                &format!(
+                    "import {{ step }} from \"@cori-do/sdk\";\nexport default step.llm({{ description: \"ask\", {args}prompt: () => `hi` }});"
+                ),
+            )],
+        );
+        compile(tmp.path()).expect("llm workflow compiles")
+    }
+
+    #[test]
+    fn level_declaration_needs_an_llm_but_no_specific_provider() {
+        let c = compile_llm_step("level: \"low\", ");
+        assert!(c.required_llm_providers.is_empty());
+        assert!(c.requires_llm);
+        assert_eq!(c.steps[0].metadata.get("level").unwrap(), "low");
+    }
+
+    #[test]
+    fn absent_level_defaults_to_medium_and_still_needs_an_llm() {
+        let c = compile_llm_step("");
+        assert!(c.required_llm_providers.is_empty());
+        assert!(
+            c.requires_llm,
+            "preflight must still check that some backend exists"
+        );
+        assert_eq!(c.steps[0].metadata.get("level").unwrap(), "medium");
+    }
+
+    #[test]
+    fn legacy_model_is_a_compile_error() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[(
+                "01_ask.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"ask\", model: \"gpt-4o-mini\", prompt: () => `hi` });",
+            )],
+        );
+        let errors = compile(tmp.path()).expect_err("legacy model must fail");
+        assert!(errors.iter().any(|e| e.to_string().contains("level")));
+    }
+
+    #[test]
+    fn workflow_without_llm_steps_requires_no_llm() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            OK_MANIFEST,
+            &[(
+                "01_x.ts",
+                "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"e\", command: () => [\"echo\", \"hi\"] });",
+            )],
+        );
+        let c = compile(tmp.path()).expect("compiles");
+        assert!(!c.requires_llm);
+    }
 
     #[test]
     fn missing_manifest() {

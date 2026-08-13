@@ -48,6 +48,17 @@ pub struct StepSummary {
     pub kind: String,
     pub description: String,
     pub placement: Value,
+    /// What an `llm` step declared. The compiler always normalizes omission
+    /// to `medium`. Absent for every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// Which backend would serve this `llm` step under the current
+    /// settings. Resolved through the same code path the runtime uses
+    /// (`cori_broker::llm::resolve::preview`), so the tooltip cannot
+    /// promise a provider the run won't actually use. `None` when the
+    /// step isn't an `llm` step, or when nothing is ready to serve it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_resolution: Option<crate::llm_cmd::LlmResolutionInfo>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -120,6 +131,13 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
     let history_key = cori_run::workflow_loader::loaded_run_history_key(&outcome.loaded);
 
     let mut has_builtin = false;
+    // Built once per workflow, not once per step: resolving credentials
+    // reads the OS keychain.
+    let llm_preview = compiled
+        .steps
+        .iter()
+        .any(|s| matches!(s.kind, StepKind::Llm))
+        .then(crate::llm_cmd::PreviewContext::new);
     let steps: Vec<StepSummary> = compiled
         .steps
         .iter()
@@ -127,12 +145,29 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
             if matches!(s.kind, StepKind::Builtin) {
                 has_builtin = true;
             }
+            let level = s
+                .metadata
+                .get("level")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let llm_resolution = matches!(s.kind, StepKind::Llm)
+                .then(|| {
+                    llm_preview.as_ref().and_then(|ctx| {
+                        level
+                            .as_deref()
+                            .and_then(cori_broker::llm::LlmLevel::parse)
+                            .and_then(|level| ctx.for_level(level))
+                    })
+                })
+                .flatten();
             StepSummary {
                 activity_id: s.activity_id.clone(),
                 name: s.name.clone(),
                 kind: kind_label(&s.kind).to_string(),
                 description: s.description.clone(),
                 placement: serde_json::to_value(&s.placement).unwrap_or(Value::Null),
+                level,
+                llm_resolution,
             }
         })
         .collect();

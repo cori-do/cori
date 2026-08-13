@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use cori_broker::capabilities::{self, CapabilityReport};
+use cori_broker::capabilities::CapabilityReport;
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_protocol::trace::{CostSummary, RunTrace, WorkflowSource};
 use cori_protocol::{WorkerIdentity, task_queue_for};
-use cori_run::{paths, planner, remote, resolve_llm_credentials};
+use cori_run::{paths, planner, remote};
 use cori_worker::runtime::preflight_check;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -51,14 +51,15 @@ fn collect_status(published_target: Option<String>) -> anyhow::Result<Value> {
     let identity = OsUser.resolve()?;
     let queue = task_queue_for(&identity);
 
-    let credentials = resolve_llm_credentials();
-    let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
-    let self_report = CapabilityReport::from_capabilities_with(
-        identity.clone(),
-        &caps,
-        Some(&paths::credentials_dir()?),
-    );
+    // This command backs the launcher's footer. It deliberately reports
+    // machine identity and engine state only: capability auth belongs to an
+    // explicit workflow preflight or settings refresh, both of which may
+    // legitimately need to unlock the OS keychain.
+    let self_report = CapabilityReport {
+        identity: identity.clone(),
+        task_queue: queue.clone(),
+        capabilities: Vec::new(),
+    };
 
     let cluster = planner::ClusterView::load().unwrap_or_default();
     let pins = remote::pins::load().unwrap_or_default();

@@ -194,7 +194,7 @@ export default step.llm({
   description: "Translate product rows EN → FR",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   batch: { size: 50, by: "rows" },
   prompt: ({ rows }) => `
 You are translating e-commerce product copy from English to French.

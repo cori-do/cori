@@ -240,7 +240,10 @@ try {
       emit({
         ok: true,
         output: {
-          model: stepDef.model,
+          // The SDK normalises omission to `medium`. `legacyModel` is an
+          // internal replay bridge and is never exposed to new workflows.
+          level: stepDef.level ?? "medium",
+          legacyModel: stepDef.__legacyModel ?? null,
           prompt: String(prompt ?? ""),
           batch: stepDef.batch ?? null,
           batchPrompts,

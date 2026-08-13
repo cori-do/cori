@@ -612,7 +612,13 @@ fn tool_status() -> Result<JsonValue> {
     let queue = task_queue_for(&identity);
     let credentials = cori_run::resolve_llm_credentials();
     let home = paths::home()?;
-    let caps = capabilities::discover(&home, &[], &credentials);
+    let caps = capabilities::discover_with_policy(
+        &home,
+        &[],
+        &credentials,
+        &cori_run::resolve_llm_policy(&identity),
+        capabilities::LlmProbe::Probe,
+    );
     let report = CapabilityReport::from_capabilities_with(
         identity.clone(),
         &caps,

@@ -189,12 +189,41 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
             }
         }
         StepKind::Llm => {
-            if let Some(model) = extract_string_field(args_span, "model") {
-                metadata.insert("model".into(), JsonValue::String(model));
-            } else {
+            if top_level_field_value(args_span, "model").is_some() {
                 errors.push(
-                    ParseError::new("missing required `model: \"...\"` field").field("model"),
+                    ParseError::new(
+                        "`model` is no longer supported on `llm` steps — replace it with `level: \"low\" | \"medium\" | \"high\"`",
+                    )
+                    .field("model"),
                 );
+            }
+
+            let level = match top_level_field_value(args_span, "level") {
+                None => "medium".to_string(),
+                Some(value) => match leading_string_literal(value) {
+                    Some(level) if matches!(level.as_str(), "low" | "medium" | "high") => level,
+                    Some(level) => {
+                        errors.push(
+                            ParseError::new(format!(
+                                "invalid LLM level `{level}` — expected `low`, `medium`, or `high`"
+                            ))
+                            .field("level"),
+                        );
+                        "medium".to_string()
+                    }
+                    None => {
+                        errors.push(
+                            ParseError::new(
+                                "`level` must be a direct string literal: `low`, `medium`, or `high`",
+                            )
+                            .field("level"),
+                        );
+                        "medium".to_string()
+                    }
+                },
+            };
+            if top_level_field_value(args_span, "model").is_none() {
+                metadata.insert("level".into(), JsonValue::String(level));
             }
             if let Some((size, by)) = extract_batch_field(args_span) {
                 let mut batch = JsonMap::new();
@@ -577,6 +606,92 @@ fn extract_string_field(body: &str, field: &str) -> Option<String> {
     let cap = re.captures(body)?;
     let raw = cap.get(2)?.as_str();
     Some(unquote(raw))
+}
+
+/// Return the source immediately after a direct property in the step's
+/// top-level options object. Nested schema fields with the same name do not
+/// count; this matters for outputs such as `z.object({ model: z.string() })`.
+fn top_level_field_value<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+    let mut brace_depth = 0_i32;
+    let mut paren_depth = 0_i32;
+    let mut bracket_depth = 0_i32;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' && index + 1 < bytes.len() {
+                index += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth -= 1,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth -= 1,
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth -= 1,
+            _ => {}
+        }
+        if brace_depth == 1
+            && paren_depth == 0
+            && bracket_depth == 0
+            && (byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+        {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && is_js_identifier_byte(bytes[index]) {
+                index += 1;
+            }
+            let name = &body[start..index];
+            let mut colon = index;
+            while colon < bytes.len() && bytes[colon].is_ascii_whitespace() {
+                colon += 1;
+            }
+            if name == field && bytes.get(colon) == Some(&b':') {
+                return Some(body[colon + 1..].trim_start());
+            }
+            continue;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn leading_string_literal(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let delimiter = *bytes.first()?;
+    if !matches!(delimiter, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == delimiter {
+            return Some(unquote(&value[..=index]));
+        }
+        if delimiter == b'`' && bytes[index] == b'$' {
+            return None;
+        }
+        index += 1;
+    }
+    None
 }
 
 fn unquote(raw: &str) -> String {
@@ -1007,11 +1122,54 @@ export default step.cli({
     }
 
     #[test]
-    fn parses_llm_step_with_model() {
+    fn rejects_legacy_llm_model() {
         let src = "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"translate\", model: \"gpt-4o-mini\", prompt: () => `hi` });";
+        let errors = parse(src).unwrap_err();
+        assert!(errors.iter().any(|error| error.reason.contains("level")));
+    }
+
+    #[test]
+    fn llm_step_without_a_level_defaults_to_medium() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.llm({ description: \"summarise\", prompt: () => `hi` });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Llm);
-        assert_eq!(p.metadata.get("model").unwrap(), "gpt-4o-mini");
+        assert_eq!(p.metadata.get("level").unwrap(), "medium");
+    }
+
+    #[test]
+    fn llm_step_accepts_all_levels() {
+        for level in ["low", "medium", "high"] {
+            let src = format!(
+                "import {{ step }} from \"@cori-do/sdk\";\nexport default step.llm({{ description: \"triage\", level: \"{level}\", prompt: () => `hi` }});"
+            );
+            let parsed = parse(&src).unwrap();
+            assert_eq!(parsed.metadata.get("level").unwrap(), level);
+        }
+    }
+
+    #[test]
+    fn llm_step_rejects_old_tiers_and_model_names_as_levels() {
+        for invalid in ["fast", "balanced", "deep", "gpt-4o-mini"] {
+            let src = format!(
+                "import {{ step }} from \"@cori-do/sdk\";\nexport default step.llm({{ description: \"triage\", level: \"{invalid}\", prompt: () => `hi` }});"
+            );
+            let errors = parse(&src).expect_err("invalid level must fail");
+            let message = errors
+                .iter()
+                .map(|error| error.reason.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(message.contains("low"), "{message}");
+            assert!(message.contains("medium"), "{message}");
+            assert!(message.contains("high"), "{message}");
+        }
+    }
+
+    #[test]
+    fn nested_output_model_field_is_not_a_legacy_option() {
+        let src = "import { step } from \"@cori-do/sdk\"; import { z } from \"zod\";\nexport default step.llm({ description: \"extract\", output: z.object({ model: z.string() }), prompt: () => `hi` });";
+        let p = parse(src).unwrap();
+        assert_eq!(p.metadata.get("level").unwrap(), "medium");
     }
 
     #[test]

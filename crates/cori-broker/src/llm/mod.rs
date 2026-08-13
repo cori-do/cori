@@ -3,22 +3,34 @@
 //! The LLM dispatch path follows this flow:
 //!
 //! 1. Invoke the runner in `llm_prompt` mode to materialise the prompt
-//!    string, the model name, the (optional) batch config, and the
-//!    (optional) output JSON Schema.
-//! 2. Pick a [`providers::LlmProvider`] from the model-name prefix.
-//! 3. Resolve credentials for the provider (env > config > interactive
-//!    prompt).
-//! 4. If `batch` was declared and the input has an array under the named
+//!    string, the declared level, the (optional) batch config,
+//!    and the (optional) output JSON Schema.
+//! 2. Resolve a backend ([`resolve`]) from what the step asked for, the
+//!    user's policy ([`policy`]), and what is usable on this machine —
+//!    a signed-in subscription CLI ([`subscription`]) or a metered API
+//!    key ([`providers`]).
+//! 3. If `batch` was declared and the input has an array under the named
 //!    field, split into chunks of `batch.size`, fan out to N parallel
 //!    threads (default concurrency 4), and merge results.
-//! 5. Validate every response against the output schema. Retry once with
+//! 4. Validate every response against the output schema. Retry once with
 //!    a stricter system message on schema-validation failure.
-//! 6. Record cost via [`pricing::cost_eur`] and return an
-//!    [`ActivityOutcome`] whose `output` is the (merged) parsed JSON.
+//! 5. Record cost via [`pricing::cost_eur`] and return an
+//!    [`ActivityOutcome`] whose `output` is the (merged) parsed JSON and
+//!    whose notes name the backend that actually answered.
+//!
+//! # What a step declares
+//!
+//! A step declares `level: "low" | "medium" | "high"`; omission means
+//! `medium`. The machine's single active provider maps that level to a
+//! concrete model. Workflows never select a provider or model.
 
+pub mod catalog;
 pub mod credentials;
+pub mod policy;
 mod pricing;
-mod providers;
+pub mod providers;
+pub mod resolve;
+pub mod subscription;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -30,9 +42,11 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::dispatch::{self, RunnerMode};
 use crate::runtime::Runtime;
-use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result, TokenUsage, TriggerContext};
+use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result, TokenUsage};
 
+pub use catalog::LlmLevel;
 pub use credentials::LlmCredentials;
+pub use policy::{Deployment, LlmConfig, LlmPolicy};
 
 /// Default fan-out for batched LLM calls.
 const DEFAULT_BATCH_CONCURRENCY: usize = 4;
@@ -41,12 +55,19 @@ const DEFAULT_BATCH_CONCURRENCY: usize = 4;
 #[derive(Debug, Clone, Default)]
 pub struct LlmOptions {
     pub credentials: LlmCredentials,
-    pub trigger: Option<TriggerContext>,
+    /// The single active backend. Built from `~/.cori/config.toml` and
+    /// gated by the worker's identity — see [`policy`].
+    pub policy: LlmPolicy,
 }
 
 #[derive(Debug, Deserialize)]
 struct PromptSpec {
-    model: String,
+    #[serde(default)]
+    level: Option<String>,
+    /// Runtime-only compatibility with already-started Temporal histories.
+    /// New workflow source containing `model` is rejected by the compiler.
+    #[serde(default, rename = "legacyModel")]
+    legacy_model: Option<String>,
     prompt: String,
     #[serde(default, rename = "batchPrompts")]
     batch_prompts: Vec<String>,
@@ -69,7 +90,7 @@ pub fn run(
     step_file_path: &Path,
     input: &JsonValue,
     opts: &LlmOptions,
-    expected_model: Option<&str>,
+    expected_level: &ExpectedLevel,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -82,9 +103,16 @@ pub fn run(
             envelope: initial.output.to_string(),
             source: e,
         })?;
-    validate_model_boundary(expected_model, &spec.model)?;
+    let level = validate_level_boundary(
+        expected_level,
+        spec.level.as_deref(),
+        spec.legacy_model.as_deref(),
+    )?;
 
-    let provider = pick_provider(&spec.model, &opts.credentials)?;
+    // Resolve the workflow level through exactly the active provider.
+    let resolution = resolve::resolve(level, &opts.policy, &opts.credentials)?;
+    let provider = &*resolution.provider;
+    let wire_model = resolution.selection.resolved_model.clone();
     let output_schema = spec.output_schema.as_ref();
 
     let mut combined_stderr = initial.stderr;
@@ -92,13 +120,13 @@ pub fn run(
     let (text_responses, total_usage) = if spec.batch_prompts.is_empty() {
         // No batching — single call, reuse the prompt we already rendered.
         let req = providers::LlmRequest {
-            model: &spec.model,
+            model: &wire_model,
             prompt: &spec.prompt,
             output_schema,
             strict_retry: false,
         };
         let resp = call_with_schema_retry(
-            &*provider,
+            provider,
             &req,
             runtime,
             step_file_path,
@@ -110,8 +138,8 @@ pub fn run(
         // before transformed values cross the JSON process boundary. Parallel
         // provider dispatch can then use those frozen prompt strings directly.
         fan_out(
-            &*provider,
-            &spec.model,
+            provider,
+            &wire_model,
             &spec.batch_prompts,
             output_schema,
             runtime,
@@ -151,11 +179,12 @@ pub fn run(
         combined_stderr.push_str(&validated.stderr);
     }
 
-    let cost = pricing::cost_eur(
-        &spec.model,
-        total_usage.input_tokens,
-        total_usage.output_tokens,
-    );
+    // Subscription calls are covered by a flat fee the user already
+    // paid, so `cost_model()` returns `None` for them and the run is not
+    // charged API rates for tokens that cost nothing extra.
+    let cost = resolution.cost_model().and_then(|model| {
+        pricing::cost_eur(model, total_usage.input_tokens, total_usage.output_tokens)
+    });
 
     Ok(ActivityOutcome {
         status: ActivityStatus::Ok,
@@ -164,55 +193,92 @@ pub fn run(
         stderr: combined_stderr,
         cost_eur: cost,
         usage: Some(total_usage),
-        notes: Vec::new(),
+        notes: vec![resolution.trace_note()],
     })
 }
 
-/// Enforce the compiler's literal model before provider and credential
-/// selection. `None` is retained only for legacy Temporal histories.
-pub(crate) fn validate_model_boundary(expected: Option<&str>, actual: &str) -> Result<()> {
-    if let Some(expected) = expected
-        && expected != actual
-    {
-        return Err(BrokerError::CapabilityDenied {
-            kind: "LLM model",
-            name: actual.to_string(),
-            hint: format!(
-                "step was compiled for model `{expected}` but runtime evaluation produced `{actual}`; the model must remain the directly declared literal"
-            ),
-        });
+/// Enforce the frozen authoring boundary and adapt already-started histories.
+pub(crate) fn validate_level_boundary(
+    expected: &ExpectedLevel,
+    actual_level: Option<&str>,
+    actual_legacy_model: Option<&str>,
+) -> Result<LlmLevel> {
+    match expected {
+        ExpectedLevel::Unknown => match (actual_level, actual_legacy_model) {
+            (Some(level), _) => parse_runtime_level(level),
+            (None, Some(model)) => Ok(LlmLevel::from_legacy_model(model)),
+            (None, None) => Err(BrokerError::CapabilityDenied {
+                kind: "LLM level",
+                name: "missing".into(),
+                hint: "the LLM step did not produce a level".into(),
+            }),
+        },
+        ExpectedLevel::Declared(level) => {
+            let actual = actual_level.map(parse_runtime_level).transpose()?;
+            if actual == Some(*level) && actual_legacy_model.is_none() {
+                Ok(*level)
+            } else {
+                Err(level_boundary_error(
+                    level.as_str(),
+                    actual_level.or(actual_legacy_model),
+                ))
+            }
+        }
+        ExpectedLevel::LegacyModel(model) => {
+            if actual_legacy_model == Some(model.as_str()) {
+                Ok(LlmLevel::from_legacy_model(model))
+            } else {
+                Err(level_boundary_error(
+                    model,
+                    actual_legacy_model.or(actual_level),
+                ))
+            }
+        }
     }
-    Ok(())
 }
 
-/// Pick a provider implementation by model-name prefix.
-fn pick_provider(model: &str, creds: &LlmCredentials) -> Result<Box<dyn providers::LlmProvider>> {
-    let provider_name = provider_for_model(model).ok_or_else(|| BrokerError::LlmUnknownModel {
-        model: model.to_string(),
-    })?;
-    let key = credentials::require(creds, provider_name)?;
-    Ok(match provider_name {
-        "openai" => Box::new(providers::OpenAiProvider::new(key)),
-        "anthropic" => Box::new(providers::AnthropicProvider::new(key)),
-        "gemini" => Box::new(providers::GeminiProvider::new(key)),
-        _ => unreachable!("provider_for_model returned unknown provider"),
+fn parse_runtime_level(value: &str) -> Result<LlmLevel> {
+    LlmLevel::parse(value).ok_or_else(|| BrokerError::CapabilityDenied {
+        kind: "LLM level",
+        name: value.to_string(),
+        hint: "level must be one of `low`, `medium`, or `high`".into(),
     })
 }
 
-/// Map a model name to a provider id. Returns `None` for unknown prefixes.
-pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    if model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-    {
-        Some("openai")
-    } else if model.starts_with("claude-") {
-        Some("anthropic")
-    } else if model.starts_with("gemini-") {
-        Some("gemini")
-    } else {
-        None
+fn level_boundary_error(expected: &str, actual: Option<&str>) -> BrokerError {
+    let actual = actual.unwrap_or("missing");
+    BrokerError::CapabilityDenied {
+        kind: "LLM level",
+        name: actual.to_string(),
+        hint: format!(
+            "step was compiled for `{expected}` but runtime evaluation produced `{actual}`; level must remain the directly declared literal"
+        ),
+    }
+}
+
+/// What the compiler froze for an LLM step. `LegacyModel` exists only so
+/// already-started Temporal histories can replay after this breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedLevel {
+    Unknown,
+    Declared(LlmLevel),
+    LegacyModel(String),
+}
+
+impl ExpectedLevel {
+    pub fn from_frozen(
+        frozen_metadata: Option<&serde_json::Map<String, JsonValue>>,
+    ) -> Result<Self> {
+        let Some(metadata) = frozen_metadata else {
+            return Ok(Self::Unknown);
+        };
+        if let Some(level) = metadata.get("level").and_then(JsonValue::as_str) {
+            return Ok(Self::Declared(parse_runtime_level(level)?));
+        }
+        if let Some(model) = metadata.get("model").and_then(JsonValue::as_str) {
+            return Ok(Self::LegacyModel(model.to_string()));
+        }
+        Ok(Self::Unknown)
     }
 }
 
@@ -435,34 +501,55 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn provider_dispatch() {
-        assert_eq!(provider_for_model("gpt-4o-mini"), Some("openai"));
-        assert_eq!(provider_for_model("o1"), Some("openai"));
+    fn rejects_runtime_level_switches() {
+        let expected = ExpectedLevel::Declared(LlmLevel::Medium);
         assert_eq!(
-            provider_for_model("claude-3-5-sonnet-20241022"),
-            Some("anthropic")
+            validate_level_boundary(&expected, Some("medium"), None).expect("matching level"),
+            LlmLevel::Medium
         );
-        assert_eq!(provider_for_model("gemini-1.5-flash"), Some("gemini"));
-        assert_eq!(provider_for_model("llama-3"), None);
-    }
-
-    #[test]
-    fn rejects_runtime_model_switches() {
-        validate_model_boundary(Some("gpt-4o-mini"), "gpt-4o-mini").expect("matching frozen model");
-        let error = validate_model_boundary(Some("gpt-4o-mini"), "claude-3-5-sonnet")
-            .expect_err("runtime model switch must fail");
+        let error = validate_level_boundary(&expected, Some("high"), None)
+            .expect_err("runtime level switch must fail");
         assert!(matches!(
             error,
-            BrokerError::CapabilityDenied { kind: "LLM model", name, .. }
-                if name == "claude-3-5-sonnet"
+            BrokerError::CapabilityDenied { kind: "LLM level", name, .. } if name == "high"
         ));
-        validate_model_boundary(None, "legacy-model").expect("legacy compatibility");
     }
 
     #[test]
-    fn prompt_spec_accepts_pre_rendered_batch_prompts() {
+    fn expected_level_reads_new_and_legacy_metadata() {
+        assert_eq!(
+            ExpectedLevel::from_frozen(None).expect("unknown"),
+            ExpectedLevel::Unknown
+        );
+        let mut new_metadata = JsonMap::new();
+        new_metadata.insert("level".into(), json!("high"));
+        assert_eq!(
+            ExpectedLevel::from_frozen(Some(&new_metadata)).expect("level"),
+            ExpectedLevel::Declared(LlmLevel::High)
+        );
+        let mut metadata = JsonMap::new();
+        metadata.insert("model".into(), json!("fast"));
+        assert_eq!(
+            ExpectedLevel::from_frozen(Some(&metadata)).expect("legacy model"),
+            ExpectedLevel::LegacyModel("fast".into())
+        );
+    }
+
+    #[test]
+    fn legacy_history_model_maps_to_a_level() {
+        let expected = ExpectedLevel::LegacyModel("gpt-4o-mini".into());
+        assert_eq!(
+            validate_level_boundary(&expected, None, Some("gpt-4o-mini"))
+                .expect("legacy compatibility"),
+            LlmLevel::Low
+        );
+    }
+
+    #[test]
+    fn prompt_spec_accepts_level_and_pre_rendered_batch_prompts() {
         let spec: PromptSpec = serde_json::from_value(json!({
-            "model": "gpt-4o-mini",
+            "level": "low",
+            "legacyModel": null,
             "prompt": "",
             "batch": { "by": "rows", "size": 2 },
             "batchPrompts": ["rows 1-2", "row 3"],
@@ -470,8 +557,31 @@ mod tests {
             "hasOutputSchema": false
         }))
         .expect("prompt spec");
+        assert_eq!(spec.level.as_deref(), Some("low"));
         assert_eq!(spec.batch_prompts, vec!["rows 1-2", "row 3"]);
         assert_eq!(spec.batch.expect("batch").by, "rows");
+    }
+
+    #[test]
+    fn prompt_spec_accepts_the_normalized_medium_default() {
+        let spec: PromptSpec = serde_json::from_value(json!({
+            "level": "medium",
+            "legacyModel": null,
+            "prompt": "summarise",
+            "batchPrompts": [],
+            "outputSchema": null,
+            "hasOutputSchema": false
+        }))
+        .expect("prompt spec");
+        assert_eq!(
+            validate_level_boundary(
+                &ExpectedLevel::Declared(LlmLevel::Medium),
+                spec.level.as_deref(),
+                spec.legacy_model.as_deref(),
+            )
+            .expect("default level"),
+            LlmLevel::Medium
+        );
     }
 
     #[test]

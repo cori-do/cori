@@ -68,11 +68,11 @@ fn compiles_translate_product_sheets_fr() {
     }
     assert_eq!(workflow.required_cli_binaries, vec!["gws".to_string()]);
 
-    // LLM step records its model.
+    // LLM step records its portable workflow level.
     let llm = &workflow.steps[1];
     assert_eq!(
-        llm.metadata.get("model").and_then(|v| v.as_str()),
-        Some("gpt-4o-mini")
+        llm.metadata.get("level").and_then(|v| v.as_str()),
+        Some("low")
     );
 }
 

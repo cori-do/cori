@@ -27,6 +27,11 @@ Do not re-litigate these without explicit human approval.
 9. **Worker presence is Temporal-native.** Use `DescribeTaskQueue` only on human-frequency paths (`cori status`, `cori check`). Never per-step. The v1 fallback for cluster presence is reading `~/.cori/cluster/<queue>.json` files published by `cori work`. **Do not** use Temporal Worker Versioning / Build IDs for capability routing — versioning is reserved for future Cori-binary rollout. **Do not** introduce Nexus in v1 (noted as v2 possibility).
 10. **TypeScript only for user step files.** Zod is the schema library. Static parsing of step files is regex-based today (see [crates/cori-compiler/src/step_parser.rs](crates/cori-compiler/src/step_parser.rs)) — a swc/oxc migration is planned but not in v1.
 11. **Local Temporal auto-spawn, no bundling.** If `temporal.host` isn't configured and `127.0.0.1:7233` isn't already serving, `cori run` shells out `temporal server start-dev` as a supervised child (see [crates/cori-run/src/temporal_endpoint.rs](crates/cori-run/src/temporal_endpoint.rs)). Production deployments override via `temporal.host` in `~/.cori/config.toml`. No Temporal Cloud support.
+12. **Workflows declare an LLM level; the machine picks the model.** An `llm` step declares `level: "low" | "medium" | "high"`; omission is normalized to `medium` at compile time. Workflows cannot declare provider-specific model names. The active machine provider maps the level to a model and the trace records `level → model via provider`. The compile-time level boundary rejects runtime substitution. Legacy `model` metadata is adapted only when replaying already-started Temporal histories; new source containing `model` must not compile.
+13. **One explicit active LLM provider—or none.** Users may connect multiple subscription CLIs and API-key providers, but `[llm].active` in `~/.cori/config.toml` selects exactly one. Cori never falls back to another connected provider. Model overrides live at `[llm.models.<backend>.<level>]`. Legacy `priority`, `disabled`, `mode`, and `order` fields are ignored and never seed an active selection; legacy `fast`/`balanced`/`deep` model override keys remain read-only fallbacks for `low`/`medium`/`high`.
+14. **Personal subscriptions are gated on worker identity.** Subscription backends (Claude Code, Codex, Cursor, Gemini CLI) may serve an `llm` step only under `WorkerIdentity::Person`. `WorkerIdentity::Service` (`cori work --shared <pool>`) is forced to API keys by `LlmPolicy::for_deployment`, regardless of `~/.cori/config.toml` — a shared worker must never spend one person's personal plan on behalf of everyone routed to it, and has no interactive session to re-auth with. The gate derives from the same identity the planner routes on; do not add an independent flag that can drift from it.
+
+    Two properties of the subscription path are load-bearing and enforced in [subscription.rs](crates/cori-broker/src/llm/subscription.rs), not left to vendor defaults: every child runs in an **empty scratch cwd** with the vendor's most restrictive flag (these are *agents* that can read files and run shell commands, and an `llm` step is a pure text transform the capability model knows nothing about), and vendor **API-key env vars are stripped** from the child so "use my subscription" can't silently bill a metered key. Prompts go on **stdin**, never argv.
 
 ---
 
@@ -71,6 +76,8 @@ crates/                                Rust workspace (edition 2024, MSRV 1.94)
   cori-worker/     Temporal worker: workflow + activities + runtime + runner
   cori-compiler/   manifest + step parsing → CompiledWorkflow (computes Placement)
   cori-broker/     capability broker (cli, code, mcp, llm, oauth, cli_auth) — trust boundary
+                   llm/ = catalog (tiers) + policy (which backend pays) + resolve
+                   (selection) + providers (HTTP APIs) + subscription (agent CLIs)
   cori-ledger/     placeholder for cost analytics (mostly empty in v1)
   cori-manifest/   YAML schema + parser (manifest.md frontmatter + body)
   cori-protocol/   wire types (CompiledWorkflow, Placement, WorkerIdentity, RunTrace,
@@ -249,7 +256,9 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 |---|---|
 | A new step kind | Start with `StepKind` in [cori-protocol](crates/cori-protocol/src/lib.rs), then the SDK ([packages/sdk](packages/sdk/src/index.ts)), then the compiler parser ([cori-compiler/src/step_parser.rs](crates/cori-compiler/src/step_parser.rs)), then a broker module + an activity handler. Update the workflow dispatch loop last. |
 | A new CLI verb | [crates/cori-cli/src/commands/](crates/cori-cli/src/commands) + wire it in [main.rs](crates/cori-cli/src/main.rs). |
-| A new LLM provider | [crates/cori-broker/src/llm/providers.rs](crates/cori-broker/src/llm/providers.rs). Add credential resolution to the same module, pricing to `pricing.rs`. |
+| A new LLM **API** provider | [crates/cori-broker/src/llm/providers.rs](crates/cori-broker/src/llm/providers.rs) for the HTTP client, [`catalog.rs`](crates/cori-broker/src/llm/catalog.rs) for its tier→model table and name prefix, `credentials.rs` for key resolution, `pricing.rs` for cost. |
+| A new LLM **subscription** backend (an agent CLI) | One row in `BACKENDS` in [crates/cori-broker/src/llm/subscription.rs](crates/cori-broker/src/llm/subscription.rs), plus its argv shape, sign-in probe, and output parser in the same file. |
+| A model a vendor just renamed | The level tables: `BACKENDS` (subscriptions) or `api_model_for_level` (APIs). Users can override without a release via `cori config set llm.models.<backend>.<level> <model>`. |
 | A new manifest field | [crates/cori-manifest/src/lib.rs](crates/cori-manifest/src/lib.rs). Update [skills/cori-save-workflow/references/manifest_schema.md](skills/cori-save-workflow/references/manifest_schema.md) in lockstep. |
 | Trace shape changes | The trace types live in [crates/cori-protocol/src/trace.rs](crates/cori-protocol/src/trace.rs) (`RunTrace`, `ActivityTrace`, `TokenUsage`). Update `skills/cori-save-workflow/references/trace_interpretation.md` too. |
 | A new `Placement` variant or routing rule | [crates/cori-protocol/src/lib.rs](crates/cori-protocol/src/lib.rs) for the enum, [crates/cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs) for how it's inferred, [crates/cori-run/src/planner.rs](crates/cori-run/src/planner.rs) for how it maps to a queue. |
@@ -264,7 +273,9 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 
 ```
 ~/.cori/
-  config.toml              # temporal.host (optional), [remotes].hosts, … — never secrets; LLM keys → OS keychain via `cori login <provider>`
+  config.toml              # temporal.host (optional), [remotes].hosts,
+                           #   [llm].active/models — never secrets;
+                           #   LLM keys → OS keychain via `cori login <provider>`
   cache/                   # rebuildable compiled DAGs, keyed by sha(path + content_hash)
     sources/<sha256>/      # verified immutable source snapshots used by workers
     remote/                # fetched remote workflows (system `git` clones)

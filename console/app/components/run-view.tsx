@@ -233,6 +233,12 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
 // ── Trace body (post-completion or historical) ───────────────────────
 
 function TraceBody({ trace }: { trace: RunTrace }) {
+  // Activity traces deliberately persist outputs and the original run
+  // parameters. Each activity receives the accumulated parameters plus the
+  // successful object outputs before it, so reconstructing here restores the
+  // actual input without expanding the trace schema or writing another copy
+  // of user data to disk.
+  const activityInputs = reconstructActivityInputs(trace);
   return (
     <>
       {trace.result && (
@@ -297,10 +303,7 @@ function TraceBody({ trace }: { trace: RunTrace }) {
                     {a.error}
                   </div>
                 )}
-                <details>
-                  <summary>input</summary>
-                  <pre>{JSON.stringify(a.input_summary, null, 2)}</pre>
-                </details>
+                <ActivityInput value={activityInputs[i]} />
                 <details>
                   <summary>output</summary>
                   <pre>{JSON.stringify(a.output, null, 2)}</pre>
@@ -320,6 +323,112 @@ function TraceBody({ trace }: { trace: RunTrace }) {
       )}
     </>
   );
+}
+
+const INPUT_PREVIEW_FIELDS = 3;
+const INPUT_MAX_COLLECTION_ITEMS = 50;
+const INPUT_MAX_OBJECT_FIELDS = 80;
+const INPUT_MAX_STRING_CHARS = 2_000;
+const SENSITIVE_INPUT_KEY = /(?:api[_-]?key|authorization|credential|password|secret|token)/i;
+
+/** Restore the exact accumulated object supplied to each activity. This
+ * mirrors `CoriWorkflow::run`: only successful object outputs move forward
+ * (plus dry-run stubs). */
+function reconstructActivityInputs(trace: RunTrace): unknown[] {
+  const accumulated = isRecord(trace.params) ? { ...trace.params } : {};
+  return trace.activities.map((activity) => {
+    const input = { ...accumulated };
+    const contributes =
+      activity.status === "ok" || (trace.dry_run && activity.status === "skipped");
+    if (contributes && isRecord(activity.output)) {
+      Object.assign(accumulated, activity.output);
+    }
+    return input;
+  });
+}
+
+function ActivityInput({ value }: { value: unknown }) {
+  const display = redactInputForDisplay(value);
+  const preview = inputPreview(display);
+  return (
+    <>
+      <div className="step-input-preview" title={preview}>
+        <span>input</span>
+        <span>{preview}</span>
+      </div>
+      <details>
+        <summary>view input</summary>
+        <pre>{formatInputJson(display)}</pre>
+      </details>
+    </>
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Keep an accidental credential from becoming more visible in the app, and
+ * keep a very large workflow input inspectable without making the details
+ * pane unwieldy. The stored trace itself is left untouched. */
+function redactInputForDisplay(value: unknown, depth = 0): unknown {
+  if (depth > 8) return "… nested value omitted";
+  if (typeof value === "string") {
+    return value.length > INPUT_MAX_STRING_CHARS
+      ? `${value.slice(0, INPUT_MAX_STRING_CHARS)}… (${value.length} characters total)`
+      : value;
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, INPUT_MAX_COLLECTION_ITEMS)
+      .map((item) => redactInputForDisplay(item, depth + 1));
+    if (value.length > INPUT_MAX_COLLECTION_ITEMS) {
+      items.push(`… ${value.length - INPUT_MAX_COLLECTION_ITEMS} more items omitted`);
+    }
+    return items;
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value).slice(0, INPUT_MAX_OBJECT_FIELDS);
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of entries) {
+      result[key] = SENSITIVE_INPUT_KEY.test(key)
+        ? "••••••"
+        : redactInputForDisplay(nested, depth + 1);
+    }
+    const remaining = Object.keys(value).length - entries.length;
+    if (remaining > 0) result["…"] = `${remaining} more fields omitted`;
+    return result;
+  }
+  return value;
+}
+
+function inputPreview(value: unknown): string {
+  if (!isRecord(value)) return describeInputValue(value);
+  const entries = Object.entries(value);
+  if (entries.length === 0) return "No input values";
+  const shown = entries
+    .slice(0, INPUT_PREVIEW_FIELDS)
+    .map(([key, nested]) => `${key}: ${describeInputValue(nested)}`);
+  if (entries.length > INPUT_PREVIEW_FIELDS) {
+    shown.push(`+${entries.length - INPUT_PREVIEW_FIELDS} more`);
+  }
+  return shown.join(" · ");
+}
+
+function describeInputValue(value: unknown): string {
+  if (typeof value === "string") {
+    const compact = value.replace(/\s+/g, " ");
+    return `“${compact.length > 72 ? `${compact.slice(0, 72)}…` : compact}”`;
+  }
+  if (Array.isArray(value)) return `[${value.length} items]`;
+  if (isRecord(value)) return `{${Object.keys(value).length} fields}`;
+  if (value === null) return "null";
+  return String(value);
+}
+
+function formatInputJson(value: unknown): string {
+  const text = JSON.stringify(value, null, 2);
+  return text ?? "null";
 }
 
 // ── Live body (pre-completion only) ──────────────────────────────────
