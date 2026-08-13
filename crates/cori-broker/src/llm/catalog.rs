@@ -1,200 +1,100 @@
-//! Capability tiers, and how a step's declared `model` maps onto them.
+//! Portable workflow levels and provider-specific model defaults.
 //!
-//! A workflow declares *what kind of model it needs*, not which vendor
-//! serves it. Three tiers cover the useful spread:
-//!
-//! | Tier       | For | Typical |
-//! |---|---|---|
-//! | `fast`     | classification, extraction, short rewrites | gpt-4o-mini, haiku, flash |
-//! | `balanced` | the default — most steps | gpt-4o, sonnet, pro |
-//! | `deep`     | multi-constraint reasoning, long synthesis | o3, opus |
-//!
-//! `model` is optional in the SDK. What a step declares becomes a
-//! [`ModelRequest`]:
-//!
-//! - absent            → [`ModelRequest::Tier`] at [`ModelTier::Balanced`]
-//! - `"fast"` etc.     → [`ModelRequest::Tier`]
-//! - `"gpt-4o-mini"`   → [`ModelRequest::Exact`], carrying the tier it
-//!   falls into so an unavailable exact model degrades to a peer rather
-//!   than to whatever happens to be installed.
-//!
-//! An exact name is a *preference*, not a pin: [`super::resolve`] uses
-//! the owning provider when that backend is usable and otherwise serves
-//! the request's tier from another backend, recording both the requested
-//! and the resolved model in the run trace.
+//! Workflows never select a vendor model. They declare `low`, `medium`, or
+//! `high`; the one active backend maps that level to a concrete model. Model
+//! names remain a machine-owned advanced setting.
 
 use std::fmt;
 
-/// How much model a step needs. Ordered `Fast < Balanced < Deep`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ModelTier {
-    Fast,
-    Balanced,
-    Deep,
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmLevel {
+    Low,
+    Medium,
+    High,
 }
 
-/// The tier used when a step declares no model at all.
-pub const DEFAULT_TIER: ModelTier = ModelTier::Balanced;
+pub const DEFAULT_LEVEL: LlmLevel = LlmLevel::Medium;
 
-impl ModelTier {
+impl LlmLevel {
+    pub const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+
     pub fn as_str(self) -> &'static str {
         match self {
-            ModelTier::Fast => "fast",
-            ModelTier::Balanced => "balanced",
-            ModelTier::Deep => "deep",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
         }
     }
 
-    /// Parse a tier alias. Accepts a few obvious synonyms so authors
-    /// don't have to memorise the exact word.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "fast" | "cheap" | "small" | "mini" => Some(ModelTier::Fast),
-            "balanced" | "default" | "standard" | "medium" => Some(ModelTier::Balanced),
-            "deep" | "reasoning" | "smart" | "large" | "best" => Some(ModelTier::Deep),
+    /// Parse the strict workflow/config vocabulary.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
             _ => None,
         }
     }
 
-    /// Tiers to try when this one cannot be served, nearest first.
-    /// Adjacent capability beats "whatever is left": a `deep` step
-    /// degrades to `balanced` before it degrades to `fast`.
-    pub fn degradation_path(self) -> &'static [ModelTier] {
-        match self {
-            ModelTier::Fast => &[ModelTier::Fast, ModelTier::Balanced, ModelTier::Deep],
-            ModelTier::Balanced => &[ModelTier::Balanced, ModelTier::Deep, ModelTier::Fast],
-            ModelTier::Deep => &[ModelTier::Deep, ModelTier::Balanced, ModelTier::Fast],
+    /// Runtime-only translation for Temporal activities started before
+    /// workflows moved from `model` to `level`.
+    pub fn from_legacy_model(model: &str) -> Self {
+        let value = model.trim().to_ascii_lowercase();
+        match value.as_str() {
+            "fast" | "cheap" | "small" | "mini" => return Self::Low,
+            "balanced" | "default" | "standard" | "medium" => return Self::Medium,
+            "deep" | "reasoning" | "smart" | "large" | "best" => return Self::High,
+            _ => {}
+        }
+        if value.starts_with("o1")
+            || value.starts_with("o3")
+            || value.starts_with("o4")
+            || value.contains("opus")
+            || value.contains("thinking")
+            || value.contains("ultra")
+        {
+            Self::High
+        } else if value.contains("mini")
+            || value.contains("nano")
+            || value.contains("haiku")
+            || value.contains("flash")
+            || value.contains("lite")
+            || value.contains("small")
+        {
+            Self::Low
+        } else {
+            Self::Medium
         }
     }
 }
 
-impl fmt::Display for ModelTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+impl fmt::Display for LlmLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
-/// What a step asked for, after parsing its declared `model`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelRequest {
-    /// A tier alias, or nothing at all.
-    Tier(ModelTier),
-    /// A concrete vendor model name. Treated as a preference.
-    Exact {
-        name: String,
-        /// Provider that natively serves this name, when recognised.
-        provider: Option<&'static str>,
-        /// Tier to fall back to when `name` cannot be served.
-        tier: ModelTier,
-    },
-}
-
-impl ModelRequest {
-    /// The tier this request resolves at, exact or not.
-    pub fn tier(&self) -> ModelTier {
-        match self {
-            ModelRequest::Tier(t) => *t,
-            ModelRequest::Exact { tier, .. } => *tier,
-        }
-    }
-
-    /// What the step declared, for traces and error messages.
-    pub fn requested(&self) -> &str {
-        match self {
-            ModelRequest::Tier(t) => t.as_str(),
-            ModelRequest::Exact { name, .. } => name,
-        }
-    }
-}
-
-/// Parse a step's declared model. `None` (no `model:` field) yields the
-/// host default tier.
-pub fn parse_request(model: Option<&str>) -> ModelRequest {
-    let Some(raw) = model.map(str::trim).filter(|m| !m.is_empty()) else {
-        return ModelRequest::Tier(DEFAULT_TIER);
-    };
-    if let Some(tier) = ModelTier::parse(raw) {
-        return ModelRequest::Tier(tier);
-    }
-    ModelRequest::Exact {
-        name: raw.to_string(),
-        provider: api_provider_for_model(raw),
-        tier: tier_for_model(raw),
-    }
-}
-
-/// Map a concrete model name to the HTTP API provider that serves it.
-/// `None` for names no known vendor prefix claims — those are still
-/// runnable, they just can't pick a provider on their own.
-pub fn api_provider_for_model(model: &str) -> Option<&'static str> {
-    let m = model.to_ascii_lowercase();
-    if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
-        Some("openai")
-    } else if m.starts_with("claude-") {
-        Some("anthropic")
-    } else if m.starts_with("gemini-") {
-        Some("gemini")
-    } else {
-        None
-    }
-}
-
-/// Classify a concrete model name into the tier it belongs to, so an
-/// unavailable exact model degrades to a peer of similar capability.
-///
-/// Substring matching on vendor naming conventions: every vendor marks
-/// its small models (`mini`, `haiku`, `flash`, `nano`, `lite`) and its
-/// reasoning models (`o1`/`o3`, `opus`, `-thinking`) in the name itself.
-/// Unrecognised names land on [`DEFAULT_TIER`].
-pub fn tier_for_model(model: &str) -> ModelTier {
-    let m = model.to_ascii_lowercase();
-
-    // Reasoning / frontier markers win over size markers: `o3-mini` is a
-    // reasoning model that happens to be small, and callers who asked
-    // for it want the reasoning.
-    if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
-        return ModelTier::Deep;
-    }
-    if m.contains("opus") || m.contains("thinking") || m.contains("ultra") {
-        return ModelTier::Deep;
-    }
-    if m.contains("mini")
-        || m.contains("nano")
-        || m.contains("haiku")
-        || m.contains("flash")
-        || m.contains("lite")
-        || m.contains("small")
-    {
-        return ModelTier::Fast;
-    }
-    if m.contains("sonnet") || m.contains("gpt-4o") || m.contains("gpt-5") || m.contains("pro") {
-        return ModelTier::Balanced;
-    }
-    DEFAULT_TIER
-}
-
-/// The concrete model an HTTP API provider uses for a tier. These are
-/// the names Cori sends when a step asked for a tier rather than a
-/// model, and the landing spot when an exact model degrades.
-pub fn api_model_for_tier(provider: &str, tier: ModelTier) -> Option<&'static str> {
-    Some(match (provider, tier) {
-        ("openai", ModelTier::Fast) => "gpt-4o-mini",
-        ("openai", ModelTier::Balanced) => "gpt-4o",
-        ("openai", ModelTier::Deep) => "o3",
-        ("anthropic", ModelTier::Fast) => "claude-3-5-haiku-latest",
-        ("anthropic", ModelTier::Balanced) => "claude-sonnet-4-5",
-        ("anthropic", ModelTier::Deep) => "claude-opus-4-1",
-        ("gemini", ModelTier::Fast) => "gemini-2.0-flash",
-        ("gemini", ModelTier::Balanced) => "gemini-2.5-pro",
-        ("gemini", ModelTier::Deep) => "gemini-2.5-pro",
+/// The concrete model an HTTP API provider uses for a level.
+pub fn api_model_for_level(provider: &str, level: LlmLevel) -> Option<&'static str> {
+    Some(match (provider, level) {
+        ("openai", LlmLevel::Low) => "gpt-4o-mini",
+        ("openai", LlmLevel::Medium) => "gpt-4o",
+        ("openai", LlmLevel::High) => "o3",
+        ("anthropic", LlmLevel::Low) => "claude-3-5-haiku-latest",
+        ("anthropic", LlmLevel::Medium) => "claude-sonnet-4-5",
+        ("anthropic", LlmLevel::High) => "claude-opus-4-1",
+        ("gemini", LlmLevel::Low) => "gemini-2.0-flash",
+        ("gemini", LlmLevel::Medium) => "gemini-2.5-pro",
+        ("gemini", LlmLevel::High) => "gemini-2.5-pro",
         _ => return None,
     })
 }
 
-/// Every HTTP API provider Cori can talk to, in preference order.
 pub const API_PROVIDERS: [&str; 3] = ["openai", "anthropic", "gemini"];
 
-/// Human-facing name for an API provider.
 pub fn api_display_name(provider: &str) -> &'static str {
     match provider {
         "openai" => "OpenAI",
@@ -204,11 +104,7 @@ pub fn api_display_name(provider: &str) -> &'static str {
     }
 }
 
-/// Models worth offering in the Console's per-tier pickers.
-///
-/// Suggestions, not a closed set: the pickers accept any string, because
-/// vendors ship models faster than Cori ships releases and a user who
-/// knows the new name should not have to wait for us.
+/// Suggestions only: advanced settings accept any model name.
 pub fn api_model_suggestions(provider: &str) -> &'static [&'static str] {
     match provider {
         "openai" => &[
@@ -237,79 +133,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_model_is_the_default_tier() {
-        assert_eq!(parse_request(None), ModelRequest::Tier(DEFAULT_TIER));
-        assert_eq!(parse_request(Some("  ")), ModelRequest::Tier(DEFAULT_TIER));
+    fn strict_levels_parse() {
+        assert_eq!(LlmLevel::parse("low"), Some(LlmLevel::Low));
+        assert_eq!(LlmLevel::parse("medium"), Some(LlmLevel::Medium));
+        assert_eq!(LlmLevel::parse("high"), Some(LlmLevel::High));
+        assert_eq!(LlmLevel::parse("fast"), None);
+        assert_eq!(LlmLevel::parse("MEDIUM"), None);
     }
 
     #[test]
-    fn tier_aliases_parse() {
-        assert_eq!(
-            parse_request(Some("fast")),
-            ModelRequest::Tier(ModelTier::Fast)
-        );
-        assert_eq!(
-            parse_request(Some("reasoning")),
-            ModelRequest::Tier(ModelTier::Deep)
-        );
-        assert_eq!(
-            parse_request(Some("BALANCED")),
-            ModelRequest::Tier(ModelTier::Balanced)
-        );
+    fn legacy_models_map_only_for_history_resume() {
+        assert_eq!(LlmLevel::from_legacy_model("fast"), LlmLevel::Low);
+        assert_eq!(LlmLevel::from_legacy_model("gpt-4o-mini"), LlmLevel::Low);
+        assert_eq!(LlmLevel::from_legacy_model("o3-mini"), LlmLevel::High);
+        assert_eq!(LlmLevel::from_legacy_model("gpt-5"), LlmLevel::Medium);
     }
 
     #[test]
-    fn exact_models_carry_provider_and_fallback_tier() {
-        let req = parse_request(Some("gpt-4o-mini"));
-        assert_eq!(
-            req,
-            ModelRequest::Exact {
-                name: "gpt-4o-mini".to_string(),
-                provider: Some("openai"),
-                tier: ModelTier::Fast,
-            }
-        );
-        assert_eq!(req.tier(), ModelTier::Fast);
-        assert_eq!(req.requested(), "gpt-4o-mini");
-    }
-
-    #[test]
-    fn reasoning_markers_outrank_size_markers() {
-        // o3-mini is small *and* a reasoning model — asking for it means
-        // asking for the reasoning, so it must not degrade to `fast`.
-        assert_eq!(tier_for_model("o3-mini"), ModelTier::Deep);
-        assert_eq!(tier_for_model("claude-3-5-haiku-latest"), ModelTier::Fast);
-        assert_eq!(tier_for_model("claude-opus-4-1"), ModelTier::Deep);
-        assert_eq!(tier_for_model("gemini-2.0-flash"), ModelTier::Fast);
-        assert_eq!(tier_for_model("claude-sonnet-4-5"), ModelTier::Balanced);
-    }
-
-    #[test]
-    fn unknown_models_are_usable_at_the_default_tier() {
-        let req = parse_request(Some("llama-3.1-70b"));
-        assert_eq!(req.tier(), DEFAULT_TIER);
-        assert!(matches!(req, ModelRequest::Exact { provider: None, .. }));
-    }
-
-    #[test]
-    fn degradation_prefers_adjacent_capability() {
-        assert_eq!(
-            ModelTier::Deep.degradation_path(),
-            &[ModelTier::Deep, ModelTier::Balanced, ModelTier::Fast]
-        );
-        assert_eq!(
-            ModelTier::Fast.degradation_path(),
-            &[ModelTier::Fast, ModelTier::Balanced, ModelTier::Deep]
-        );
-    }
-
-    #[test]
-    fn every_api_provider_serves_every_tier() {
+    fn every_api_provider_serves_every_level() {
         for provider in API_PROVIDERS {
-            for tier in [ModelTier::Fast, ModelTier::Balanced, ModelTier::Deep] {
+            for level in LlmLevel::ALL {
                 assert!(
-                    api_model_for_tier(provider, tier).is_some(),
-                    "{provider} has no model for {tier}"
+                    api_model_for_level(provider, level).is_some(),
+                    "{provider} has no model for {level}"
                 );
             }
         }

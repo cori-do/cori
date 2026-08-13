@@ -20,7 +20,7 @@ use crate::remote::{RemoteRef, Resolved};
 /// Bump whenever compiler validation or output semantics change. Cache keys
 /// remain path/content-derived; the envelope makes rebuildable entries from
 /// an older compiler safely miss without changing that locked key shape.
-const COMPILER_CACHE_FORMAT_VERSION: u32 = 2;
+const COMPILER_CACHE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Deserialize)]
 struct CacheEntry {
@@ -472,6 +472,15 @@ mod tests {
         assert_eq!(decoded.format_version, COMPILER_CACHE_FORMAT_VERSION);
         assert_eq!(decoded.compiled, compiled);
         assert!(cache_entry_is_current(&decoded));
+
+        let legacy_model_cache = CacheEntry {
+            format_version: 2,
+            compiled: compiled.clone(),
+        };
+        assert!(
+            !cache_entry_is_current(&legacy_model_cache),
+            "model-era compiled DAGs must miss after the level migration"
+        );
 
         let mut stale = decoded;
         stale.compiled.steps[0].source_sha256 = None;

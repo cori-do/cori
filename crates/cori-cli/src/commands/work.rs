@@ -5,7 +5,6 @@
 //! GUI is the Cori Console desktop app.
 
 use anyhow::{Context, Result, bail};
-use cori_broker::TriggerContext;
 use cori_broker::capabilities::{self, CapabilityReport};
 use cori_broker::identity::{IdentitySource, OsUser};
 use cori_broker::llm::LlmOptions;
@@ -45,7 +44,6 @@ pub fn work(opts: WorkOpts) -> Result<()> {
 
     let llm_opts = LlmOptions {
         credentials,
-        trigger: Some(TriggerContext::Cli),
         policy,
     };
 

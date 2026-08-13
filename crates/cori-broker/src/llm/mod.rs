@@ -3,7 +3,7 @@
 //! The LLM dispatch path follows this flow:
 //!
 //! 1. Invoke the runner in `llm_prompt` mode to materialise the prompt
-//!    string, the declared model (if any), the (optional) batch config,
+//!    string, the declared level, the (optional) batch config,
 //!    and the (optional) output JSON Schema.
 //! 2. Resolve a backend ([`resolve`]) from what the step asked for, the
 //!    user's policy ([`policy`]), and what is usable on this machine —
@@ -20,11 +20,9 @@
 //!
 //! # What a step declares
 //!
-//! `model` is a *preference*, not a pin (see [`catalog`]). A step may
-//! declare nothing, a capability tier (`"fast"`), or a concrete model
-//! name. The host resolves that to whatever it can actually reach,
-//! degrading within the same tier and recording both the requested and
-//! the served model in the run trace.
+//! A step declares `level: "low" | "medium" | "high"`; omission means
+//! `medium`. The machine's single active provider maps that level to a
+//! concrete model. Workflows never select a provider or model.
 
 pub mod catalog;
 pub mod credentials;
@@ -44,10 +42,11 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::dispatch::{self, RunnerMode};
 use crate::runtime::Runtime;
-use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result, TokenUsage, TriggerContext};
+use crate::{ActivityOutcome, ActivityStatus, BrokerError, Result, TokenUsage};
 
+pub use catalog::LlmLevel;
 pub use credentials::LlmCredentials;
-pub use policy::{Deployment, LlmConfig, LlmMode, LlmPolicy};
+pub use policy::{Deployment, LlmConfig, LlmPolicy};
 
 /// Default fan-out for batched LLM calls.
 const DEFAULT_BATCH_CONCURRENCY: usize = 4;
@@ -56,18 +55,19 @@ const DEFAULT_BATCH_CONCURRENCY: usize = 4;
 #[derive(Debug, Clone, Default)]
 pub struct LlmOptions {
     pub credentials: LlmCredentials,
-    pub trigger: Option<TriggerContext>,
-    /// Which backends may serve a step, and in what order. Built from
-    /// `~/.cori/config.toml` and gated by the worker's identity — see
-    /// [`policy`].
+    /// The single active backend. Built from `~/.cori/config.toml` and
+    /// gated by the worker's identity — see [`policy`].
     pub policy: LlmPolicy,
 }
 
 #[derive(Debug, Deserialize)]
 struct PromptSpec {
-    /// Absent when the step declared no `model` — the host picks.
     #[serde(default)]
-    model: Option<String>,
+    level: Option<String>,
+    /// Runtime-only compatibility with already-started Temporal histories.
+    /// New workflow source containing `model` is rejected by the compiler.
+    #[serde(default, rename = "legacyModel")]
+    legacy_model: Option<String>,
     prompt: String,
     #[serde(default, rename = "batchPrompts")]
     batch_prompts: Vec<String>,
@@ -90,7 +90,7 @@ pub fn run(
     step_file_path: &Path,
     input: &JsonValue,
     opts: &LlmOptions,
-    expected_model: &ExpectedModel,
+    expected_level: &ExpectedLevel,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
@@ -103,21 +103,16 @@ pub fn run(
             envelope: initial.output.to_string(),
             source: e,
         })?;
-    validate_model_boundary(expected_model, spec.model.as_deref())?;
+    let level = validate_level_boundary(
+        expected_level,
+        spec.level.as_deref(),
+        spec.legacy_model.as_deref(),
+    )?;
 
-    // What the step asked for, resolved against what this machine can
-    // actually reach right now.
-    let request = catalog::parse_request(spec.model.as_deref());
-    let resolution = resolve_with_prompt(&request, opts)?;
+    // Resolve the workflow level through exactly the active provider.
+    let resolution = resolve::resolve(level, &opts.policy, &opts.credentials)?;
     let provider = &*resolution.provider;
-    // The name sent on the wire. Subscription backends may take `None`
-    // (use the CLI's own default), in which case the declared name is
-    // only a label.
-    let wire_model = resolution
-        .selection
-        .resolved_model
-        .clone()
-        .unwrap_or_else(|| request.requested().to_string());
+    let wire_model = resolution.selection.resolved_model.clone();
     let output_schema = spec.output_schema.as_ref();
 
     let mut combined_stderr = initial.stderr;
@@ -202,99 +197,89 @@ pub fn run(
     })
 }
 
-/// Resolve a backend, and on an interactive run give the user one
-/// chance to fix a machine with nothing usable on it — sign in to an
-/// agent CLI, or set an API key — rather than failing the run outright.
-fn resolve_with_prompt(
-    request: &catalog::ModelRequest,
-    opts: &LlmOptions,
-) -> Result<resolve::Resolution> {
-    match resolve::resolve(request, &opts.policy, &opts.credentials) {
-        Ok(resolution) => Ok(resolution),
-        Err(BrokerError::LlmNoBackend { requested, detail }) => {
-            let Some(refreshed) = credentials::prompt_for_backend(&detail) else {
-                return Err(BrokerError::LlmNoBackend { requested, detail });
-            };
-            resolve::resolve(request, &opts.policy, &refreshed)
+/// Enforce the frozen authoring boundary and adapt already-started histories.
+pub(crate) fn validate_level_boundary(
+    expected: &ExpectedLevel,
+    actual_level: Option<&str>,
+    actual_legacy_model: Option<&str>,
+) -> Result<LlmLevel> {
+    match expected {
+        ExpectedLevel::Unknown => match (actual_level, actual_legacy_model) {
+            (Some(level), _) => parse_runtime_level(level),
+            (None, Some(model)) => Ok(LlmLevel::from_legacy_model(model)),
+            (None, None) => Err(BrokerError::CapabilityDenied {
+                kind: "LLM level",
+                name: "missing".into(),
+                hint: "the LLM step did not produce a level".into(),
+            }),
+        },
+        ExpectedLevel::Declared(level) => {
+            let actual = actual_level.map(parse_runtime_level).transpose()?;
+            if actual == Some(*level) && actual_legacy_model.is_none() {
+                Ok(*level)
+            } else {
+                Err(level_boundary_error(
+                    level.as_str(),
+                    actual_level.or(actual_legacy_model),
+                ))
+            }
         }
-        Err(other) => Err(other),
+        ExpectedLevel::LegacyModel(model) => {
+            if actual_legacy_model == Some(model.as_str()) {
+                Ok(LlmLevel::from_legacy_model(model))
+            } else {
+                Err(level_boundary_error(
+                    model,
+                    actual_legacy_model.or(actual_level),
+                ))
+            }
+        }
     }
 }
 
-/// Enforce the compiler's declared model before backend selection.
-///
-/// This guards the same boundary it always has: the model a step
-/// declares must be a literal frozen at compile time, not something
-/// runtime evaluation can swap. Backend *resolution* happens after this
-/// check and is a host-side decision recorded in the trace — a workflow
-/// still cannot choose its own model at runtime.
-///
-/// `model` being optional makes "the step declared nothing" a real
-/// state, distinct from "this history predates frozen metadata" — see
-/// [`ExpectedModel`]. Conflating them would either reject every
-/// model-less step or silently drop the check for every legacy one.
-pub(crate) fn validate_model_boundary(
-    expected: &ExpectedModel,
-    actual: Option<&str>,
-) -> Result<()> {
-    let expected_desc = match expected {
-        // Legacy Temporal history recorded before the model was frozen:
-        // there is nothing to compare against.
-        ExpectedModel::Unknown => return Ok(()),
-        ExpectedModel::Undeclared => {
-            if actual.is_none() {
-                return Ok(());
-            }
-            "no model".to_string()
-        }
-        ExpectedModel::Declared(model) => {
-            if actual == Some(model.as_str()) {
-                return Ok(());
-            }
-            format!("`{model}`")
-        }
-    };
-    let actual_desc = actual.unwrap_or("no model");
-    Err(BrokerError::CapabilityDenied {
-        kind: "LLM model",
-        name: actual_desc.to_string(),
-        hint: format!(
-            "step was compiled for {expected_desc} but runtime evaluation produced `{actual_desc}`; the model must remain the directly declared literal"
-        ),
+fn parse_runtime_level(value: &str) -> Result<LlmLevel> {
+    LlmLevel::parse(value).ok_or_else(|| BrokerError::CapabilityDenied {
+        kind: "LLM level",
+        name: value.to_string(),
+        hint: "level must be one of `low`, `medium`, or `high`".into(),
     })
 }
 
-/// What the compiler froze into a step's metadata for `model`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExpectedModel {
-    /// No frozen metadata at all — a Temporal history from before
-    /// source-boundary enforcement. The check is skipped.
-    Unknown,
-    /// Frozen metadata exists and carries no `model`: the step declared
-    /// none, and must still declare none at runtime.
-    Undeclared,
-    /// The step declared this literal.
-    Declared(String),
-}
-
-impl ExpectedModel {
-    /// Build from a step's frozen metadata. `frozen_metadata` is `None`
-    /// only for legacy histories.
-    pub fn from_frozen(frozen_metadata: Option<&serde_json::Map<String, JsonValue>>) -> Self {
-        match frozen_metadata {
-            None => ExpectedModel::Unknown,
-            Some(metadata) => match metadata.get("model").and_then(JsonValue::as_str) {
-                Some(model) => ExpectedModel::Declared(model.to_string()),
-                None => ExpectedModel::Undeclared,
-            },
-        }
+fn level_boundary_error(expected: &str, actual: Option<&str>) -> BrokerError {
+    let actual = actual.unwrap_or("missing");
+    BrokerError::CapabilityDenied {
+        kind: "LLM level",
+        name: actual.to_string(),
+        hint: format!(
+            "step was compiled for `{expected}` but runtime evaluation produced `{actual}`; level must remain the directly declared literal"
+        ),
     }
 }
 
-/// Map a model name to the API provider that serves it. Kept as a
-/// re-export so existing callers don't have to reach into [`catalog`].
-pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    catalog::api_provider_for_model(model)
+/// What the compiler froze for an LLM step. `LegacyModel` exists only so
+/// already-started Temporal histories can replay after this breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedLevel {
+    Unknown,
+    Declared(LlmLevel),
+    LegacyModel(String),
+}
+
+impl ExpectedLevel {
+    pub fn from_frozen(
+        frozen_metadata: Option<&serde_json::Map<String, JsonValue>>,
+    ) -> Result<Self> {
+        let Some(metadata) = frozen_metadata else {
+            return Ok(Self::Unknown);
+        };
+        if let Some(level) = metadata.get("level").and_then(JsonValue::as_str) {
+            return Ok(Self::Declared(parse_runtime_level(level)?));
+        }
+        if let Some(model) = metadata.get("model").and_then(JsonValue::as_str) {
+            return Ok(Self::LegacyModel(model.to_string()));
+        }
+        Ok(Self::Unknown)
+    }
 }
 
 /// Fan out one provider call per prompt across worker threads.
@@ -516,91 +501,55 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn provider_dispatch() {
-        assert_eq!(provider_for_model("gpt-4o-mini"), Some("openai"));
-        assert_eq!(provider_for_model("o1"), Some("openai"));
+    fn rejects_runtime_level_switches() {
+        let expected = ExpectedLevel::Declared(LlmLevel::Medium);
         assert_eq!(
-            provider_for_model("claude-3-5-sonnet-20241022"),
-            Some("anthropic")
+            validate_level_boundary(&expected, Some("medium"), None).expect("matching level"),
+            LlmLevel::Medium
         );
-        assert_eq!(provider_for_model("gemini-1.5-flash"), Some("gemini"));
-        assert_eq!(provider_for_model("llama-3"), None);
-    }
-
-    fn declared(model: &str) -> ExpectedModel {
-        ExpectedModel::Declared(model.to_string())
-    }
-
-    #[test]
-    fn rejects_runtime_model_switches() {
-        validate_model_boundary(&declared("gpt-4o-mini"), Some("gpt-4o-mini"))
-            .expect("matching frozen model");
-        let error = validate_model_boundary(&declared("gpt-4o-mini"), Some("claude-3-5-sonnet"))
-            .expect_err("runtime model switch must fail");
+        let error = validate_level_boundary(&expected, Some("high"), None)
+            .expect_err("runtime level switch must fail");
         assert!(matches!(
             error,
-            BrokerError::CapabilityDenied { kind: "LLM model", name, .. }
-                if name == "claude-3-5-sonnet"
+            BrokerError::CapabilityDenied { kind: "LLM level", name, .. } if name == "high"
         ));
     }
 
     #[test]
-    fn legacy_histories_without_frozen_metadata_still_run() {
-        validate_model_boundary(&ExpectedModel::Unknown, Some("legacy-model"))
-            .expect("legacy compatibility");
-        validate_model_boundary(&ExpectedModel::Unknown, None).expect("legacy compatibility");
-    }
-
-    #[test]
-    fn undeclared_model_stays_undeclared() {
-        // A step compiled with no `model` must not acquire one at
-        // runtime — and must not be mistaken for a legacy history.
-        validate_model_boundary(&ExpectedModel::Undeclared, None)
-            .expect("nothing declared either side");
-        let error = validate_model_boundary(&ExpectedModel::Undeclared, Some("gpt-4o"))
-            .expect_err("acquiring a model at runtime must fail");
-        assert!(matches!(
-            error,
-            BrokerError::CapabilityDenied { kind: "LLM model", name, .. } if name == "gpt-4o"
-        ));
-
-        let error = validate_model_boundary(&declared("fast"), None)
-            .expect_err("dropping the declared model must fail");
-        assert!(matches!(
-            error,
-            BrokerError::CapabilityDenied {
-                kind: "LLM model",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn tier_declarations_survive_the_boundary() {
-        validate_model_boundary(&declared("balanced"), Some("balanced")).expect("frozen tier");
-        validate_model_boundary(&declared("fast"), Some("deep"))
-            .expect_err("tier switch must fail");
-    }
-
-    #[test]
-    fn expected_model_distinguishes_absent_metadata_from_absent_model() {
-        assert_eq!(ExpectedModel::from_frozen(None), ExpectedModel::Unknown);
+    fn expected_level_reads_new_and_legacy_metadata() {
         assert_eq!(
-            ExpectedModel::from_frozen(Some(&JsonMap::new())),
-            ExpectedModel::Undeclared
+            ExpectedLevel::from_frozen(None).expect("unknown"),
+            ExpectedLevel::Unknown
+        );
+        let mut new_metadata = JsonMap::new();
+        new_metadata.insert("level".into(), json!("high"));
+        assert_eq!(
+            ExpectedLevel::from_frozen(Some(&new_metadata)).expect("level"),
+            ExpectedLevel::Declared(LlmLevel::High)
         );
         let mut metadata = JsonMap::new();
         metadata.insert("model".into(), json!("fast"));
         assert_eq!(
-            ExpectedModel::from_frozen(Some(&metadata)),
-            declared("fast")
+            ExpectedLevel::from_frozen(Some(&metadata)).expect("legacy model"),
+            ExpectedLevel::LegacyModel("fast".into())
         );
     }
 
     #[test]
-    fn prompt_spec_accepts_pre_rendered_batch_prompts() {
+    fn legacy_history_model_maps_to_a_level() {
+        let expected = ExpectedLevel::LegacyModel("gpt-4o-mini".into());
+        assert_eq!(
+            validate_level_boundary(&expected, None, Some("gpt-4o-mini"))
+                .expect("legacy compatibility"),
+            LlmLevel::Low
+        );
+    }
+
+    #[test]
+    fn prompt_spec_accepts_level_and_pre_rendered_batch_prompts() {
         let spec: PromptSpec = serde_json::from_value(json!({
-            "model": "gpt-4o-mini",
+            "level": "low",
+            "legacyModel": null,
             "prompt": "",
             "batch": { "by": "rows", "size": 2 },
             "batchPrompts": ["rows 1-2", "row 3"],
@@ -608,25 +557,30 @@ mod tests {
             "hasOutputSchema": false
         }))
         .expect("prompt spec");
+        assert_eq!(spec.level.as_deref(), Some("low"));
         assert_eq!(spec.batch_prompts, vec!["rows 1-2", "row 3"]);
         assert_eq!(spec.batch.expect("batch").by, "rows");
     }
 
     #[test]
-    fn prompt_spec_accepts_a_step_with_no_model() {
-        // The runner emits `model: null` for a step that declared none.
+    fn prompt_spec_accepts_the_normalized_medium_default() {
         let spec: PromptSpec = serde_json::from_value(json!({
-            "model": null,
+            "level": "medium",
+            "legacyModel": null,
             "prompt": "summarise",
             "batchPrompts": [],
             "outputSchema": null,
             "hasOutputSchema": false
         }))
         .expect("prompt spec");
-        assert_eq!(spec.model, None);
         assert_eq!(
-            catalog::parse_request(spec.model.as_deref()),
-            catalog::ModelRequest::Tier(catalog::DEFAULT_TIER)
+            validate_level_boundary(
+                &ExpectedLevel::Declared(LlmLevel::Medium),
+                spec.level.as_deref(),
+                spec.legacy_model.as_deref(),
+            )
+            .expect("default level"),
+            LlmLevel::Medium
         );
     }
 

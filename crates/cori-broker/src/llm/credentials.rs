@@ -5,13 +5,8 @@
 //! via [`LlmCredentials`]. Env vars (`OPENAI_API_KEY` etc.) take
 //! precedence over stored values so users can override per-shell.
 //!
-//! If neither source supplies a key and the run is interactive (stdin is
-//! a TTY), [`require`] writes to stderr asking the user to set the env
-//! var or run `cori login <provider>`, then waits for Enter and re-reads
-//! the env. Non-interactive runs surface
-//! [`BrokerError::LlmMissingCredentials`] immediately.
-
-use std::io::{self, BufRead, IsTerminal, Write};
+//! Missing credentials are always reported immediately. Provider setup is a
+//! machine setting and never an interactive workflow preflight prompt.
 
 use crate::BrokerError;
 
@@ -118,35 +113,6 @@ pub fn from_env_and_store() -> LlmCredentials {
             .flatten();
     }
     LlmCredentials::from_env().or_fill_from(&stored)
-}
-
-/// No backend could serve a step. On an interactive run, show the user
-/// what is missing and wait — they can sign in to a subscription CLI or
-/// set an API key in another terminal — then re-read both sources and
-/// let the caller retry. Returns `None` when the run is
-/// non-interactive, or when nothing changed while we waited.
-///
-/// This is the multi-backend successor to the old per-provider
-/// `require` prompt: the fix is no longer necessarily an API key, so
-/// the message is the resolver's own explanation of every route.
-pub fn prompt_for_backend(detail: &str) -> Option<LlmCredentials> {
-    if !io::stdin().is_terminal() {
-        return None;
-    }
-
-    let mut stderr = io::stderr();
-    let _ = writeln!(
-        stderr,
-        "\nThis step needs an LLM backend.\n{detail}\n\nPress Enter once you've signed in or set a key (or Ctrl-C to abort)…",
-    );
-    let _ = stderr.flush();
-    let mut line = String::new();
-    let _ = io::stdin().lock().read_line(&mut line);
-
-    // A sign-in that happened while we waited invalidates the cached
-    // subscription probes, so the retry sees current state.
-    super::subscription::invalidate_checks();
-    Some(from_env_and_store())
 }
 
 /// Non-interactive callers still get the structured error.

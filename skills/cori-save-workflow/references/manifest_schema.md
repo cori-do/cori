@@ -227,6 +227,6 @@ The compiler also infers a `Placement` for each step from its kind and `tools_re
 ## What not to put in frontmatter
 
 - **Secrets, tokens, credentials.** Ever. The worker reads these from its environment at runtime.
-- **LLM provider names.** The `model` field in an `llm` step declares the model class; the actual provider is configured at the worker level.
+- **LLM provider and model names.** An `llm` step declares only `level: "low" | "medium" | "high"`; the one active provider and its model mappings are machine settings.
 - **Large objects.** If your default for a parameter is a 50-line JSON blob, it's not a default — it's a fixture. Put it in `tests/fixtures/` and reference it from the step.
 - **Workflow logic.** Frontmatter is metadata. The logic lives in the TypeScript step files.

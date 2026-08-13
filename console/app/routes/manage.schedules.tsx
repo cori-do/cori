@@ -348,29 +348,38 @@ function TimingFields({
   onTz: (tz: string) => void;
 }) {
   const cron = useMemo(() => timingToCron(timing), [timing]);
+  function setMode(mode: Timing["mode"]) {
+    if (mode === "daily") onTiming({ mode, time: "09:00" });
+    else if (mode === "weekly") onTiming({ mode, days: ["MON"], time: "09:00" });
+    else if (mode === "hourly") onTiming({ mode, minute: 0 });
+    else if (mode === "monthly") onTiming({ mode, dom: 1, time: "09:00" });
+    else onTiming({ mode: "custom", cron });
+  }
+
   return (
     <>
       <div style={{ marginBottom: 12 }}>
         <label className="label" style={labelStyle}>When</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <select
-            value={timing.mode}
-            onChange={(e) => {
-              const mode = e.target.value as Timing["mode"];
-              if (mode === "daily") onTiming({ mode, time: "09:00" });
-              else if (mode === "weekly") onTiming({ mode, days: ["MON"], time: "09:00" });
-              else if (mode === "hourly") onTiming({ mode, minute: 0 });
-              else if (mode === "monthly") onTiming({ mode, dom: 1, time: "09:00" });
-              else onTiming({ mode: "custom", cron });
-            }}
-            style={inputStyle}
-          >
-            <option value="daily">Every day</option>
-            <option value="weekly">Every week</option>
-            <option value="hourly">Every hour</option>
-            <option value="monthly">Every month</option>
-            <option value="custom">Custom cron</option>
-          </select>
+          <div className="schedule-mode-picker" role="group" aria-label="Schedule interval">
+            {[
+              ["daily", "Every day"],
+              ["weekly", "Every week"],
+              ["hourly", "Every hour"],
+              ["monthly", "Every month"],
+              ["custom", "Custom cron"],
+            ].map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                className={`btn${timing.mode === mode ? " primary" : ""}`}
+                aria-pressed={timing.mode === mode}
+                onClick={() => setMode(mode as Timing["mode"])}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
           {(timing.mode === "daily" ||
             timing.mode === "weekly" ||

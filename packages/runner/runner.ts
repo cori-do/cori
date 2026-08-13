@@ -240,9 +240,10 @@ try {
       emit({
         ok: true,
         output: {
-          // `null` when the step declared no model — the host resolves
-          // one at its default capability tier.
-          model: stepDef.model ?? null,
+          // The SDK normalises omission to `medium`. `legacyModel` is an
+          // internal replay bridge and is never exposed to new workflows.
+          level: stepDef.level ?? "medium",
+          legacyModel: stepDef.__legacyModel ?? null,
           prompt: String(prompt ?? ""),
           batch: stepDef.batch ?? null,
           batchPrompts,

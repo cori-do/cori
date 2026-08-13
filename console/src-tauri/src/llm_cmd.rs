@@ -21,16 +21,13 @@
 //!
 //! # Why this lives only in the launcher
 //!
-//! Subscriptions are a property of *a person's machine*, so the mode
-//! that selects between the two routes is written here, by the launcher.
-//! A deployed worker (`cori work --shared <pool>`) reads the same config
-//! file but is forced to API-only by the identity gate in
-//! `cori_broker::llm::policy`, so the setting is only ever *in force* on
-//! a machine someone is signed in to. The settings tab says as much
-//! rather than implying it applies to shared workers too.
+//! Provider activation is machine-scoped and written here by the launcher.
+//! A deployed worker (`cori work --shared <pool>`) reads its own selection;
+//! the identity gate rejects a selected personal subscription while allowing
+//! an explicitly selected API provider.
 
 use cori_broker::llm::LlmCredentials;
-use cori_broker::llm::catalog::{self, ModelTier};
+use cori_broker::llm::catalog::LlmLevel;
 use cori_broker::llm::policy::{Backend, Deployment, LlmPolicy};
 use cori_broker::llm::resolve;
 use cori_broker::llm::subscription::{self, BackendState};
@@ -140,16 +137,11 @@ fn info_for(
 }
 
 // ---------------------------------------------------------------------------
-// Backends — the unified priority list
+// Backends — one explicit active selection
 // ---------------------------------------------------------------------------
 
-/// One row of the AI Providers list: a place an `llm` step can run.
-///
-/// Subscriptions and API providers are deliberately the *same* shape.
-/// The user ranks them against each other in one list, so the UI should
-/// not need two code paths to render them — the only differences are
-/// which fields are populated (`subscription_name` / `binary` vs
-/// `key_configured`) and what "ready" means.
+/// One provider card. Connections are independent from activation: several
+/// cards may be ready while at most one is active.
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmBackendInfo {
     /// Stable id: `claude` | `codex` | `cursor` | `gemini-cli` |
@@ -158,10 +150,7 @@ pub struct LlmBackendInfo {
     pub display_name: String,
     /// `subscription` | `api`.
     pub kind: String,
-    /// 1-based rank in the user's priority order.
-    pub rank: usize,
-    /// False when the user switched this backend off.
-    pub enabled: bool,
+    pub active: bool,
     /// `ready` | `signed_out` | `not_installed` | `no_key`.
     pub status: String,
     /// The one action that makes it usable, when it isn't.
@@ -175,6 +164,9 @@ pub struct LlmBackendInfo {
     /// Executable Cori looks for on PATH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// Exact command to run in a terminal to sign in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_command: Option<String>,
 
     // API-only.
     /// A key is stored (non-secret index; the value never reaches the UI).
@@ -184,17 +176,17 @@ pub struct LlmBackendInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_env_override: Option<bool>,
 
-    /// The model used for each tier, and whether the user chose it.
+    /// The model used for each workflow level, and whether it is custom.
     pub models: Vec<LlmBackendModel>,
     /// Model names worth suggesting in the picker. Not a closed set.
     pub model_suggestions: Vec<String>,
 }
 
-/// One tier's model for one backend.
+/// One level's model for one backend.
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmBackendModel {
-    /// `fast` | `balanced` | `deep`.
-    pub tier: String,
+    /// `low` | `medium` | `high`.
+    pub level: String,
     /// The model that will actually be sent.
     pub model: String,
     /// The built-in value, shown as the placeholder / reset target.
@@ -207,8 +199,11 @@ pub struct LlmBackendModel {
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmSettings {
     pub backends: Vec<LlmBackendInfo>,
-    /// What a step declaring no model would run on right now — the
-    /// page's "currently" line. `None` when nothing is ready.
+    /// The explicitly selected id, retained even when it becomes unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_backend: Option<String>,
+    /// What a medium step would run on now. Missing when no provider is
+    /// selected or the selected provider needs repair.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<LlmResolutionInfo>,
     /// Why nothing is ready, when `active` is `None`.
@@ -219,27 +214,18 @@ pub struct LlmSettings {
     pub subscriptions_gated_off: bool,
 }
 
-/// Which backend serves a given model preference, for tooltips and the
-/// "currently" line.
+/// Which provider/model serves a workflow level, for previews and tooltips.
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmResolutionInfo {
     pub backend_id: String,
     pub display_name: String,
     /// `subscription` | `api`.
     pub kind: String,
-    /// Which plan pays, for subscriptions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subscription_name: Option<String>,
-    /// What the step asked for.
-    pub requested: String,
-    /// The model that will actually be sent.
+    pub level: String,
     pub model: String,
-    /// The requested model isn't served here; the tier was matched instead.
-    pub degraded: bool,
-    pub tier: String,
 }
 
-const TIERS: [ModelTier; 3] = [ModelTier::Fast, ModelTier::Balanced, ModelTier::Deep];
+const LEVELS: [LlmLevel; 3] = [LlmLevel::Low, LlmLevel::Medium, LlmLevel::High];
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_llm_settings() -> IpcResult<LlmSettings> {
@@ -260,64 +246,46 @@ pub async fn refresh_llm_settings() -> IpcResult<LlmSettings> {
     .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm settings refresh join: {e}")))?
 }
 
-/// Persist a new priority order. Ids not named are appended in built-in
-/// order by the policy layer, so a partial list is safe.
+/// Select one ready backend, or pass no backend to disable LLM execution.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn set_llm_priority(order: Vec<String>) -> IpcResult<LlmSettings> {
+pub async fn set_llm_active_backend(backend: Option<String>) -> IpcResult<LlmSettings> {
     tokio::task::spawn_blocking(move || {
-        for id in &order {
+        if let Some(id) = backend.as_deref() {
             if Backend::find(id).is_none() {
                 return Err(IpcError::BadRequest(format!("unknown LLM backend `{id}`")));
             }
+            let credentials = cori_run::resolve_llm_credentials();
+            let candidate = cori_broker::llm::LlmConfig {
+                active: Some(id.to_string()),
+                models: cori_run::resolve_llm_config().models,
+            };
+            let policy = LlmPolicy::for_deployment(&candidate, Deployment::Local);
+            resolve::preview(LlmLevel::Medium, &policy, &credentials)
+                .map_err(|error| IpcError::BadRequest(format!("{error}")))?;
         }
         let mut config = load_config()?;
-        config
-            .set_value(
-                "llm.priority",
-                toml::Value::Array(order.into_iter().map(toml::Value::String).collect()),
-            )
-            .map_err(|e| IpcError::Internal(anyhow::anyhow!("setting llm.priority: {e}")))?;
+        if let Some(id) = backend {
+            config
+                .set_value("llm.active", toml::Value::String(id))
+                .map_err(|e| IpcError::Internal(anyhow::anyhow!("setting llm.active: {e}")))?;
+        } else {
+            config
+                .remove("llm.active")
+                .map_err(|e| IpcError::Internal(anyhow::anyhow!("clearing llm.active: {e}")))?;
+        }
         save_config(config)?;
         settings_blocking()
     })
     .await
-    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm priority write join: {e}")))?
+    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm active write join: {e}")))?
 }
 
-/// Turn one backend on or off without changing its rank.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn set_llm_backend_enabled(backend: String, enabled: bool) -> IpcResult<LlmSettings> {
-    tokio::task::spawn_blocking(move || {
-        if Backend::find(&backend).is_none() {
-            return Err(IpcError::BadRequest(format!(
-                "unknown LLM backend `{backend}`"
-            )));
-        }
-        let mut disabled: Vec<String> = cori_run::resolve_llm_config().disabled;
-        disabled.retain(|id| id != &backend);
-        if !enabled {
-            disabled.push(backend);
-        }
-        let mut config = load_config()?;
-        config
-            .set_value(
-                "llm.disabled",
-                toml::Value::Array(disabled.into_iter().map(toml::Value::String).collect()),
-            )
-            .map_err(|e| IpcError::Internal(anyhow::anyhow!("setting llm.disabled: {e}")))?;
-        save_config(config)?;
-        settings_blocking()
-    })
-    .await
-    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm enable write join: {e}")))?
-}
-
-/// Choose the model one backend uses for one tier. An empty `model`
+/// Choose the model one backend uses for one level. An empty `model`
 /// clears the override and restores the built-in default.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn set_llm_backend_model(
+pub async fn set_llm_level_model(
     backend: String,
-    tier: String,
+    level: String,
     model: String,
 ) -> IpcResult<LlmSettings> {
     tokio::task::spawn_blocking(move || {
@@ -326,8 +294,8 @@ pub async fn set_llm_backend_model(
                 "unknown LLM backend `{backend}`"
             )));
         }
-        let tier = ModelTier::parse(&tier)
-            .ok_or_else(|| IpcError::BadRequest(format!("unknown model tier `{tier}`")))?;
+        let level = LlmLevel::parse(&level)
+            .ok_or_else(|| IpcError::BadRequest(format!("unknown workflow level `{level}`")))?;
 
         // Rewrite the whole `[llm.models]` table: the config writer sets
         // keys, and clearing an override means removing one.
@@ -335,17 +303,22 @@ pub async fn set_llm_backend_model(
         let entry = models.entry(backend).or_default();
         let model = model.trim().to_string();
         if model.is_empty() {
-            entry.remove(tier.as_str());
+            entry.remove(level.as_str());
+            entry.remove(match level {
+                LlmLevel::Low => "fast",
+                LlmLevel::Medium => "balanced",
+                LlmLevel::High => "deep",
+            });
         } else {
-            entry.insert(tier.as_str().to_string(), model);
+            entry.insert(level.as_str().to_string(), model);
         }
-        models.retain(|_, tiers| !tiers.is_empty());
+        models.retain(|_, levels| !levels.is_empty());
 
         let mut table = toml::map::Map::new();
-        for (backend_id, tiers) in models {
+        for (backend_id, levels) in models {
             let mut inner = toml::map::Map::new();
-            for (tier_name, model) in tiers {
-                inner.insert(tier_name, toml::Value::String(model));
+            for (level_name, model) in levels {
+                inner.insert(level_name, toml::Value::String(model));
             }
             table.insert(backend_id, toml::Value::Table(inner));
         }
@@ -357,7 +330,7 @@ pub async fn set_llm_backend_model(
         settings_blocking()
     })
     .await
-    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm model write join: {e}")))?
+    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm level model write join: {e}")))?
 }
 
 fn load_config() -> IpcResult<cori_run::config::Config> {
@@ -378,29 +351,19 @@ fn console_policy() -> LlmPolicy {
 }
 
 fn settings_blocking() -> IpcResult<LlmSettings> {
+    let config = cori_run::resolve_llm_config();
     let policy = console_policy();
     let credentials = cori_run::resolve_llm_credentials();
     let env = LlmCredentials::from_env();
     let store = open_store()?;
+    let selected_backend = config.active.clone();
 
-    // Ranked backends first, then anything disabled (which the policy
-    // filtered out) so the page still lists every option.
-    let mut ordered: Vec<Backend> = policy.order().to_vec();
-    for backend in Backend::all() {
-        if !ordered.iter().any(|b| b.id() == backend.id()) {
-            ordered.push(backend);
-        }
-    }
-    let enabled_ids: Vec<&str> = policy.order().iter().map(|b| b.id()).collect();
-
-    let backends = ordered
+    let backends = Backend::all()
         .iter()
-        .enumerate()
-        .map(|(index, backend)| {
+        .map(|backend| {
             backend_info(
                 backend,
-                index + 1,
-                enabled_ids.contains(&backend.id()),
+                selected_backend.as_deref() == Some(backend.id()),
                 &policy,
                 &credentials,
                 &env,
@@ -409,15 +372,14 @@ fn settings_blocking() -> IpcResult<LlmSettings> {
         })
         .collect();
 
-    // What a step that declares nothing would run on right now.
-    let request = catalog::parse_request(None);
-    let (active, blocked_reason) = match resolve::preview(&request, &policy, &credentials) {
+    let (active, blocked_reason) = match resolve::preview(LlmLevel::Medium, &policy, &credentials) {
         Ok(selection) => (Some(resolution_info(&selection)), None),
         Err(error) => (None, Some(error.to_string())),
     };
 
     Ok(LlmSettings {
         backends,
+        selected_backend,
         active,
         blocked_reason,
         subscriptions_gated_off: policy.subscriptions_gated_off(),
@@ -427,20 +389,19 @@ fn settings_blocking() -> IpcResult<LlmSettings> {
 #[allow(clippy::too_many_arguments)]
 fn backend_info(
     backend: &Backend,
-    rank: usize,
-    enabled: bool,
+    active: bool,
     policy: &LlmPolicy,
     credentials: &LlmCredentials,
     env: &LlmCredentials,
     store: &cori_secrets::SecretStore,
 ) -> LlmBackendInfo {
-    let models = TIERS
+    let models = LEVELS
         .iter()
-        .map(|tier| {
-            let default_model = backend.default_model_for(*tier).unwrap_or_default();
-            let override_model = policy.model_override(backend.id(), *tier);
+        .map(|level| {
+            let default_model = backend.default_model_for(*level).unwrap_or_default();
+            let override_model = policy.model_override(backend.id(), *level);
             LlmBackendModel {
-                tier: tier.as_str().to_string(),
+                level: level.as_str().to_string(),
                 model: override_model
                     .clone()
                     .unwrap_or_else(|| default_model.to_string()),
@@ -454,12 +415,12 @@ fn backend_info(
         id: backend.id().to_string(),
         display_name: backend.display_name().to_string(),
         kind: backend.kind().as_str().to_string(),
-        rank,
-        enabled,
+        active,
         status: String::new(),
         remedy: None,
         subscription_name: None,
         binary: None,
+        login_command: None,
         key_configured: None,
         key_env_override: None,
         models,
@@ -474,6 +435,16 @@ fn backend_info(
         Backend::Subscription(spec) => {
             info.subscription_name = Some(spec.subscription_name.to_string());
             info.binary = Some(spec.binary.to_string());
+            info.login_command = Some(
+                match spec.id {
+                    "codex" => "codex login",
+                    "cursor" => "cursor-agent login",
+                    "claude" => "claude",
+                    "gemini-cli" => "gemini",
+                    _ => spec.binary,
+                }
+                .to_string(),
+            );
             let (status, remedy) = match subscription::check(spec) {
                 BackendState::Ready => ("ready", None),
                 BackendState::SignedOut { hint } => ("signed_out", Some(hint)),
@@ -503,17 +474,8 @@ fn resolution_info(selection: &resolve::Selection) -> LlmResolutionInfo {
         backend_id: selection.backend_id().to_string(),
         display_name: selection.backend.display_name().to_string(),
         kind: selection.kind().as_str().to_string(),
-        subscription_name: match selection.backend {
-            Backend::Subscription(spec) => Some(spec.subscription_name.to_string()),
-            Backend::Api(_) => None,
-        },
-        requested: selection.requested.clone(),
-        model: selection
-            .resolved_model
-            .clone()
-            .unwrap_or_else(|| "(backend default)".to_string()),
-        degraded: selection.degraded,
-        tier: selection.tier.as_str().to_string(),
+        level: selection.level.as_str().to_string(),
+        model: selection.resolved_model.clone(),
     }
 }
 
@@ -534,12 +496,11 @@ impl PreviewContext {
         }
     }
 
-    /// Which backend would serve a step declaring `model` (or nothing).
+    /// Which backend would serve a workflow level.
     /// Goes through the same [`resolve::preview`] the runtime uses, so
     /// the tooltip cannot promise a backend the run won't use.
-    pub fn for_model(&self, model: Option<&str>) -> Option<LlmResolutionInfo> {
-        let request = catalog::parse_request(model);
-        resolve::preview(&request, &self.policy, &self.credentials)
+    pub fn for_level(&self, level: LlmLevel) -> Option<LlmResolutionInfo> {
+        resolve::preview(level, &self.policy, &self.credentials)
             .ok()
             .map(|selection| resolution_info(&selection))
     }
@@ -552,10 +513,16 @@ impl Default for PreviewContext {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn preview_llm_resolution(model: Option<String>) -> IpcResult<Option<LlmResolutionInfo>> {
-    tokio::task::spawn_blocking(move || PreviewContext::new().for_model(model.as_deref()))
-        .await
-        .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm preview join: {e}")))
+pub async fn preview_llm_resolution(level: Option<String>) -> IpcResult<Option<LlmResolutionInfo>> {
+    tokio::task::spawn_blocking(move || {
+        let level = level
+            .as_deref()
+            .and_then(LlmLevel::parse)
+            .unwrap_or(LlmLevel::Medium);
+        PreviewContext::new().for_level(level)
+    })
+    .await
+    .map_err(|e| IpcError::Internal(anyhow::anyhow!("llm preview join: {e}")))
 }
 
 /// Probe the provider's models endpoint with the pasted key. Rejects on

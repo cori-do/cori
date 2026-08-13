@@ -153,15 +153,9 @@ pub enum BrokerError {
     #[error("MCP protocol error: {0}")]
     McpProtocol(String),
 
-    #[error(
-        "no LLM provider matches model `{model}` — supported model prefixes: gpt-/o1-/o3-/o4- (OpenAI), claude- (Anthropic), gemini- (Gemini)"
-    )]
-    LlmUnknownModel { model: String },
-
-    /// Nothing on this machine can serve an `llm` step: no subscription
-    /// backend is signed in and no API key is configured (or the
-    /// configured mode rules out whichever one is available).
-    #[error("no LLM backend can serve `{requested}`.\n{detail}")]
+    /// The machine has no active provider, or its active provider cannot
+    /// serve this step now. Connected alternatives are intentionally ignored.
+    #[error("AI provider unavailable for `{requested}`.\n{detail}")]
     LlmNoBackend { requested: String, detail: String },
 
     #[error(
@@ -205,14 +199,6 @@ pub enum BrokerError {
         auth_kind: &'static str,
         hint: String,
     },
-}
-
-/// What invoked the run. v1 supports only `Cli`; the enum exists so the
-/// LLM broker can pick the right provider strategy (org-configured vs.
-/// MCP-sampling vs. scheduled) in later execution modes.
-#[derive(Debug, Clone, Copy)]
-pub enum TriggerContext {
-    Cli,
 }
 
 pub type Result<T> = std::result::Result<T, BrokerError>;

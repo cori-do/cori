@@ -260,8 +260,8 @@ export interface StepSummary {
     | { type: "anywhere" }
     | { type: "local_fs" }
     | { type: "capability"; id: string };
-  /** `llm` steps only: the declared model, tier, or nothing. */
-  model?: string;
+  /** `llm` steps only: the normalized low/medium/high level. */
+  level?: ModelLevel;
   /** `llm` steps only: which backend will serve it, under current settings. */
   llm_resolution?: LlmResolutionInfo;
 }
@@ -437,7 +437,7 @@ export const setLlmProviderKey = (args: { provider: string; api_key: string }) =
 export const removeLlmProviderKey = (args: { provider: string }) =>
   call<LlmProviderInfo>("remove_llm_provider_key", args);
 
-// ---------- LLM backends (one ranked list, both routes) -----------------
+// ---------- LLM backends (one explicit active provider) ----------------
 
 /** `ready` is usable now; the rest each have a `remedy`. */
 export type LlmBackendStatus =
@@ -448,12 +448,12 @@ export type LlmBackendStatus =
 
 export type LlmBackendKind = "subscription" | "api";
 
-export type ModelTier = "fast" | "balanced" | "deep";
+export type ModelLevel = "low" | "medium" | "high";
 
-export const MODEL_TIERS: ModelTier[] = ["fast", "balanced", "deep"];
+export const MODEL_LEVELS: ModelLevel[] = ["low", "medium", "high"];
 
 export interface LlmBackendModel {
-  tier: ModelTier;
+  level: ModelLevel;
   /** The model that will actually be sent. */
   model: string;
   /** Cori's built-in choice, used as placeholder and reset target. */
@@ -467,15 +467,15 @@ export interface LlmBackendInfo {
   id: string;
   display_name: string;
   kind: LlmBackendKind;
-  /** 1-based rank in the priority order. */
-  rank: number;
-  enabled: boolean;
+  active: boolean;
   status: LlmBackendStatus;
   remedy?: string;
   /** Subscription only: the plan that pays for it. */
   subscription_name?: string;
   /** Subscription only: the executable Cori looks for. */
   binary?: string;
+  /** Subscription only: exact terminal sign-in command. */
+  login_command?: string;
   /** API only: a key is stored. */
   key_configured?: boolean;
   /** API only: an env var overrides the stored key. */
@@ -484,24 +484,20 @@ export interface LlmBackendInfo {
   model_suggestions: string[];
 }
 
-/** Which backend serves a given model preference. */
+/** Which backend serves a workflow level. */
 export interface LlmResolutionInfo {
   backend_id: string;
   display_name: string;
   kind: LlmBackendKind;
-  subscription_name?: string;
-  /** What the step asked for. */
-  requested: string;
-  /** The model that will actually be sent. */
+  level: ModelLevel;
   model: string;
-  /** The requested model isn't served here; the tier was matched instead. */
-  degraded: boolean;
-  tier: ModelTier;
 }
 
 export interface LlmSettings {
   backends: LlmBackendInfo[];
-  /** What a step declaring no model runs on right now. */
+  /** Explicit selection, retained if it later becomes unavailable. */
+  selected_backend?: string;
+  /** What a medium step runs on right now. */
   active?: LlmResolutionInfo;
   /** Why nothing is ready, when `active` is absent. */
   blocked_reason?: string;
@@ -515,22 +511,17 @@ export const getLlmSettings = () => call<LlmSettings>("get_llm_settings");
 export const refreshLlmSettings = () =>
   call<LlmSettings>("refresh_llm_settings");
 
-export const setLlmPriority = (args: { order: string[] }) =>
-  call<LlmSettings>("set_llm_priority", args);
-
-export const setLlmBackendEnabled = (args: {
-  backend: string;
-  enabled: boolean;
-}) => call<LlmSettings>("set_llm_backend_enabled", args);
+export const setLlmActiveBackend = (args: { backend?: string }) =>
+  call<LlmSettings>("set_llm_active_backend", args);
 
 /** An empty `model` clears the override and restores the default. */
-export const setLlmBackendModel = (args: {
+export const setLlmLevelModel = (args: {
   backend: string;
-  tier: ModelTier;
+  level: ModelLevel;
   model: string;
-}) => call<LlmSettings>("set_llm_backend_model", args);
+}) => call<LlmSettings>("set_llm_level_model", args);
 
-export const previewLlmResolution = (args: { model?: string }) =>
+export const previewLlmResolution = (args: { level?: ModelLevel }) =>
   call<LlmResolutionInfo | null>("preview_llm_resolution", args);
 
 export const resolveWorkflow = (args: { source: string; update?: boolean }) =>

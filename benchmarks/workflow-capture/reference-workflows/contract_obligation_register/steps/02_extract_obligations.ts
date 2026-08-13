@@ -22,7 +22,7 @@ export default step.llm({
   description: "Extract the dated obligations and resolve referenced notice periods",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   prompt: ({ contract_text }) =>
     `Read the contract below and return the date the Term ends as YYYY-MM-DD, and every obligation that binds a party to act by a date.\n\nFor each obligation return the clause reference exactly as the contract labels it, which party it binds, a factual one-line description of what must be done, and notice_days as the whole number of days of notice or lead time required.\n\nWhere a clause states its notice period by referring to a period defined elsewhere in the contract, follow the reference and return the resolved number of days.\n\nReturn JSON only.\n\n${contract_text}`,
 });

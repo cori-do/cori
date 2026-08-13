@@ -1,18 +1,3 @@
-// The AI Providers tab.
-//
-// One idea drives the whole page: **an ordered list of places an `llm`
-// step can run**. Subscriptions and API keys are rows in the same list,
-// because the user's real question is "which one gets used first", and
-// that question has one answer, not two. The old version split them into
-// three stacked sections plus a mode radio, which meant the ordering was
-// implied by a setting somewhere else on the page — you had to hold the
-// rule in your head to predict what would happen.
-//
-// So: rank, reorder, toggle, and (per row, on demand) pick the model for
-// each capability tier. The banner at the top states the outcome in a
-// sentence, so the page answers its own question without being read
-// top-to-bottom.
-
 import { useCallback, useState } from "react";
 import { BackendLogo } from "../components/provider-icons";
 import { ProviderKeyForm } from "../components/provider-key-form";
@@ -20,15 +5,14 @@ import {
   getLlmSettings,
   isIpcError,
   listLlmProviders,
-  MODEL_TIERS,
+  MODEL_LEVELS,
   refreshLlmSettings,
-  setLlmBackendEnabled,
-  setLlmBackendModel,
-  setLlmPriority,
+  setLlmActiveBackend,
+  setLlmLevelModel,
   type LlmBackendInfo,
   type LlmProviderInfo,
   type LlmSettings,
-  type ModelTier,
+  type ModelLevel,
 } from "../lib/api";
 
 export function meta() {
@@ -37,7 +21,6 @@ export function meta() {
 
 interface ProvidersData {
   settings: LlmSettings;
-  /** API-key state, keyed by provider id, for the inline key form. */
   providers: LlmProviderInfo[];
 }
 
@@ -49,30 +32,26 @@ export async function clientLoader(): Promise<ProvidersData> {
   return { settings, providers };
 }
 
-const TIER_HELP: Record<ModelTier, string> = {
-  fast: "Classification, extraction, short rewrites.",
-  balanced: "The default for steps that don't say otherwise.",
-  deep: "Multi-constraint reasoning and long synthesis.",
+const LEVEL_HELP: Record<ModelLevel, string> = {
+  low: "Fast extraction, classification, and short rewrites.",
+  medium: "The default for everyday workflow steps.",
+  high: "Complex reasoning and long synthesis.",
 };
 
 export default function Providers({ loaderData }: { loaderData: ProvidersData }) {
   const [settings, setSettings] = useState(loaderData.settings);
   const [providers, setProviders] = useState(loaderData.providers);
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Every mutation returns the whole settings object, so the list, the
-  // banner and the status pills can never drift out of sync with each
-  // other — there is one server-rendered truth per interaction.
   const apply = useCallback(
     async (key: string, action: () => Promise<LlmSettings>) => {
       setBusy(key);
       setError(null);
       try {
         setSettings(await action());
-      } catch (e) {
-        setError(isIpcError(e) ? e.message : String(e));
+      } catch (cause) {
+        setError(isIpcError(cause) ? cause.message : String(cause));
       } finally {
         setBusy(null);
       }
@@ -80,177 +59,160 @@ export default function Providers({ loaderData }: { loaderData: ProvidersData })
     [],
   );
 
-  const move = useCallback(
-    (id: string, delta: number) => {
-      const order = settings.backends.map((b) => b.id);
-      const from = order.indexOf(id);
-      const to = from + delta;
-      if (from < 0 || to < 0 || to >= order.length) return;
-      [order[from], order[to]] = [order[to], order[from]];
-      void apply(`move:${id}`, () => setLlmPriority({ order }));
-    },
-    [settings.backends, apply],
-  );
+  const renderGroup = (kind: "subscription" | "api") =>
+    settings.backends
+      .filter((backend) => backend.kind === kind)
+      .map((backend) => (
+        <ProviderCard
+          key={backend.id}
+          backend={backend}
+          provider={providers.find((provider) => provider.id === backend.id)}
+          busy={busy}
+          onActivate={() =>
+            apply(`active:${backend.id}`, () =>
+              setLlmActiveBackend({ backend: backend.id }),
+            )
+          }
+          onDeactivate={() =>
+            apply(`active:${backend.id}`, () => setLlmActiveBackend({}))
+          }
+          onRefresh={() => apply(`refresh:${backend.id}`, refreshLlmSettings)}
+          onSetModel={(level, model) =>
+            apply(`model:${backend.id}:${level}`, () =>
+              setLlmLevelModel({ backend: backend.id, level, model }),
+            )
+          }
+          onProviderChanged={(updated) => {
+            setProviders((current) =>
+              current.map((provider) =>
+                provider.id === updated.id ? updated : provider,
+              ),
+            );
+            void apply(`key:${backend.id}`, getLlmSettings);
+          }}
+        />
+      ));
 
   return (
     <>
       <ActiveBanner settings={settings} />
 
       {error ? (
-        <p className="hint" style={{ color: "var(--red)" }}>
+        <p className="hint" role="alert" style={{ color: "var(--red)" }}>
           {error}
         </p>
       ) : null}
 
-      <div className="section-head">
-        <h2>Priority</h2>
-        <p className="hint">
-          Each <code>llm</code> step runs on the first provider here that's
-          ready. Drag order with the arrows; turn one off to skip it entirely.
-        </p>
-        <button
-          className="btn"
-          disabled={busy !== null}
-          onClick={() => apply("refresh", refreshLlmSettings)}
+      <div className="provider-groups">
+        <ProviderGroup
+          title="Subscriptions"
+          hint="Use a plan you already have. Sign-in happens in the vendor CLI."
         >
-          {busy === "refresh" ? "Checking…" : "Re-check"}
-        </button>
+          {renderGroup("subscription")}
+        </ProviderGroup>
+
+        <ProviderGroup
+          title="API keys"
+          hint="Use a metered provider key stored securely on this machine."
+        >
+          {renderGroup("api")}
+        </ProviderGroup>
       </div>
 
-      <ol className="backend-list">
-        {settings.backends.map((b, i) => (
-          <BackendRow
-            key={b.id}
-            backend={b}
-            isFirst={i === 0}
-            isLast={i === settings.backends.length - 1}
-            expanded={expanded === b.id}
-            busy={busy}
-            provider={providers.find((p) => p.id === b.id)}
-            onToggleExpand={() =>
-              setExpanded((cur) => (cur === b.id ? null : b.id))
-            }
-            onMove={(delta) => move(b.id, delta)}
-            onSetEnabled={(enabled) =>
-              apply(`enable:${b.id}`, () =>
-                setLlmBackendEnabled({ backend: b.id, enabled }),
-              )
-            }
-            onSetModel={(tier, model) =>
-              apply(`model:${b.id}:${tier}`, () =>
-                setLlmBackendModel({ backend: b.id, tier, model }),
-              )
-            }
-            onProviderChanged={(updated) => {
-              setProviders((ps) =>
-                ps.map((p) => (p.id === updated.id ? updated : p)),
-              );
-              // A key that just appeared changes readiness and therefore
-              // which backend the banner names.
-              void apply(`key:${b.id}`, getLlmSettings);
-            }}
-          />
-        ))}
-      </ol>
-
       <p className="hint">
-        Settings apply to runs on <strong>this machine</strong>. A shared
-        worker (<code>cori work --shared</code>) always uses API keys — it
-        can't spend one person's personal subscription on everyone's behalf.
+        Connections are kept when you switch. Cori uses only the provider you
+        explicitly activate and never falls back to another one.
       </p>
     </>
   );
 }
 
-/** The one-sentence answer to "what happens when I run a workflow?" */
+function ProviderGroup({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="provider-group">
+      <div className="section-head">
+        <h2>{title}</h2>
+        <p className="hint">{hint}</p>
+      </div>
+      <div className="backend-list">{children}</div>
+    </section>
+  );
+}
+
 function ActiveBanner({ settings }: { settings: LlmSettings }) {
-  if (!settings.active) {
+  if (!settings.selected_backend) {
     return (
       <div className="active-banner is-blocked">
-        <span className="pill warn">not ready</span>
+        <span className="pill muted">inactive</span>
         <div>
-          <strong>No provider is ready.</strong>
-          <p className="hint">
-            {settings.blocked_reason ??
-              "Sign in to a subscription or add an API key below."}
-          </p>
+          <strong>No active AI provider</strong>
+          <p className="hint">Choose a ready provider below to enable LLM steps.</p>
         </div>
       </div>
     );
   }
-  const a = settings.active;
+
+  if (!settings.active) {
+    const selected = settings.backends.find((backend) => backend.active);
+    return (
+      <div className="active-banner is-blocked">
+        <span className="pill warn">needs attention</span>
+        {selected ? <BackendLogo backendId={selected.id} size={16} /> : null}
+        <div>
+          <strong>{selected?.display_name ?? settings.selected_backend}</strong>
+          <p className="hint">{settings.blocked_reason}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="active-banner">
       <span className="pill ok">active</span>
-      <BackendLogo backendId={a.backend_id} size={16} />
+      <BackendLogo backendId={settings.active.backend_id} size={16} />
       <div>
-        <strong>{a.display_name}</strong> runs your <code>llm</code> steps,
-        using <code>{a.model}</code> for <code>{a.tier}</code> work.
+        <strong>{settings.active.display_name}</strong>
         <p className="hint">
-          {a.kind === "subscription"
-            ? `Paid for by your ${a.subscription_name} plan — no per-token cost.`
-            : "Billed per token to your API key."}{" "}
-          Steps that ask for a different tier use that row's other models.
+          Medium workflow steps use <code>{settings.active.model}</code>.
         </p>
       </div>
     </div>
   );
 }
 
-function BackendRow({
+function ProviderCard({
   backend,
-  isFirst,
-  isLast,
-  expanded,
-  busy,
   provider,
-  onToggleExpand,
-  onMove,
-  onSetEnabled,
+  busy,
+  onActivate,
+  onDeactivate,
+  onRefresh,
   onSetModel,
   onProviderChanged,
 }: {
   backend: LlmBackendInfo;
-  isFirst: boolean;
-  isLast: boolean;
-  expanded: boolean;
-  busy: string | null;
   provider?: LlmProviderInfo;
-  onToggleExpand: () => void;
-  onMove: (delta: number) => void;
-  onSetEnabled: (enabled: boolean) => void;
-  onSetModel: (tier: ModelTier, model: string) => void;
-  onProviderChanged: (updated: LlmProviderInfo) => void;
+  busy: string | null;
+  onActivate: () => void;
+  onDeactivate: () => void;
+  onRefresh: () => void;
+  onSetModel: (level: ModelLevel, model: string) => void;
+  onProviderChanged: (provider: LlmProviderInfo) => void;
 }) {
+  const ready = backend.status === "ready";
   const anyBusy = busy !== null;
-  const dim = !backend.enabled;
 
   return (
-    <li className={"backend-row" + (dim ? " is-off" : "")}>
-      <div className="backend-main">
-        <div className="backend-rank" aria-hidden="true">
-          {String(backend.rank).padStart(2, "0")}
-        </div>
-
-        <div className="backend-reorder">
-          <button
-            className="icon-btn"
-            aria-label={`Move ${backend.display_name} up`}
-            disabled={isFirst || anyBusy}
-            onClick={() => onMove(-1)}
-          >
-            ↑
-          </button>
-          <button
-            className="icon-btn"
-            aria-label={`Move ${backend.display_name} down`}
-            disabled={isLast || anyBusy}
-            onClick={() => onMove(1)}
-          >
-            ↓
-          </button>
-        </div>
-
+    <article className={`backend-row${backend.active ? " is-active" : ""}`}>
+      <div className="backend-main provider-card-main">
         <div className="backend-identity">
           <div className="backend-name">
             <BackendLogo backendId={backend.id} />
@@ -266,105 +228,116 @@ function BackendRow({
               : backend.key_env_override
                 ? "Key set by an environment variable"
                 : backend.key_configured
-                  ? "Key stored in your OS keychain"
-                  : "No key yet"}
-            {backend.remedy ? ` — ${backend.remedy}` : ""}
-          </p>
-
-          {/* The models this provider uses, readable without expanding —
-              "which model does each provider run?" is the second question
-              this page exists to answer, so it shouldn't need a click.
-              On its own line under the name so a full default list (a
-              vendor's own model names can run 60+ characters) has the
-              row's width to wrap into instead of being squeezed beside
-              the toggle and ellipsised. */}
-          <p className="backend-models">
-            {backend.models.map((m, i) => (
-              <span key={m.tier}>
-                {i > 0 ? <span className="sep"> · </span> : null}
-                <span className={m.overridden ? "is-custom" : undefined}>
-                  {m.model}
-                </span>
-              </span>
-            ))}
+                  ? "Key stored securely"
+                  : "No API key connected"}
           </p>
         </div>
 
-        <label className="backend-toggle">
-          <input
-            type="checkbox"
-            checked={backend.enabled}
-            disabled={anyBusy}
-            onChange={(e) => onSetEnabled(e.target.checked)}
-          />
-          <span>{backend.enabled ? "On" : "Off"}</span>
-        </label>
-
-        <button
-          className="icon-btn"
-          aria-expanded={expanded}
-          aria-label={`${expanded ? "Hide" : "Show"} ${backend.display_name} models`}
-          onClick={onToggleExpand}
-        >
-          {expanded ? "▴" : "▾"}
-        </button>
+        <div className="provider-card-action">
+          {backend.active ? (
+            <>
+              <span className="pill ok">Active</span>
+              <button className="btn subtle" disabled={anyBusy} onClick={onDeactivate}>
+                Deactivate
+              </button>
+            </>
+          ) : ready ? (
+            <button className="btn primary" disabled={anyBusy} onClick={onActivate}>
+              {busy === `active:${backend.id}` ? "Activating…" : "Use this provider"}
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      {expanded ? (
-        <div className="backend-detail">
+      {!ready && backend.kind === "subscription" ? (
+        <div className="provider-remedy">
+          <p>{backend.remedy}</p>
+          {backend.login_command ? (
+            <div className="command-copy-row">
+              <code>{backend.login_command}</code>
+              <button
+                className="btn subtle"
+                onClick={() => void navigator.clipboard.writeText(backend.login_command ?? "")}
+              >
+                Copy
+              </button>
+              <button className="btn" disabled={anyBusy} onClick={onRefresh}>
+                {busy === `refresh:${backend.id}` ? "Checking…" : "Re-check"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {backend.kind === "api" && provider ? (
+        <div className="backend-key">
+          <ProviderKeyForm provider={provider} onChanged={onProviderChanged} />
+        </div>
+      ) : null}
+
+      {backend.active ? (
+        <details className="advanced-models">
+          <summary>Advanced models</summary>
           <div className="tier-grid">
-            {MODEL_TIERS.map((tier) => {
-              const m = backend.models.find((x) => x.tier === tier);
-              if (!m) return null;
+            {MODEL_LEVELS.map((level) => {
+              const mapping = backend.models.find((item) => item.level === level);
+              if (!mapping) return null;
               return (
-                <label key={tier} className="tier-field">
+                <label key={level} className="tier-field">
                   <span className="tier-label">
-                    {tier}
-                    {m.overridden ? <em> · custom</em> : null}
+                    {level}
+                    {mapping.overridden ? <em> · custom</em> : null}
                   </span>
-                  <input
-                    type="text"
-                    list={`${backend.id}-${tier}-models`}
-                    defaultValue={m.model}
-                    placeholder={m.default_model}
-                    disabled={anyBusy}
-                    aria-label={`${backend.display_name} model for ${tier} steps`}
-                    onBlur={(e) => {
-                      const next = e.target.value.trim();
-                      if (next !== m.model) onSetModel(tier, next);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") e.currentTarget.blur();
-                    }}
-                  />
-                  <datalist id={`${backend.id}-${tier}-models`}>
-                    {backend.model_suggestions.map((s) => (
-                      <option key={s} value={s} />
+                  <div className="model-input-row">
+                    <input
+                      key={mapping.model}
+                      type="text"
+                      list={`${backend.id}-${level}-models`}
+                      defaultValue={mapping.overridden ? mapping.model : ""}
+                      placeholder={mapping.default_model}
+                      disabled={anyBusy}
+                      aria-label={`${backend.display_name} model for ${level} steps`}
+                      onBlur={(event) => {
+                        const next = event.currentTarget.value.trim();
+                        if (next !== (mapping.overridden ? mapping.model : "")) {
+                          onSetModel(level, next);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                    />
+                    {mapping.overridden ? (
+                      <button
+                        type="button"
+                        className="btn subtle"
+                        disabled={anyBusy}
+                        onClick={() => onSetModel(level, "")}
+                      >
+                        Reset
+                      </button>
+                    ) : null}
+                  </div>
+                  <datalist id={`${backend.id}-${level}-models`}>
+                    {backend.model_suggestions.map((suggestion) => (
+                      <option key={suggestion} value={suggestion} />
                     ))}
                   </datalist>
-                  <span className="hint">{TIER_HELP[tier]}</span>
+                  <span className="hint">{LEVEL_HELP[level]}</span>
                 </label>
               );
             })}
           </div>
           <p className="hint">
-            Any model name works, not just the suggestions — leave a field
-            empty to go back to Cori's default.
+            Any model name is accepted. Empty fields use Cori’s provider defaults.
           </p>
-
-          {backend.kind === "api" && provider ? (
-            <div className="backend-key">
-              <ProviderKeyForm provider={provider} onChanged={onProviderChanged} />
-            </div>
-          ) : null}
-        </div>
+        </details>
       ) : null}
-    </li>
+    </article>
   );
 }
 
 function StatusPill({ backend }: { backend: LlmBackendInfo }) {
-  if (!backend.enabled) return <span className="pill muted">off</span>;
   switch (backend.status) {
     case "ready":
       return <span className="pill ok">ready</span>;

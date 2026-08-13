@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value as JsonValue;
 
-use super::catalog::ModelTier;
+use super::catalog::LlmLevel;
 use super::providers::{LlmProvider, LlmRequest, LlmResponse};
 use crate::{BrokerError, Result, TokenUsage};
 
@@ -90,49 +90,35 @@ pub struct BackendSpec {
     pub subscription_name: &'static str,
     /// The command that signs the user in, for remediation hints.
     pub login_hint: &'static str,
-    /// Default tier → model mapping. `None` means "don't pass a model
+    /// Default level → model mapping. `None` means "don't pass a model
     /// flag; use whatever the CLI is configured to use". Overridable
     /// per-backend in `~/.cori/config.toml`.
-    pub fast: Option<&'static str>,
-    pub balanced: Option<&'static str>,
-    pub deep: Option<&'static str>,
-    /// Model names worth offering in the Console's per-tier pickers.
+    pub low: Option<&'static str>,
+    pub medium: Option<&'static str>,
+    pub high: Option<&'static str>,
+    /// Model names worth offering in the Console's per-level pickers.
     /// Suggestions only — any string is accepted, because vendors ship
     /// models faster than Cori ships releases.
     pub model_suggestions: &'static [&'static str],
 }
 
 impl BackendSpec {
-    /// Default model for a tier, before config overrides.
-    pub fn default_model_for(&self, tier: ModelTier) -> Option<&'static str> {
-        match tier {
-            ModelTier::Fast => self.fast,
-            ModelTier::Balanced => self.balanced,
-            ModelTier::Deep => self.deep,
+    /// Default model for a level, before config overrides.
+    pub fn default_model_for(&self, level: LlmLevel) -> Option<&'static str> {
+        match level {
+            LlmLevel::Low => self.low,
+            LlmLevel::Medium => self.medium,
+            LlmLevel::High => self.high,
         }
-    }
-
-    /// Whether this backend natively serves an API provider's models.
-    /// Used so `model: "claude-3-5-sonnet"` prefers the Claude
-    /// subscription over the Cursor one when both are signed in.
-    pub fn serves_api_provider(&self, provider: &str) -> bool {
-        matches!(
-            (self.id, provider),
-            ("claude", "anthropic") | ("codex", "openai") | ("gemini-cli", "gemini")
-        )
     }
 }
 
-/// Every subscription backend, in built-in preference order.
-///
-/// This order is only the default: the user's `[llm].priority` list
-/// ranks these against the API providers however they like. Claude Code
-/// and Codex lead because their non-interactive modes are the most
-/// established; Cursor and Gemini follow.
+/// Every subscription backend. Array order is display order only; it never
+/// influences runtime selection.
 ///
 /// **Model names are the maintenance point of this file.** Vendors
 /// rename models often. Users can override any cell via
-/// `cori config set llm.models.<id>.<tier> <model>` without waiting for
+/// `cori config set llm.models.<id>.<level> <model>` without waiting for
 /// a Cori release (see [`super::policy::LlmConfig`]).
 pub const BACKENDS: &[BackendSpec] = &[
     BackendSpec {
@@ -143,9 +129,9 @@ pub const BACKENDS: &[BackendSpec] = &[
         login_hint: "run `claude` once in a terminal and sign in",
         // Claude Code resolves these aliases to current models itself,
         // which is exactly the indirection we want here.
-        fast: Some("haiku"),
-        balanced: Some("sonnet"),
-        deep: Some("opus"),
+        low: Some("haiku"),
+        medium: Some("sonnet"),
+        high: Some("opus"),
         model_suggestions: &["haiku", "sonnet", "opus"],
     },
     BackendSpec {
@@ -154,9 +140,9 @@ pub const BACKENDS: &[BackendSpec] = &[
         display_name: "Codex CLI",
         subscription_name: "ChatGPT Plus, Pro, or Business",
         login_hint: "run `codex login` and choose \"Sign in with ChatGPT\"",
-        fast: Some("gpt-5-mini"),
-        balanced: Some("gpt-5"),
-        deep: Some("gpt-5"),
+        low: Some("gpt-5-mini"),
+        medium: Some("gpt-5"),
+        high: Some("gpt-5"),
         model_suggestions: &["gpt-5-mini", "gpt-5", "gpt-5-codex", "o3"],
     },
     BackendSpec {
@@ -165,20 +151,26 @@ pub const BACKENDS: &[BackendSpec] = &[
         display_name: "Cursor CLI",
         subscription_name: "Cursor Pro or Business",
         login_hint: "run `cursor-agent login`",
-        fast: Some("sonnet-4"),
-        balanced: Some("gpt-5"),
-        deep: Some("sonnet-4-thinking"),
-        model_suggestions: &["sonnet-4", "sonnet-4-thinking", "gpt-5", "opus-4.1"],
+        low: Some("sonnet-4"),
+        medium: Some("composer-2.5"),
+        high: Some("sonnet-4-thinking"),
+        model_suggestions: &[
+            "composer-2.5",
+            "sonnet-4",
+            "sonnet-4-thinking",
+            "gpt-5",
+            "opus-4.1",
+        ],
     },
     BackendSpec {
         id: "gemini-cli",
         binary: "gemini",
         display_name: "Gemini CLI",
         subscription_name: "Google AI Pro/Ultra or Gemini Code Assist",
-        login_hint: "run `gemini` once and sign in with your Google account",
-        fast: Some("gemini-2.5-flash"),
-        balanced: Some("gemini-2.5-pro"),
-        deep: Some("gemini-2.5-pro"),
+        login_hint: "run `gemini`, select \"Sign in with Google\", and complete the browser sign-in",
+        low: Some("gemini-2.5-flash"),
+        medium: Some("gemini-2.5-pro"),
+        high: Some("gemini-2.5-pro"),
         model_suggestions: &["gemini-2.5-flash", "gemini-2.5-pro"],
     },
 ];
@@ -405,10 +397,38 @@ fn output_before(
     })
 }
 
+/// Gemini CLI's OAuth credential cache can outlive the selected auth method.
+/// In particular, newer Gemini CLI releases ignore the old top-level
+/// `selectedAuthType` setting and require
+/// `security.auth.selectedType = "oauth-personal"`. Requiring both the
+/// current setting and the credential cache prevents a stale cache from
+/// making the subscription look usable when the CLI will reject its first
+/// non-interactive request.
 fn gemini_signed_in() -> bool {
     home_dir()
-        .map(|h| h.join(".gemini/oauth_creds.json").is_file())
+        .map(|home| gemini_signed_in_at(&home))
         .unwrap_or(false)
+}
+
+fn gemini_signed_in_at(home: &std::path::Path) -> bool {
+    let gemini_home = home.join(".gemini");
+    if !gemini_home.join("oauth_creds.json").is_file() {
+        return false;
+    }
+
+    let Ok(raw) = std::fs::read_to_string(gemini_home.join("settings.json")) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<JsonValue>(&raw) else {
+        return false;
+    };
+
+    matches!(
+        settings
+            .pointer("/security/auth/selectedType")
+            .and_then(JsonValue::as_str),
+        Some("oauth-personal")
+    )
 }
 
 /// Strip ANSI escape sequences — the agent CLIs draw spinners and
@@ -492,9 +512,20 @@ impl SubscriptionProvider {
                 "read-only".into(),
                 "--skip-git-repo-check".into(),
             ],
-            // No `--force`: without it cursor-agent denies shell commands
-            // rather than running them.
-            "cursor" => vec!["-p".into(), "--output-format".into(), "json".into()],
+            // Ask mode is Cursor's read-only Q&A mode. The sandbox remains
+            // explicitly enabled; `--trust` only acknowledges Cori's fresh,
+            // empty scratch workspace so print mode does not block for input.
+            // Never add `--force` / `--yolo`.
+            "cursor" => vec![
+                "-p".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--mode".into(),
+                "ask".into(),
+                "--sandbox".into(),
+                "enabled".into(),
+                "--trust".into(),
+            ],
             "gemini-cli" => vec!["--output-format".into(), "json".into()],
             _ => Vec::new(),
         };
@@ -941,6 +972,18 @@ mod tests {
         let argv = SubscriptionProvider::new(spec("cursor"), Some("gpt-5".into())).argv();
         assert!(!argv.iter().any(|a| a == "-f" || a == "--force"));
         assert!(argv.iter().any(|a| a == "--model"));
+        assert!(argv.windows(2).any(|pair| pair == ["--mode", "ask"]));
+        assert!(argv.windows(2).any(|pair| pair == ["--sandbox", "enabled"]));
+        assert!(argv.iter().any(|arg| arg == "--trust"));
+    }
+
+    #[test]
+    fn configured_model_reaches_subscription_argv() {
+        let argv = SubscriptionProvider::new(spec("codex"), Some("gpt-custom".into())).argv();
+        assert!(
+            argv.windows(2).any(|pair| pair == ["-m", "gpt-custom"]),
+            "argv was {argv:?}"
+        );
     }
 
     #[test]
@@ -1020,28 +1063,49 @@ mod tests {
     }
 
     #[test]
-    fn exact_model_ownership_maps_to_the_right_subscription() {
-        assert!(spec("claude").serves_api_provider("anthropic"));
-        assert!(!spec("claude").serves_api_provider("openai"));
-        assert!(spec("codex").serves_api_provider("openai"));
-        assert!(spec("gemini-cli").serves_api_provider("gemini"));
-        // Cursor is a multi-vendor router; it claims no provider natively.
-        assert!(!spec("cursor").serves_api_provider("openai"));
-    }
-
-    #[test]
     fn signed_out_failures_surface_the_fix() {
         let body = subscription_failure_body(spec("codex"), "", "Error: not logged in");
         assert!(body.contains("codex login"));
     }
 
     #[test]
-    fn every_backend_covers_every_tier() {
+    fn gemini_requires_current_oauth_selection_and_credentials() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let gemini_home = home.path().join(".gemini");
+        std::fs::create_dir(&gemini_home).expect("Gemini directory");
+        std::fs::write(gemini_home.join("oauth_creds.json"), "{}").expect("credential cache");
+
+        // A credential cache from an older Gemini CLI is not enough: current
+        // releases ignore this old top-level key for non-interactive calls.
+        std::fs::write(
+            gemini_home.join("settings.json"),
+            r#"{"selectedAuthType":"oauth-personal"}"#,
+        )
+        .expect("legacy settings");
+        assert!(!gemini_signed_in_at(home.path()));
+
+        std::fs::write(
+            gemini_home.join("settings.json"),
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}}}"#,
+        )
+        .expect("current OAuth settings");
+        assert!(gemini_signed_in_at(home.path()));
+
+        std::fs::write(
+            gemini_home.join("settings.json"),
+            r#"{"security":{"auth":{"selectedType":"gemini-api-key"}}}"#,
+        )
+        .expect("API-key settings");
+        assert!(!gemini_signed_in_at(home.path()));
+    }
+
+    #[test]
+    fn every_backend_covers_every_level() {
         for backend in BACKENDS {
-            for tier in [ModelTier::Fast, ModelTier::Balanced, ModelTier::Deep] {
+            for level in LlmLevel::ALL {
                 assert!(
-                    backend.default_model_for(tier).is_some(),
-                    "{} has no model for {tier}",
+                    backend.default_model_for(level).is_some(),
+                    "{} has no model for {level}",
                     backend.id
                 );
             }

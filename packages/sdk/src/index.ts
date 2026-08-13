@@ -149,33 +149,21 @@ export interface LlmBatchOpts {
 }
 
 /**
- * How much model a step needs, independent of vendor.
+ * How much model capability an LLM step needs, independent of provider.
  *
- * - `fast` — classification, extraction, short rewrites
- * - `balanced` — the default; most steps
- * - `deep` — multi-constraint reasoning, long synthesis
+ * - `low` — classification, extraction, and short rewrites
+ * - `medium` — the default; most workflow model calls
+ * - `high` — multi-constraint reasoning and long synthesis
  */
-export type ModelTier = "fast" | "balanced" | "deep";
-
-/**
- * What a step asks for. A tier is the portable choice; a concrete model
- * name (`"gpt-4o-mini"`) is a *preference* — the host uses it when it can
- * reach that vendor and otherwise serves the same tier from whatever
- * backend it has, recording the substitution in the run trace.
- *
- * `string` is kept in the union so any vendor model name type-checks.
- */
-export type ModelPreference = ModelTier | (string & {});
+export type LlmLevel = "low" | "medium" | "high";
 
 export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
   extends BaseStepOpts {
   /**
-   * Optional. Omit it to let the host pick at its default tier — the
-   * portable choice, and the one that runs anywhere. Declare a tier
-   * (`"fast"`) to say how much model the step needs, or a concrete model
-   * name to express a preference.
+   * Optional. Omission means `medium`. The active provider on the worker
+   * maps this portable level to one of its own models.
    */
-  readonly model?: ModelPreference;
+  readonly level?: LlmLevel;
   readonly input?: I;
   readonly output?: O;
   readonly prompt: (input: ZodOutput<I>) => string;
@@ -183,7 +171,9 @@ export interface LlmStepOpts<I extends ZodTypeAny, O extends ZodTypeAny>
 }
 
 export interface LlmStepDef extends StepDef<"llm"> {
-  readonly model?: ModelPreference;
+  readonly level: LlmLevel;
+  /** Runtime-only bridge for Temporal activities started by older builds. */
+  readonly __legacyModel?: string;
   readonly prompt: (input: unknown) => string;
   readonly batch?: LlmBatchOpts;
   readonly input?: ZodTypeAny;
@@ -304,9 +294,14 @@ export const step = {
   llm<I extends ZodTypeAny, O extends ZodTypeAny>(
     opts: LlmStepOpts<I, O>,
   ): LlmStepDef {
+    // New source cannot type-check or compile with `model`, but retaining
+    // the value at runtime lets an already-started Temporal activity resume
+    // safely after an upgrade.
+    const legacyModel = (opts as unknown as { model?: string }).model;
     return {
       ...base("llm", opts),
-      model: opts.model,
+      level: opts.level ?? "medium",
+      __legacyModel: legacyModel,
       prompt: opts.prompt as (input: unknown) => string,
       batch: opts.batch,
       input: opts.input,

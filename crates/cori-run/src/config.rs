@@ -60,8 +60,7 @@ impl Config {
     }
 
     /// Set a dotted key to an already-typed value. The path for values
-    /// `set`'s string coercion can't express — arrays, in particular
-    /// (`llm.priority`).
+    /// `set`'s string coercion can't express, such as arrays and tables.
     pub fn set_value(&mut self, key: &str, parsed: Value) -> Result<()> {
         let segments: Vec<&str> = key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
@@ -86,6 +85,29 @@ impl Config {
             .as_table_mut()
             .ok_or_else(|| anyhow!("config root is not a table"))?;
         table.insert((*last).to_string(), parsed);
+        Ok(())
+    }
+
+    /// Remove a dotted key when present. Empty parent tables are retained;
+    /// they are harmless and keep this operation deliberately non-destructive.
+    pub fn remove(&mut self, key: &str) -> Result<()> {
+        let segments: Vec<&str> = key.split('.').collect();
+        if segments.iter().any(|segment| segment.is_empty()) {
+            bail!("invalid config key `{key}`");
+        }
+        let mut current = &mut self.doc;
+        for segment in &segments[..segments.len() - 1] {
+            let Some(next) = current
+                .as_table_mut()
+                .and_then(|table| table.get_mut(*segment))
+            else {
+                return Ok(());
+            };
+            current = next;
+        }
+        if let Some(table) = current.as_table_mut() {
+            table.remove(*segments.last().unwrap());
+        }
         Ok(())
     }
 
@@ -147,6 +169,30 @@ mod tests {
             Some("test-value")
         );
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remove_clears_only_the_named_setting() {
+        let path = std::env::temp_dir().join(format!(
+            "cori-config-remove-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(
+            &path,
+            "[llm]\nactive = \"cursor\"\n[llm.models.cursor]\nmedium = \"composer-2.5\"\n",
+        )
+        .unwrap();
+        let mut config = Config::load_from(&path).unwrap();
+        config.remove("llm.active").unwrap();
+        assert!(config.get("llm.active").is_none());
+        assert_eq!(
+            config
+                .get("llm.models.cursor.medium")
+                .and_then(Value::as_str),
+            Some("composer-2.5")
+        );
         let _ = std::fs::remove_file(path);
     }
 }

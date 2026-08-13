@@ -308,7 +308,7 @@ export default step.llm({
   description: "Translate product rows EN → FR",
   input: Input,
   output: Output,
-  model: "fast",
+  level: "low",
   batch: { size: 50, by: "rows" },
   prompt: ({ rows }) => `
 You are translating e-commerce product copy from English to French.
@@ -323,17 +323,16 @@ ${JSON.stringify(rows, null, 2)}
 
 Key fields:
 
-- **`model`** is **optional, and usually best omitted.** A workflow declares that it needs an LLM, not which vendor's LLM. The host resolves the actual model at run time from whatever it can reach — a subscription the user already pays for (Claude Code, Codex, Cursor, Gemini CLI) or an API key.
-
-  Three ways to declare it, in order of preference:
+- **`level`** is optional and defaults to `"medium"`. It expresses how much capability the runtime task needs, independently of provider:
 
   | You write | Meaning |
   |---|---|
-  | *(nothing)* | Serve at the host's default tier. The most portable — runs anywhere. |
-  | `model: "fast"` \| `"balanced"` \| `"deep"` | *How much* model this step needs. `fast` for classification/extraction/short rewrites, `balanced` for most work, `deep` for multi-constraint reasoning or long synthesis. |
-  | `model: "gpt-4o-mini"` | A **preference**, not a pin. Used when the host can reach that vendor; otherwise the step is served by another backend at the same tier, and the substitution is recorded in the run trace. |
+  | *(nothing)* | `medium` — the default for most work. |
+  | `level: "low"` | Classification, extraction, and short rewrites. |
+  | `level: "medium"` | Everyday workflow reasoning. |
+  | `level: "high"` | Multi-constraint reasoning or long synthesis. |
 
-  Prefer a tier over a vendor model name unless the step was genuinely tuned against a specific model. A tier keeps the workflow runnable on a machine that has a different subscription than yours.
+  Model and provider names are not valid workflow fields. The machine's one active provider maps the level to a model; Cori never falls back to another connected provider.
 
 - **`batch`** (optional) lets Cori batch the input list into chunks, parallelize the calls, and merge results. Use whenever the input is a list and items are independent.
 - **`prompt`** returns a string. The output schema is enforced — Cori parses the model response against `Output` and fails the step if it doesn't match.

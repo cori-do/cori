@@ -973,7 +973,6 @@ dependencies = [
  "cori-compiler",
  "cori-manifest",
  "cori-protocol",
- "cori-secrets",
  "cori-worker",
  "cron",
  "dirs",

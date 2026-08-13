@@ -20,7 +20,7 @@ export default step.llm({
   description: "Classify each support message by what the customer is describing",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   prompt: ({ messages }) =>
     `Classify each support message below on two independent axes.\n\ncategory: outage when a service is unavailable, failing, or degraded; access when someone cannot get into an account or resource they are entitled to; billing when the subject is an invoice, payment, refund, or charge; bug when the product behaves incorrectly but remains usable; how_to when the customer is asking how to accomplish something.\n\npriority: P0 when the impact described reaches many users, or any data is lost or information exposed; P1 when one person or one team is completely unable to work, or money has moved incorrectly; P2 otherwise.\n\nJudge from what the customer is describing, not from particular words. Do not infer either axis from the other. Messages may be in any language.\n\nReturn JSON only.\n\n${JSON.stringify(messages)}`,
 });

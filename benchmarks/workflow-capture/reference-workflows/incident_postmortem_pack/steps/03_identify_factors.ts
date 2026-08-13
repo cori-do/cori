@@ -20,7 +20,7 @@ export default step.llm({
   description: "Identify the contributing factors the team confirmed",
   input: Input,
   output: Output,
-  model: "gpt-4o-mini",
+  level: "low",
   prompt: ({ transcript_text }) =>
     `The transcript below is an incident response channel. Messages are interleaved and out of order, and the team raised several possible explanations during the response, ruling some of them out as they went.\n\nReturn only the causes the transcript shows were confirmed as contributing to the incident. For each, give the component name the transcript attributes it to as factor_id, a factual one-line summary, and the person shown confirming it.\n\nA hypothesis that the transcript later rules out is not a contributing factor. Do not return it.\n\nReturn JSON only.\n\n${transcript_text}`,
 });
