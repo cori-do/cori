@@ -238,66 +238,6 @@ impl PendingActivityReporter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
-
-    use temporalio_common::protos::temporal::api::{
-        enums::v1::PendingActivityState, workflow::v1::PendingActivityInfo,
-    };
-
-    use super::{ActivityProgressSink, PendingActivityReporter};
-
-    #[derive(Default)]
-    struct RecordingSink(Mutex<Vec<(String, String)>>);
-
-    impl ActivityProgressSink for RecordingSink {
-        fn on_activity_started(&self, activity_id: &str) {
-            self.0
-                .lock()
-                .expect("recording sink lock")
-                .push(("started".to_string(), activity_id.to_string()));
-        }
-
-        fn on_activity_completed(&self, activity_id: &str) {
-            self.0
-                .lock()
-                .expect("recording sink lock")
-                .push(("completed".to_string(), activity_id.to_string()));
-        }
-    }
-
-    #[test]
-    fn advances_the_linear_timeline_once_per_started_activity() {
-        let sink = std::sync::Arc::new(RecordingSink::default());
-        let mut reporter = PendingActivityReporter::new(sink.clone());
-        let first = PendingActivityInfo {
-            activity_id: "01_fetch_top_ids".to_string(),
-            state: PendingActivityState::Started as i32,
-            ..Default::default()
-        };
-        let second = PendingActivityInfo {
-            activity_id: "02_fetch_stories".to_string(),
-            state: PendingActivityState::Started as i32,
-            ..Default::default()
-        };
-
-        reporter.observe(&[first.clone()]);
-        reporter.observe(&[first]);
-        reporter.observe(&[second.clone()]);
-        reporter.observe(&[second]);
-
-        assert_eq!(
-            *sink.0.lock().expect("recording sink lock"),
-            vec![
-                ("started".to_string(), "01_fetch_top_ids".to_string()),
-                ("completed".to_string(), "01_fetch_top_ids".to_string()),
-                ("started".to_string(), "02_fetch_stories".to_string()),
-            ]
-        );
-    }
-}
-
 /// Run a long-lived worker on `rt.task_queue` until SIGINT.
 ///
 /// Used by `cori work`: registers the single workflow type + the four
@@ -362,4 +302,64 @@ where
 
     let (_, _) = tokio::join!(cancel_listener, worker_fut);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use temporalio_common::protos::temporal::api::{
+        enums::v1::PendingActivityState, workflow::v1::PendingActivityInfo,
+    };
+
+    use super::{ActivityProgressSink, PendingActivityReporter};
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<(String, String)>>);
+
+    impl ActivityProgressSink for RecordingSink {
+        fn on_activity_started(&self, activity_id: &str) {
+            self.0
+                .lock()
+                .expect("recording sink lock")
+                .push(("started".to_string(), activity_id.to_string()));
+        }
+
+        fn on_activity_completed(&self, activity_id: &str) {
+            self.0
+                .lock()
+                .expect("recording sink lock")
+                .push(("completed".to_string(), activity_id.to_string()));
+        }
+    }
+
+    #[test]
+    fn advances_the_linear_timeline_once_per_started_activity() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut reporter = PendingActivityReporter::new(sink.clone());
+        let first = PendingActivityInfo {
+            activity_id: "01_fetch_top_ids".to_string(),
+            state: PendingActivityState::Started as i32,
+            ..Default::default()
+        };
+        let second = PendingActivityInfo {
+            activity_id: "02_fetch_stories".to_string(),
+            state: PendingActivityState::Started as i32,
+            ..Default::default()
+        };
+
+        reporter.observe(std::slice::from_ref(&first));
+        reporter.observe(std::slice::from_ref(&first));
+        reporter.observe(std::slice::from_ref(&second));
+        reporter.observe(std::slice::from_ref(&second));
+
+        assert_eq!(
+            *sink.0.lock().expect("recording sink lock"),
+            vec![
+                ("started".to_string(), "01_fetch_top_ids".to_string()),
+                ("completed".to_string(), "01_fetch_top_ids".to_string()),
+                ("started".to_string(), "02_fetch_stories".to_string()),
+            ]
+        );
+    }
 }
