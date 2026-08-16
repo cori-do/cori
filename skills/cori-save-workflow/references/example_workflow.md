@@ -52,6 +52,15 @@ parameters:
     description: If true, write nothing back to the spreadsheet
 tools_required: [gws]
 tags: [translation, compliance, e-commerce]
+result:
+  headline: "French product sheet ready in {{ target_tab }}"
+  sections:
+    - label: GPSR check results
+      path: results
+      display: table
+  artifacts:
+    - label: Spreadsheet
+      url: "https://docs.google.com/spreadsheets/d/{{ spreadsheet_id }}/edit"
 ---
 
 # Translate Product Sheets to French with GPSR Check
@@ -140,7 +149,7 @@ export type GpsrCheck = z.infer<typeof GpsrCheck>;
 ```ts
 import { step } from "@cori-do/sdk";
 import { z } from "zod";
-import { SourceRow } from "../types";
+import { SourceRow } from "../types.ts";
 
 const Input = z.object({
   spreadsheet_id: z.string(),
@@ -185,7 +194,7 @@ export default step.cli({
 ```ts
 import { step } from "@cori-do/sdk";
 import { z } from "zod";
-import { SourceRow, TranslatedRow } from "../types";
+import { SourceRow, TranslatedRow } from "../types.ts";
 
 const Input = z.object({ rows: z.array(SourceRow) });
 const Output = z.object({ translations: z.array(TranslatedRow) });
@@ -211,7 +220,7 @@ ${JSON.stringify(rows, null, 2)}
 ```ts
 import { step } from "@cori-do/sdk";
 import { z } from "zod";
-import { TranslatedRow, GpsrCheck } from "../types";
+import { TranslatedRow, GpsrCheck } from "../types.ts";
 
 const Input = z.object({ translations: z.array(TranslatedRow) });
 const Output = z.object({ checks: z.array(GpsrCheck) });
@@ -270,7 +279,7 @@ export default step.cli({
 ```ts
 import { step } from "@cori-do/sdk";
 import { z } from "zod";
-import { TranslatedRow, GpsrCheck } from "../types";
+import { TranslatedRow, GpsrCheck } from "../types.ts";
 
 const Input = z.object({
   spreadsheet_id: z.string(),
