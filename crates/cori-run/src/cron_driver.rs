@@ -267,7 +267,12 @@ fn spawn_fire(entry: schedules::ScheduleEntry, fire_at: DateTime<Utc>) {
             };
             let req = RunRequest {
                 source,
-                params: JsonValue::Object(Default::default()),
+                // The input consented at schedule-create; workflows with
+                // no declared parameters fire with an empty object.
+                params: entry
+                    .input
+                    .clone()
+                    .unwrap_or_else(|| JsonValue::Object(Default::default())),
                 dry_run: false,
                 update: false,
                 trigger: Trigger::Schedule,
@@ -313,6 +318,7 @@ mod tests {
             resolved_sha: None,
             schedule: expr.to_string(),
             schedule_tz: None,
+            input: None,
             identity: "cori.user.x".into(),
             enabled: true,
             created_at: Utc::now(),
@@ -407,6 +413,7 @@ mod tests {
             let entry = schedules::new_entry(
                 "github.com/acme/flows@v1".into(),
                 "0 30 9 * * *".into(),
+                None,
                 None,
                 "cori.user.t".into(),
                 Some("oldsha0000".into()),

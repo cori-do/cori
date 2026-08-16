@@ -4,11 +4,20 @@ import {
   enableSchedule,
   isIpcError,
   listSchedules,
+  onScheduleFired,
+  resolveWorkflow,
   setScheduleEnabled,
   updateSchedule,
+  type ParameterDef,
   type ScheduleDto,
 } from "../lib/api";
 import { formatAbsolute, formatRelative } from "../lib/format";
+import {
+  isBlank,
+  missingRequired,
+  ParamField,
+  paramDefaults,
+} from "../components/param-fields";
 
 export function meta() {
   return [{ title: "Schedules — Cori" }];
@@ -48,6 +57,26 @@ export function ScheduleList({
   useEffect(() => {
     if (initialSchedules === undefined) void refresh();
   }, [initialSchedules, refresh]);
+
+  // "Next fire" is a countdown: re-render every second so it ticks, and
+  // refetch periodically (plus on every local fire) so a sub-minute cron
+  // doesn't drift into showing a fire time that has already passed.
+  const [, setNow] = useState(0);
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+  useEffect(() => {
+    const poll = setInterval(() => void refresh(), 15_000);
+    let unlisten: (() => void) | undefined;
+    void onScheduleFired(() => void refresh()).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      clearInterval(poll);
+      unlisten?.();
+    };
+  }, [refresh]);
 
   async function toggle(s: ScheduleDto) {
     setBusy(s.id);
@@ -151,6 +180,16 @@ export function ScheduleList({
                     {s.schedule_tz ? ` (${s.schedule_tz})` : " (UTC)"}
                   </span>
                 </dd>
+                {s.input && Object.keys(s.input).length > 0 && (
+                  <>
+                    <dt>Input</dt>
+                    <dd>
+                      <code style={{ fontSize: 12, wordBreak: "break-word" }}>
+                        {JSON.stringify(s.input)}
+                      </code>
+                    </dd>
+                  </>
+                )}
                 <dt>Owner</dt>
                 <dd>{s.identity}</dd>
                 <dt>Next fire</dt>
@@ -191,7 +230,7 @@ export function ScheduleList({
                     disabled={busy === s.id}
                     onClick={() => setEditing(s)}
                   >
-                    Edit timing
+                    Edit
                   </button>
                   <button
                     className="btn"
@@ -310,8 +349,20 @@ function describeCron(cron: string, tz?: string | null): string {
     case "monthly":
       return `Day ${t.dom} of each month at ${t.time}${zone}`;
     case "custom":
-      return `Custom cron${zone}`;
+      return describeIntervalCron(t.cron) ?? `Custom cron${zone}`;
   }
+}
+
+// Recognize hand-written step crons (every N seconds/minutes) that the
+// picker has no mode for, so cards still read as a sentence.
+function describeIntervalCron(cron: string): string | null {
+  const f = cron.trim().split(/\s+/);
+  if (f.length !== 6) return null;
+  const every = (field: string) => /^\*\/\d+$/.test(field);
+  const rest = (from: number) => f.slice(from).every((x) => x === "*");
+  if (every(f[0]) && rest(1)) return `Every ${f[0].slice(2)} seconds`;
+  if (f[0] === "0" && every(f[1]) && rest(2)) return `Every ${f[1].slice(2)} minutes`;
+  return null;
 }
 
 function titleDay(d: string): string {
@@ -493,6 +544,80 @@ function TimingFields({
   );
 }
 
+// ─── Schedule input (workflow parameters) ────────────────────────────────
+//
+// A schedule fires unattended, so the workflow's input is captured when
+// the schedule is created/edited — the same parameter form the launcher
+// shows before a manual run. Without this, any workflow with required
+// parameters would fail schema validation on every single fire.
+
+interface LoadedParams {
+  /** Which source these parameters belong to. */
+  source: string;
+  params: ParameterDef[] | null;
+  error: string | null;
+}
+
+function ParamsSection({
+  loaded,
+  loading,
+  values,
+  onValues,
+}: {
+  loaded: LoadedParams | null;
+  loading: boolean;
+  values: Record<string, unknown>;
+  onValues: (v: Record<string, unknown>) => void;
+}) {
+  if (loading) {
+    return <p className="hint">Loading workflow parameters…</p>;
+  }
+  if (!loaded) return null;
+  if (loaded.error) {
+    return (
+      <p className="hint" style={{ color: "var(--amber)" }}>
+        Couldn't load workflow parameters: {loaded.error}
+      </p>
+    );
+  }
+  if (!loaded.params || loaded.params.length === 0) return null;
+
+  const missing = missingRequired(loaded.params, values);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label className="label" style={labelStyle}>
+        Input — used for every scheduled run
+      </label>
+      {loaded.params.map((p) => (
+        <ParamField
+          key={p.name}
+          param={p}
+          value={values[p.name]}
+          onChange={(v) => onValues({ ...values, [p.name]: v })}
+        />
+      ))}
+      {missing.length > 0 && (
+        <p className="hint" style={{ color: "var(--amber)", marginBottom: 0 }}>
+          Required: {missing.join(", ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Collapse the form's values into the input object sent to the backend. */
+function buildInput(
+  params: ParameterDef[] | null,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  for (const p of params ?? []) {
+    const v = values[p.name];
+    if (!isBlank(v)) input[p.name] = v;
+  }
+  return input;
+}
+
 function CreateModal({
   onClose,
   onCreated,
@@ -506,16 +631,43 @@ function CreateModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [loaded, setLoaded] = useState<LoadedParams | null>(null);
+  const [loadingParams, setLoadingParams] = useState(false);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+
+  // Resolve the workflow when the source field settles (blur), so the
+  // parameter form appears before the user hits Register.
+  async function loadParams() {
+    const src = source.trim();
+    if (!src || src === loaded?.source) return;
+    setLoadingParams(true);
+    try {
+      const pf = await resolveWorkflow({ source: src });
+      setLoaded({ source: src, params: pf.manifest.parameters, error: null });
+      setValues(paramDefaults(pf.manifest.parameters));
+    } catch (e: unknown) {
+      setLoaded({ source: src, params: null, error: formatErr(e) });
+      setValues({});
+    } finally {
+      setLoadingParams(false);
+    }
+  }
+
+  const missing =
+    loaded?.params != null ? missingRequired(loaded.params, values) : [];
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!source.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
+      const input = buildInput(loaded?.params ?? null, values);
       await enableSchedule({
         source,
         schedule: timingToCron(timing),
         schedule_tz: tz.trim() || undefined,
+        input: Object.keys(input).length > 0 ? input : undefined,
       });
       onCreated();
     } catch (e: unknown) {
@@ -540,9 +692,17 @@ function CreateModal({
               required
               value={source}
               onChange={(e) => setSource(e.target.value)}
+              onBlur={() => void loadParams()}
               style={{ ...inputStyle, width: "100%" }}
             />
           </div>
+
+          <ParamsSection
+            loaded={loaded}
+            loading={loadingParams}
+            values={values}
+            onValues={setValues}
+          />
 
           <TimingFields timing={timing} onTiming={setTiming} tz={tz} onTz={setTz} />
 
@@ -553,7 +713,11 @@ function CreateModal({
             <button type="button" className="btn" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="submit" className="btn primary" disabled={submitting || !source.trim()}>
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={submitting || !source.trim() || missing.length > 0}
+            >
               {submitting ? "Registering…" : "Register"}
             </button>
           </div>
@@ -577,6 +741,35 @@ function EditModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [loaded, setLoaded] = useState<LoadedParams | null>(null);
+  const [loadingParams, setLoadingParams] = useState(true);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const pf = await resolveWorkflow({ source: s.source });
+        if (cancelled) return;
+        setLoaded({ source: s.source, params: pf.manifest.parameters, error: null });
+        setValues({ ...paramDefaults(pf.manifest.parameters), ...(s.input ?? {}) });
+      } catch (e: unknown) {
+        if (cancelled) return;
+        // Source unresolvable right now (e.g. offline for a remote ref):
+        // timing stays editable and the stored input is left untouched.
+        setLoaded({ source: s.source, params: null, error: formatErr(e) });
+      } finally {
+        if (!cancelled) setLoadingParams(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [s.source, s.input]);
+
+  const missing =
+    loaded?.params != null ? missingRequired(loaded.params, values) : [];
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
@@ -586,6 +779,9 @@ function EditModal({
         id: s.id,
         schedule: timingToCron(timing),
         schedule_tz: tz.trim() || undefined,
+        // Only replace the stored input when the parameter form actually
+        // loaded; omitting the field keeps whatever the schedule had.
+        input: loaded?.params != null ? buildInput(loaded.params, values) : undefined,
       });
       onSaved();
     } catch (e: unknown) {
@@ -598,9 +794,15 @@ function EditModal({
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h2>Edit timing</h2>
+        <h2>Edit schedule</h2>
         <p className="hint" style={{ fontFamily: "var(--font-mono)" }}>{s.source}</p>
         <form onSubmit={submit}>
+          <ParamsSection
+            loaded={loaded}
+            loading={loadingParams}
+            values={values}
+            onValues={setValues}
+          />
           <TimingFields timing={timing} onTiming={setTiming} tz={tz} onTz={setTz} />
           {error && (
             <p className="hint" style={{ color: "var(--red)" }}>{error}</p>
@@ -609,7 +811,11 @@ function EditModal({
             <button type="button" className="btn" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="submit" className="btn primary" disabled={submitting}>
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={submitting || missing.length > 0}
+            >
               {submitting ? "Saving…" : "Save"}
             </button>
           </div>
