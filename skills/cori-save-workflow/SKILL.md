@@ -265,7 +265,7 @@ with the same literal array.
 
 Notes:
 
-- **Mirror the runtime's resolution.** The runner runs `code` steps with an import map of exactly `@cori-do/sdk` + `zod` and network limited to `registry.npmjs.org,esm.sh,jsr.io`. The `test` task uses the same allow-net allowlist, so a `code` step that legitimately imports an `npm:`/`jsr:`/`esm.sh` package (see `references/activity_kinds.md`) resolves in tests just as it will at runtime — and a *bad* bare import fails the test with the same error the runtime would raise. That parity is the whole point of testing with Deno.
+- **Mirror the runtime's resolution.** The runner runs `code` steps with an import map of exactly `@cori-do/sdk` + `zod` and network limited to `registry.npmjs.org,esm.sh,jsr.io`. The `test` task uses the same allow-net allowlist, so imports resolve in tests just as they will at runtime — and a *bad* import fails the test with the same error the runtime would raise. That parity is the whole point of testing with Deno. Remember the frozen-graph rule from `references/activity_kinds.md`: workflow modules (tests included) may import only relative in-folder files, `@cori-do/sdk`, and `zod` — no `npm:`/`jsr:`/`esm.sh` specifiers.
 - **`--no-check`** skips type-checking at test time (the SDK types `run`'s return loosely, so a strict check trips on `result.foo`). The test still executes the real `run` logic. This matches how a JS test runner behaves.
 - **Pin versions to current.** Check with `npm view @cori-do/sdk version`. `zod` must satisfy the SDK's peer range (`^4.x` at time of writing); a mismatched major (e.g. `zod@3`) is a silent break.
 - **Test files** import the step with an explicit `.ts` extension (`import step from "../steps/03_x.ts"`) and import fixtures with `import data from "./fixtures/x.json" with { type: "json" }`. **Assert with a zero-dependency helper you emit at `tests/assert.ts`** — not `jsr:@std/assert` by default: `jsr.io` is blocked in many authoring sandboxes (`403 host_not_allowed`), and a test that dies on an *import* proves nothing about the step. Template:
@@ -281,7 +281,7 @@ Notes:
   }
   ```
 
-  `jsr:@std/assert` remains a fine *upgrade* when the environment can reach `jsr.io` — treat it as optional, never as the thing `deno task test` depends on to even start. See `references/example_workflow.md` for a full test.
+  Do **not** import `jsr:@std/assert` (or any other registry package) in test files: `cori check` sweeps every `.ts` file in the workflow folder — tests included — and rejects all non-relative specifiers except `@cori-do/sdk` and `zod`. The local `tests/assert.ts` helper is the supported pattern. Also import in-folder modules with an explicit `.ts` extension everywhere (`../types.ts`, not `../types`) so `deno task test` resolves them the same way the runtime does. See `references/example_workflow.md` for a full test.
 - **Deno is assumed present** (Cori can't run without it). If `deno --version` fails, surface `curl -fsSL https://deno.land/install.sh | sh` — but if Cori is installed at all, Deno already is.
 
 ### Step 6: Write the manifest
@@ -414,7 +414,7 @@ One offer per conversation, max. Don't nag.
 
 After the fix, loop: edit → re-check → (if running) re-run, until green.
 
-**`deno test` reports `Import "<pkg>" not a dependency and not in import map`.** A step or test imports a bare package name that isn't `@cori-do/sdk` or `zod`. This is the runtime telling you the step would *also* fail under `cori run` — Deno tests resolve exactly like the runtime. Fix the import: use `@cori-do/sdk`/`zod`, a no-import global, or (if a third-party library is genuinely needed) an explicit `npm:<pkg>@<ver>` / `jsr:` / `https://esm.sh/` specifier. Do not "fix" it by adding a `package.json` — that only hides the failure until runtime. If `@cori-do/sdk` itself isn't resolving, the workflow is missing its `deno.json` (Step 5) or has no network to `registry.npmjs.org`.
+**`deno test` reports `Import "<pkg>" not a dependency and not in import map`.** A step or test imports a bare package name that isn't `@cori-do/sdk` or `zod`. This is the runtime telling you the step would *also* fail under `cori run` — Deno tests resolve exactly like the runtime. Fix the import: use `@cori-do/sdk`/`zod`, a no-import global, or move the library-dependent work into a `cli` step — `cori check` rejects `npm:`/`jsr:`/`https:` specifiers in workflow modules, so a registry import is not a fix. Do not "fix" it by adding a `package.json` either — that only hides the failure until runtime. If `@cori-do/sdk` itself isn't resolving, the workflow is missing its `deno.json` (Step 5) or has no network to `registry.npmjs.org`.
 
 **`deno test` fails with a type error (`TS…`).** Run via `deno task test` (the template task passes `--no-check`). The SDK types a step's `run` return loosely, so strict type-checking trips on field access in assertions; `--no-check` runs the real logic without type-gating, matching how a JS test runner behaves.
 
