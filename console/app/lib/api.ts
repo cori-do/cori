@@ -340,6 +340,8 @@ export interface ScheduleEntry {
   resolved_sha?: string | null;
   schedule: string;
   schedule_tz?: string | null;
+  /** Workflow input passed as run params on every fire. */
+  input?: Record<string, unknown> | null;
   identity: string;
   enabled: boolean;
   created_at: string;
@@ -632,6 +634,7 @@ export const enableSchedule = (args: {
   source: string;
   schedule?: string;
   schedule_tz?: string;
+  input?: Record<string, unknown>;
 }) => call<ScheduleResponse>("enable_schedule", args);
 
 export const setScheduleEnabled = (args: { id: string; enabled: boolean }) =>
@@ -641,6 +644,8 @@ export const updateSchedule = (args: {
   id: string;
   schedule: string;
   schedule_tz?: string;
+  /** Omit to keep the stored input; pass `{}` to clear it. */
+  input?: Record<string, unknown>;
 }) => call<ScheduleResponse>("update_schedule", args);
 
 export const deleteSchedule = (args: { id: string }) =>

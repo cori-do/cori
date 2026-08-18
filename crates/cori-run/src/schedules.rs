@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::paths;
@@ -38,6 +39,10 @@ pub struct ScheduleEntry {
     /// IANA timezone for the cron expression. `None` means UTC.
     #[serde(default)]
     pub schedule_tz: Option<String>,
+    /// Workflow input passed as run params on every fire. `None` means
+    /// the workflow takes no input (fires with an empty object).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<JsonValue>,
     /// Task queue this schedule fires on — defines ownership.
     pub identity: String,
     /// Whether the cron driver should fire this entry.
@@ -62,12 +67,18 @@ pub struct ScheduleEntry {
     pub paused_reason: Option<String>,
 }
 
-/// Derive the stable id used for the on-disk filename.
-pub fn schedule_id(source: &str, schedule: &str) -> String {
+/// Derive the stable id used for the on-disk filename. The input is
+/// part of the identity: the same workflow on the same cron with
+/// different inputs is two distinct schedules, not an overwrite.
+pub fn schedule_id(source: &str, schedule: &str, input: Option<&JsonValue>) -> String {
     let mut h = Sha256::new();
     h.update(source.as_bytes());
     h.update(b"\n");
     h.update(schedule.as_bytes());
+    if let Some(input) = input {
+        h.update(b"\n");
+        h.update(input.to_string().as_bytes());
+    }
     let digest = h.finalize();
     hex::encode(&digest[..6])
 }
@@ -174,6 +185,7 @@ pub fn new_entry(
     source: String,
     schedule: String,
     schedule_tz: Option<String>,
+    input: Option<JsonValue>,
     identity: String,
     resolved_sha: Option<String>,
 ) -> Result<ScheduleEntry> {
@@ -183,13 +195,14 @@ pub fn new_entry(
     {
         bail!("invalid IANA timezone `{tz}`");
     }
-    let id = schedule_id(&source, &schedule);
+    let id = schedule_id(&source, &schedule, input.as_ref());
     Ok(ScheduleEntry {
         id,
         source,
         resolved_sha,
         schedule,
         schedule_tz,
+        input,
         identity,
         enabled: true,
         created_at: Utc::now(),
@@ -211,15 +224,19 @@ pub fn pause(id: &str, reason: &str) -> Result<ScheduleEntry> {
     Ok(entry)
 }
 
-/// Edit a schedule's timing in place. The id stays stable — it is a
-/// content hash only at creation time; every later lookup goes by
-/// filename, so mutating `schedule`/`schedule_tz` under the same id is
-/// the "edit" the UI exposes (previously edit = delete + recreate,
-/// which silently dropped fire history and the consent pin).
+/// Edit a schedule's timing (and optionally its input) in place. The id
+/// stays stable — it is a content hash only at creation time; every
+/// later lookup goes by filename, so mutating under the same id is the
+/// "edit" the UI exposes (previously edit = delete + recreate, which
+/// silently dropped fire history and the consent pin).
+///
+/// `input`: `Some(new)` replaces the stored input; `None` keeps the
+/// existing one (the caller couldn't load the parameter form).
 pub fn update_timing(
     id: &str,
     schedule: String,
     schedule_tz: Option<String>,
+    input: Option<Option<JsonValue>>,
 ) -> Result<ScheduleEntry> {
     validate_cron(&schedule)?;
     if let Some(tz) = schedule_tz.as_deref()
@@ -230,6 +247,9 @@ pub fn update_timing(
     let mut entry = load(id)?.ok_or_else(|| anyhow::anyhow!("no schedule `{id}`"))?;
     entry.schedule = schedule;
     entry.schedule_tz = schedule_tz;
+    if let Some(new_input) = input {
+        entry.input = new_input;
+    }
     save(&entry)?;
     Ok(entry)
 }
@@ -309,14 +329,18 @@ mod tests {
     use crate::test_env::with_temp_home;
 
     #[test]
-    fn id_is_stable_per_source_and_schedule() {
-        let a = schedule_id("./x", "0 9 * * *");
-        let b = schedule_id("./x", "0 9 * * *");
-        let c = schedule_id("./x", "0 10 * * *");
-        let d = schedule_id("./y", "0 9 * * *");
+    fn id_is_stable_per_source_schedule_and_input() {
+        let a = schedule_id("./x", "0 9 * * *", None);
+        let b = schedule_id("./x", "0 9 * * *", None);
+        let c = schedule_id("./x", "0 10 * * *", None);
+        let d = schedule_id("./y", "0 9 * * *", None);
+        let e = schedule_id("./x", "0 9 * * *", Some(&serde_json::json!({"x": 1})));
+        let f = schedule_id("./x", "0 9 * * *", Some(&serde_json::json!({"x": 2})));
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
+        assert_ne!(a, e);
+        assert_ne!(e, f);
         assert_eq!(a.len(), 12);
     }
 
@@ -326,6 +350,7 @@ mod tests {
             let r = new_entry(
                 "./x".into(),
                 "not a cron".into(),
+                None,
                 None,
                 "cori.user.t".into(),
                 None,
@@ -341,6 +366,7 @@ mod tests {
                 "./x".into(),
                 "0 9 * * * *".into(),
                 Some("Mars/Olympus".into()),
+                None,
                 "cori.user.t".into(),
                 None,
             );
@@ -355,6 +381,7 @@ mod tests {
                 "./alice".into(),
                 "0 9 * * * *".into(),
                 None,
+                Some(serde_json::json!({"x": 42})),
                 "cori.user.alice".into(),
                 None,
             )
@@ -362,6 +389,7 @@ mod tests {
             let bob = new_entry(
                 "./bob".into(),
                 "0 10 * * * *".into(),
+                None,
                 None,
                 "cori.user.bob".into(),
                 None,
@@ -376,6 +404,7 @@ mod tests {
             let just_alice = for_identity("cori.user.alice").unwrap();
             assert_eq!(just_alice.len(), 1);
             assert_eq!(just_alice[0].source, "./alice");
+            assert_eq!(just_alice[0].input, Some(serde_json::json!({"x": 42})));
 
             let toggled = set_enabled(&alice.id, false).unwrap();
             assert!(!toggled.enabled);

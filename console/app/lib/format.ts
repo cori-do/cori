@@ -13,10 +13,18 @@ export function formatRelative(iso: string): string {
   const t = new Date(iso).getTime();
   const now = Date.now();
   const diff = (now - t) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  // Future timestamps (e.g. a schedule's next fire) read "in 4s", never
+  // the nonsensical "-4s ago".
+  const abs = Math.max(0, Math.floor(Math.abs(diff)));
+  const span =
+    abs < 60
+      ? `${abs}s`
+      : abs < 3600
+        ? `${Math.floor(abs / 60)}m`
+        : abs < 86400
+          ? `${Math.floor(abs / 3600)}h`
+          : `${Math.floor(abs / 86400)}d`;
+  return diff < 0 ? `in ${span}` : `${span} ago`;
 }
 
 export function formatAbsolute(iso: string): string {

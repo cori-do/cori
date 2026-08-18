@@ -86,6 +86,7 @@ pub async fn enable_schedule(
     source: String,
     schedule: Option<String>,
     schedule_tz: Option<String>,
+    input: Option<Value>,
 ) -> IpcResult<Value> {
     tokio::task::spawn_blocking(move || -> Result<Value, IpcError> {
         let me = OsUser.resolve().map_err(|e| IpcError::Internal(e.into()))?;
@@ -93,6 +94,35 @@ pub async fn enable_schedule(
 
         let pre =
             preflight(&source, false, false).map_err(|e| IpcError::BadRequest(format!("{e:#}")))?;
+
+        // A schedule fires unattended — an input that fails the workflow's
+        // schema would fail on *every* fire. Reject the gap at create,
+        // where a human is present to fill it.
+        let input = normalize_input(input)?;
+        let missing: Vec<&str> = pre
+            .loaded
+            .compiled
+            .manifest
+            .parameters
+            .iter()
+            .filter(|p| p.required && p.default.is_none())
+            .filter(|p| {
+                input
+                    .as_ref()
+                    .and_then(|v| v.get(&p.name))
+                    .is_none_or(Value::is_null)
+            })
+            .map(|p| p.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(IpcError::BadRequest(format!(
+                "this workflow requires input value{} for `{}` — scheduled fires \
+                 would fail schema validation without {}",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join("`, `"),
+                if missing.len() == 1 { "it" } else { "them" },
+            )));
+        }
 
         // Q5: consent-at-create is mandatory. An untrusted remote ref
         // surfaces the trust dialog instead of silently becoming an
@@ -115,7 +145,7 @@ pub async fn enable_schedule(
             IpcError::BadRequest("no `schedule` field in manifest and none provided".into())
         })?;
         let tz = schedule_tz.or(manifest_tz);
-        let entry = schedules::new_entry(source, cron, tz, identity_queue, resolved_sha)
+        let entry = schedules::new_entry(source, cron, tz, input, identity_queue, resolved_sha)
             .map_err(|e| IpcError::BadRequest(format!("{e:#}")))?;
         schedules::save(&entry).map_err(IpcError::Internal)?;
         Ok(json!({
@@ -158,14 +188,34 @@ pub async fn set_schedule_enabled(id: String, enabled: bool) -> IpcResult<Value>
     .map_err(|e| IpcError::BadRequest(format!("{e:#}")))
 }
 
-// ---------- update_schedule (edit timing in place) ----------
+/// Reject non-object inputs and fold an empty object into `None`, so
+/// parameterless workflows don't store a useless `"input": {}`.
+fn normalize_input(input: Option<Value>) -> Result<Option<Value>, IpcError> {
+    match input {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(map)) if map.is_empty() => Ok(None),
+        Some(v @ Value::Object(_)) => Ok(Some(v)),
+        Some(_) => Err(IpcError::BadRequest(
+            "schedule input must be a JSON object of parameter values".into(),
+        )),
+    }
+}
+
+// ---------- update_schedule (edit timing/input in place) ----------
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn update_schedule(
     id: String,
     schedule: String,
     schedule_tz: Option<String>,
+    input: Option<Value>,
 ) -> IpcResult<Value> {
+    // Absent = keep the stored input (the caller couldn't load the
+    // parameter form); present = replace it (`{}`/null clears).
+    let input_update = match input {
+        None => None,
+        some => Some(normalize_input(some)?),
+    };
     tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let me = OsUser.resolve()?;
         let my_queue = task_queue_for(&me);
@@ -180,7 +230,7 @@ pub async fn update_schedule(
             );
         }
         let tz = schedule_tz.filter(|t| !t.trim().is_empty());
-        let updated = schedules::update_timing(&id, schedule, tz)?;
+        let updated = schedules::update_timing(&id, schedule, tz, input_update)?;
         Ok(json!({
             "id": updated.id,
             "entry": updated,
