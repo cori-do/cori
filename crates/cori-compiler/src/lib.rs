@@ -24,6 +24,7 @@
 //! executable-workflow gap by running the already-required Deno checker during
 //! preflight, before any activity starts.
 
+pub mod effects;
 mod step_parser;
 
 use std::io::Read;
@@ -413,7 +414,20 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
         return Err(errors);
     }
 
-    // 4. Cross-validation.
+    // 4. Routing: resolve `goto("name")` targets to activity ids and
+    //    reject unknown / ambiguous / backward routes and unreachable
+    //    steps. Runs before capability cross-validation so later checks
+    //    see fully resolved metadata.
+    let route_errors = resolve_goto_targets(&mut compiled_steps);
+    if !route_errors.is_empty() {
+        return Err(route_errors);
+    }
+    let reach_errors = validate_reachability(&compiled_steps);
+    if !reach_errors.is_empty() {
+        return Err(reach_errors);
+    }
+
+    // 5. Cross-validation.
     let mut required_cli: Vec<String> = Vec::new();
     let mut required_mcp: Vec<String> = Vec::new();
     let required_llm: Vec<String> = Vec::new();
@@ -481,7 +495,80 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
                 // steps carry only their portable low/medium/high level.
                 requires_llm = true;
             }
-            _ => {}
+            StepKind::Builtin => {
+                // A builtin's nested steps carry the same capability
+                // boundary as top-level steps. Validate each slot so a
+                // branch case cannot smuggle an undeclared binary or
+                // server past preflight and the planner.
+                if let Some(violations) =
+                    step.metadata.get("node_imports").and_then(|v| v.as_array())
+                {
+                    for v in violations {
+                        if let Some(s) = v.as_str() {
+                            errors.push(
+                                CompileError::new(
+                                    &rel,
+                                    format!(
+                                        "builtin step files must not import `{s}` — nested steps run in the same sandbox as `code` steps"
+                                    ),
+                                )
+                                .with_field("imports"),
+                            );
+                        }
+                    }
+                }
+                let nested = step
+                    .metadata
+                    .get("nested")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                for (slot, meta) in &nested {
+                    let Some(meta) = meta.as_object() else {
+                        continue;
+                    };
+                    match meta.get("kind").and_then(|v| v.as_str()) {
+                        Some("cli") => {
+                            if let Some(bin) = meta.get("binary").and_then(|v| v.as_str()) {
+                                if !manifest.tools_required.iter().any(|t| t == bin) {
+                                    errors.push(
+                                        CompileError::new(
+                                            &rel,
+                                            format!(
+                                                "CLI binary `{bin}` (in `{slot}`) not declared in manifest `tools_required`"
+                                            ),
+                                        )
+                                        .with_field(slot),
+                                    );
+                                }
+                                if !required_cli.contains(&bin.to_string()) {
+                                    required_cli.push(bin.to_string());
+                                }
+                            }
+                        }
+                        Some("mcp_tool") => {
+                            if let Some(server) = meta.get("server").and_then(|v| v.as_str()) {
+                                if !manifest.mcp_servers.iter().any(|s| s == server) {
+                                    errors.push(
+                                        CompileError::new(
+                                            &rel,
+                                            format!(
+                                                "MCP server `{server}` (in `{slot}`) not declared in manifest `mcp_servers`"
+                                            ),
+                                        )
+                                        .with_field(slot),
+                                    );
+                                }
+                                if !required_mcp.contains(&server.to_string()) {
+                                    required_mcp.push(server.to_string());
+                                }
+                            }
+                        }
+                        Some("llm") => requires_llm = true,
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -534,6 +621,186 @@ pub fn compile(workflow_dir: &Path) -> Result<CompiledWorkflow, Vec<CompileError
 /// Return the full SHA-256 digest used to freeze one compiled step source.
 pub fn source_sha256(source: &[u8]) -> String {
     hex::encode(Sha256::digest(source))
+}
+
+// ---------------------------------------------------------------------------
+// Step routing (`goto`) — see docs/step-routing-design.md
+// ---------------------------------------------------------------------------
+
+/// The routing surface of one step: whether execution can fall through
+/// to the next step, and the resolved jump targets (`None` = `end`).
+fn step_routing(step: &CompiledStep) -> (bool, Vec<Option<String>>) {
+    if step.kind != StepKind::Builtin {
+        return (true, Vec::new());
+    }
+    let sub_kind = step.metadata.get("builtin").and_then(|v| v.as_str());
+    if !matches!(sub_kind, Some("branch") | Some("switch")) {
+        return (true, Vec::new());
+    }
+    let nested = step
+        .metadata
+        .get("nested")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut fall_through = false;
+    let mut targets = Vec::new();
+    for meta in nested.values() {
+        match meta.as_object().and_then(|m| m.get("goto")) {
+            Some(serde_json::Value::String(target)) if target == "end" => targets.push(None),
+            Some(serde_json::Value::String(target)) => targets.push(Some(target.clone())),
+            _ => fall_through = true,
+        }
+    }
+    // A branch without an `else` has an implicit "false → continue"
+    // path; a switch always takes one of its declared paths.
+    if sub_kind == Some("branch") && !nested.contains_key("else") {
+        fall_through = true;
+    }
+    (fall_through, targets)
+}
+
+/// Resolve every `goto("name")` route to its target's activity id and
+/// enforce the routing rules: the target name exists, names exactly one
+/// step, lies strictly after the routing step (backward routing is what
+/// `loop` is for), and `end` is not shadowed by a step named `end`.
+/// Resolved slots gain `"goto": "<activity_id>"` (or `"end"`) next to
+/// their original `goto_name`.
+fn resolve_goto_targets(steps: &mut [CompiledStep]) -> Vec<CompileError> {
+    let mut errors = Vec::new();
+    let index: Vec<(String, String)> = steps
+        .iter()
+        .map(|s| (s.name.clone(), s.activity_id.clone()))
+        .collect();
+
+    for (i, step) in steps.iter_mut().enumerate() {
+        let rel = step.source_path.clone();
+        let Some(nested) = step
+            .metadata
+            .get_mut("nested")
+            .and_then(|v| v.as_object_mut())
+        else {
+            continue;
+        };
+        for (slot, meta) in nested.iter_mut() {
+            let Some(meta) = meta.as_object_mut() else {
+                continue;
+            };
+            let Some(target_name) = meta
+                .get("goto_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if target_name == "end" {
+                if index.iter().any(|(name, _)| name == "end") {
+                    errors.push(
+                        CompileError::new(
+                            &rel,
+                            format!(
+                                "`{slot}` routes to `end`, but a step named `end` exists — `end` is the reserved finish-the-run target; rename the step"
+                            ),
+                        )
+                        .with_field(slot),
+                    );
+                    continue;
+                }
+                meta.insert("goto".into(), serde_json::Value::String("end".into()));
+                continue;
+            }
+            let matches: Vec<usize> = index
+                .iter()
+                .enumerate()
+                .filter(|(_, (name, _))| *name == target_name)
+                .map(|(j, _)| j)
+                .collect();
+            match matches.as_slice() {
+                [] => errors.push(
+                    CompileError::new(
+                        &rel,
+                        format!(
+                            "`{slot}` routes to unknown step `{target_name}` — targets are step names (the part of `NN_name.ts` after the number) or `end`"
+                        ),
+                    )
+                    .with_field(slot),
+                ),
+                [j] => {
+                    if *j <= i {
+                        errors.push(
+                            CompileError::new(
+                                &rel,
+                                format!(
+                                    "`{slot}` routes backward to `{target_name}` — goto targets must come after this step (repeat work with a `loop` step instead)"
+                                ),
+                            )
+                            .with_field(slot),
+                        );
+                    } else {
+                        meta.insert(
+                            "goto".into(),
+                            serde_json::Value::String(index[*j].1.clone()),
+                        );
+                    }
+                }
+                _ => errors.push(
+                    CompileError::new(
+                        &rel,
+                        format!(
+                            "`{slot}` routes to `{target_name}`, which names {} steps — step names must be unique to be routing targets",
+                            matches.len()
+                        ),
+                    )
+                    .with_field(slot),
+                ),
+            }
+        }
+    }
+    errors
+}
+
+/// Reject steps no route can reach. Walk from step 0: every step whose
+/// routing allows fall-through has an edge to the next step, and every
+/// resolved goto adds an edge to its target. Dead steps are dead code,
+/// and Cori rejects dead declarations everywhere else.
+fn validate_reachability(steps: &[CompiledStep]) -> Vec<CompileError> {
+    let n = steps.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let id_to_index: std::collections::HashMap<&str, usize> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.activity_id.as_str(), i))
+        .collect();
+    let mut reachable = vec![false; n];
+    let mut stack = vec![0usize];
+    while let Some(i) = stack.pop() {
+        if i >= n || reachable[i] {
+            continue;
+        }
+        reachable[i] = true;
+        let (fall_through, targets) = step_routing(&steps[i]);
+        if fall_through {
+            stack.push(i + 1);
+        }
+        for target in targets.into_iter().flatten() {
+            if let Some(&j) = id_to_index.get(target.as_str()) {
+                stack.push(j);
+            }
+        }
+    }
+    steps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !reachable[*i])
+        .map(|(_, step)| {
+            CompileError::new(
+                &step.source_path,
+                "unreachable step — every route through the preceding control flow jumps past it; remove the step or add a path that reaches it",
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +995,250 @@ mod tests {
         );
         let c = compile(tmp.path()).expect("compiles");
         assert!(!c.requires_llm);
+    }
+
+    const CODE_STEP: &str = "import { step } from \"@cori-do/sdk\";\nexport default step.code({ description: \"x\", run: (x) => x });\n";
+
+    fn goto_branch(then_target: &str, else_target: Option<&str>) -> String {
+        let else_line = else_target
+            .map(|t| format!("  else: goto(\"{t}\"),\n"))
+            .unwrap_or_default();
+        format!(
+            "import {{ step, goto }} from \"@cori-do/sdk\";\nexport default step.branch({{\n  description: \"route\",\n  if: (input) => true,\n  then: goto(\"{then_target}\"),\n{else_line}}});\n"
+        )
+    }
+
+    #[test]
+    fn goto_resolves_to_the_named_step() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("finish", None)),
+                ("02_middle.ts", CODE_STEP),
+                ("03_finish.ts", CODE_STEP),
+            ],
+        );
+        let compiled = compile(tmp.path()).expect("goto workflow compiles");
+        let nested = compiled.steps[0].metadata.get("nested").unwrap();
+        assert_eq!(nested["then"]["goto"], "03_finish");
+        assert_eq!(nested["then"]["goto_name"], "finish");
+    }
+
+    #[test]
+    fn goto_end_finishes_the_run_unless_shadowed() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("end", None)),
+                ("02_x.ts", CODE_STEP),
+            ],
+        );
+        let compiled = compile(tmp.path()).expect("goto end compiles");
+        assert_eq!(
+            compiled.steps[0].metadata.get("nested").unwrap()["then"]["goto"],
+            "end"
+        );
+
+        let shadowed = tempdir();
+        make_workflow(
+            shadowed.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("end", None)),
+                ("02_end.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(shadowed.path()).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("reserved")));
+    }
+
+    #[test]
+    fn goto_rejects_unknown_backward_and_ambiguous_targets() {
+        let unknown = tempdir();
+        make_workflow(
+            unknown.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("nowhere", None)),
+                ("02_x.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(unknown.path()).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.reason.contains("unknown step `nowhere`"))
+        );
+
+        let backward = tempdir();
+        make_workflow(
+            backward.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_early.ts", CODE_STEP),
+                ("02_route.ts", &goto_branch("early", None)),
+                ("03_x.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(backward.path()).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("routes backward")));
+
+        let ambiguous = tempdir();
+        make_workflow(
+            ambiguous.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("x", None)),
+                ("02_x.ts", CODE_STEP),
+                ("03_x.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(ambiguous.path()).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("names 2 steps")));
+    }
+
+    #[test]
+    fn goto_rejects_unreachable_steps() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("finish", Some("finish"))),
+                ("02_dead.ts", CODE_STEP),
+                ("03_finish.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| { e.file == "steps/02_dead.ts" && e.reason.contains("unreachable") })
+        );
+
+        // The implicit "false, no else" path keeps the next step live.
+        let live = tempdir();
+        make_workflow(
+            live.path(),
+            LLM_MANIFEST,
+            &[
+                ("01_route.ts", &goto_branch("finish", None)),
+                ("02_alive.ts", CODE_STEP),
+                ("03_finish.ts", CODE_STEP),
+            ],
+        );
+        compile(live.path()).expect("fall-through path keeps steps reachable");
+    }
+
+    #[test]
+    fn goto_is_rejected_in_loop_bodies() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[
+                (
+                    "01_loop.ts",
+                    "import { step, goto } from \"@cori-do/sdk\";\nexport default step.loop({ description: \"l\", body: goto(\"finish\"), until: (x) => true });\n",
+                ),
+                ("02_finish.ts", CODE_STEP),
+            ],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("cannot be a `goto")));
+    }
+
+    #[test]
+    fn builtin_nested_capabilities_must_be_declared() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST, // declares no tools, no servers
+            &[(
+                "01_route.ts",
+                r#"import { step } from "@cori-do/sdk";
+export default step.switch({
+  description: "route",
+  on: ({ kind }) => kind,
+  cases: {
+    push: step.cli({ description: "push", command: () => ["gh", "pr", "create"] }),
+    post: step.mcp_tool({ description: "post", server: "slack", tool: "post_message", args: () => ({}) }),
+  },
+});"#,
+            )],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.reason.contains("gh") && e.reason.contains("tools_required"))
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.reason.contains("slack") && e.reason.contains("mcp_servers"))
+        );
+    }
+
+    #[test]
+    fn builtin_nested_capabilities_satisfy_manifest_declarations() {
+        let manifest = "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\ntools_required: [gh]\nmcp_servers: [slack]\n---\n# body\n";
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            manifest,
+            &[(
+                "01_route.ts",
+                r#"import { step } from "@cori-do/sdk";
+export default step.switch({
+  description: "route",
+  on: ({ kind }) => kind,
+  cases: {
+    push: step.cli({ description: "push", command: () => ["gh", "pr", "create"] }),
+    post: step.mcp_tool({ description: "post", server: "slack", tool: "post_message", args: () => ({}) }),
+  },
+});"#,
+            )],
+        );
+        let compiled = compile(tmp.path()).expect("nested capabilities count as usage");
+        assert_eq!(compiled.required_cli_binaries, vec!["gh".to_string()]);
+        assert_eq!(compiled.required_mcp_servers, vec!["slack".to_string()]);
+        assert!(!compiled.requires_llm);
+    }
+
+    #[test]
+    fn builtin_nested_llm_marks_workflow_as_requiring_llm() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[(
+                "01_branch.ts",
+                r#"import { step } from "@cori-do/sdk";
+export default step.branch({
+  description: "summarise when long",
+  if: ({ length }) => length > 1000,
+  then: step.llm({ description: "summarise", prompt: () => `s` }),
+});"#,
+            )],
+        );
+        let compiled = compile(tmp.path()).expect("compiles");
+        assert!(compiled.requires_llm);
+    }
+
+    #[test]
+    fn builtin_file_must_not_import_node_modules() {
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            LLM_MANIFEST,
+            &[(
+                "01_branch.ts",
+                "import { step } from \"@cori-do/sdk\";\nimport fs from \"node:fs\";\nexport default step.branch({ description: \"x\", if: (i) => true, then: step.code({ description: \"n\", run: (x) => x }) });",
+            )],
+        );
+        let errs = compile(tmp.path()).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("node:fs")));
     }
 
     #[test]

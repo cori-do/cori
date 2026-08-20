@@ -15,6 +15,7 @@ mod events;
 mod llm_cmd;
 mod remote_browse;
 mod runs;
+mod sessions_cmd;
 mod sidecars;
 mod state;
 mod supervisor;
@@ -117,6 +118,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         // Window-state plugin persists geometry across restarts. Decorations
@@ -166,6 +168,10 @@ pub fn run() {
             // Heartbeat + approval-inbox watcher — the Console is the
             // rich human-decision surface for ~/.cori/approvals/.
             approvals_cmd::spawn_watcher(app.handle().clone());
+
+            // Authoring-sessions watcher — pushes `sessions:changed` so
+            // the rail and the live diff never poll from the frontend.
+            sessions_cmd::spawn_watcher(app.handle().clone());
 
             // Update checks (announce-only; install is human-initiated).
             updater::spawn_check(app.handle().clone());
@@ -251,6 +257,13 @@ pub fn run() {
             approvals_cmd::list_approvals,
             approvals_cmd::list_decided_approvals,
             approvals_cmd::decide_approval,
+            sessions_cmd::list_authoring_sessions,
+            sessions_cmd::session_journal,
+            sessions_cmd::stop_authoring_session,
+            sessions_cmd::rewind_authoring_session,
+            sessions_cmd::accept_authoring_proposal,
+            sessions_cmd::reject_authoring_proposal,
+            commands::step_medians,
             updater::install_update,
             workers_schedules::list_workers,
             workers_schedules::list_schedules,

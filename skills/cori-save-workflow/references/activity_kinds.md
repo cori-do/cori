@@ -18,7 +18,7 @@ import { step } from "@cori-do/sdk";
 | Successful shell/CLI command | `cli` |
 | Model call (translate, classify, summarize, extract) | `llm` |
 | Pure data transform (parse, filter, format, validate, math) | `code` |
-| Flow control (loop, branch, parallel, wait) | `builtin` |
+| Flow control (branch, switch, loop, for-each, wait) | `builtin` |
 
 A few non-negotiable rules across all kinds:
 
@@ -343,57 +343,139 @@ If you find yourself writing an `llm` step whose prompt is "decide what to do ne
 
 ## `builtin` — DAG flow control
 
-Use for the glue logic between data-bearing steps: looping, branching, parallel fan-out, waiting.
+Use for the glue logic between data-bearing steps: branching, switching, looping, waiting. Four families are executable — `branch` (If/Else), `switch`, `for_each` / `loop`, and `wait`. Two more (`map`, `parallel`) are accepted by the compiler but deferred; see the end of this section.
 
-The five most common builtins:
+Rules shared by all builtins (the compiler enforces these):
 
-### `map` — transform a list by applying another step to each element
+- **Selector functions (`if` / `on` / `over` / `until`) must be pure.** They are evaluated in the same read-only Deno sandbox as `code` steps (activity `cori_code`, mode `builtin_eval`), recorded in Temporal history, and deterministic on replay.
+- **Nested steps (`then`, `else`, `cases.<label>`, `default`, `apply`, `body`) must be inline `step.<kind>({…})` calls** — no helper variables, no imports of a step. Allowed kinds: `cli`, `mcp_tool`, `code`, `llm`. **Builtins cannot nest builtins** — inner control flow goes in its own step file.
+- **Branch / switch paths may route instead of running a step.** `goto("step_name")` sends execution to a later sibling step (the name is the part of `NN_name.ts` after the number, so renumbering never breaks a route); `goto("end")` finishes the run. Routing is **forward-only** (repeat work with `loop`), every step must stay reachable on some path, and steps a route jumps past get honest `not_taken` trace rows. `for_each.apply` and `loop.body` cannot route.
+- Case labels must match `[A-Za-z0-9_-]+`.
+- **Nested capability declarations still apply.** A nested cli's binary must be in the manifest's `tools_required`, a nested mcp_tool's server in `mcp_servers`, and a nested llm makes the workflow require an LLM backend. The compiler extracts nested metadata (binary/server/tool/level, per-slot retries/timeout_ms) and the planner routes each nested slot to its own task queue.
+- Builtin step files must not import `node:*` modules (same rule as `code`).
+- The outer builtin takes `description` (required) but **not** `retries`/`timeout_ms` — those belong on the nested steps.
+- **One trace row per builtin step.** Nested outcomes fold into its output, notes, cost, and usage. Notes read like "took `then`", "matched `cases.high`", "applied to 12 item(s)", "goal met after 3 iteration(s)", "paused 60s", "resumed by event `approved`".
 
-```ts
-import { step } from "@cori-do/sdk";
-import translateRow from "./02_translate_row";
+### `branch` — If / Else
 
-export default step.map({
-  description: "Translate every row in parallel",
-  over: (input: { rows: Row[] }) => input.rows,
-  apply: translateRow,
-  concurrency: 10,
-});
-```
-
-### `for_each` — sequential iteration with side effects between iterations
-
-Use when iterations are not independent (e.g. each iteration appends to a state passed to the next).
-
-### `branch` — conditional execution
+Splits the path based on whether a rule is met.
 
 ```ts
-import { step } from "@cori-do/sdk";
-import nokStep from "./04_handle_nok";
-import okStep from "./04_handle_ok";
+import { step, goto } from "@cori-do/sdk";
 
 export default step.branch({
-  description: "Route based on GPSR check result",
-  on: (input: { check: "OK" | "NOK" }) => input.check,
-  cases: {
-    OK: okStep,
-    NOK: nokStep,
-  },
+  description: "summarise only large diffs",
+  if: ({ line_count }) => line_count > 500,
+  then: step.llm({ description: "summarise the diff", prompt: ({ diff }) => `Summarise: ${diff}` }),
+  // A path can also route: skip ahead when there is nothing to summarise.
+  else: goto("post_comment"),
 });
 ```
 
-### `parallel` — fan out to multiple independent steps, collect their results
+Key fields:
 
-### `wait` — pause until a condition is met (a webhook arrives, a time elapses, a signal is received)
+- **`if`** — pure predicate over the flat workflow state.
+- **`then`** — inline nested step (or `goto`), taken when `if` returns true.
+- **`else`** (optional) — taken when `if` returns false. A false condition with no `else` is a no-op. Either path may be `goto("step_name")` / `goto("end")` instead of an inline step.
+
+### `switch` — one of many paths
+
+Sends the process down one of many paths based on a value.
 
 ```ts
+import { step, goto } from "@cori-do/sdk";
+
+export default step.switch({
+  description: "route by severity",
+  on: ({ severity }) => severity,
+  cases: {
+    high: step.mcp_tool({ description: "page on-call", server: "pagerduty", tool: "create_incident", args: (i) => ({ summary: i.title }) }),
+    low: goto("archive_ticket"),
+  },
+  default: goto("end"),
+});
+```
+
+Key fields:
+
+- **`on`** — pure selector returning the case label.
+- **`cases`** — map of label → inline nested step or `goto("step_name")`. Labels must match `[A-Za-z0-9_-]+`.
+- **`default`** (optional) — taken when no case matches; may also be a `goto`. **An unmatched label with no `default` fails the run.**
+
+### `for_each` and `loop` — Loop / For Each
+
+Repeats a step: `for_each` over a list, `loop` until a goal is met.
+
+```ts
+import { step } from "@cori-do/sdk";
+
+export default step.for_each({
+  description: "Label every fetched message",
+  over: ({ messages }) => messages,
+  apply: step.cli({
+    description: "Add the label to one message",
+    command: ({ item }) => ["gws", "gmail", "users", "messages", "modify", /* … */],
+    parse: (stdout) => ({ labeled: JSON.parse(stdout).id }),
+  }),
+  max_items: 200,
+});
+```
+
+Key fields (`for_each`):
+
+- **`over`** — pure selector returning the array of items. Iteration is sequential.
+- **`apply`** — inline nested step run once per item. Its input is the accumulated flat state plus `item` and `item_index` fields merged in.
+- **`max_items`** (optional) — default 100, hard cap 1000. `over` returning more than `max_items` fails the run.
+- Output is `{ items: [...] }` — only `items` merges downstream, so the step cannot overwrite an unrelated accumulator key.
+
+```ts
+import { step } from "@cori-do/sdk";
+
+export default step.loop({
+  description: "Poll the export job until it finishes",
+  body: step.cli({
+    description: "Fetch job status",
+    command: ({ job_id }) => ["gh", "run", "view", job_id, "--json", "status"],
+    parse: (stdout) => ({ job_status: JSON.parse(stdout).status }),
+  }),
+  until: ({ job_status }) => job_status === "completed",
+  max_iterations: 20,
+});
+```
+
+Key fields (`loop`):
+
+- **`body`** — inline nested step, repeated with its output merged into the working input each iteration. Body input gets an `iteration` field (1-based).
+- **`until`** — pure predicate; the loop stops when it returns true.
+- **`max_iterations`** (optional) — default 10, hard cap 100. Exhausting it without meeting the goal fails the run.
+- Output is the last body output plus `iterations`.
+
+### `wait` — Wait / Delay
+
+Pauses the workflow until a time or event occurs.
+
+```ts
+import { step } from "@cori-do/sdk";
+
 export default step.wait({
   description: "Wait for human approval",
   for: { signal: "approved", timeout_ms: 86_400_000 },
 });
 ```
 
-`builtin` steps don't have I/O code — they're declarative. Cori's compiler turns them into the right Temporal primitives.
+`for` takes three modes; at least one is required:
+
+- **`timeout_ms`** — relative delay (1 ms .. 30 days), a real Temporal timer.
+- **`until`** — absolute RFC 3339 timestamp **with explicit offset** (`2026-09-01T09:00:00Z`); an offset-less local timestamp is a compile error. Past timestamps are a zero-length wait, not an error.
+- **`signal`** — external event name (`[A-Za-z0-9_.-]+`), delivered via the workflow's `event_received` Temporal signal (`{"name": "<signal>"}`). With a signal, `timeout_ms`/`until` act as the deadline — **the wait fails if no event arrives in time.** Without a signal, the earliest of `timeout_ms`/`until` is a plain delay.
+
+`--dry-run` does not pause. Wait steps carry no nested steps and no selector functions.
+
+### `map` and `parallel` — accepted but deferred
+
+The compiler accepts `map` (apply a step to each item in parallel) and `parallel` (fan out to independent steps), but the v1 runtime skips them with a notice. Flag these to the user before emitting them; use `for_each` for sequential iteration in the meantime.
+
+How builtins execute: the control flow itself runs as deterministic Temporal workflow code, selector functions are evaluated in the sandboxed runner, and nested steps dispatch as normal activities on their own task queues.
 
 ---
 
@@ -404,6 +486,8 @@ Every `step.<kind>({…})` call accepts these in addition to the kind-specific f
 - **`description`** (required) — one line, ≤80 chars, sentence case. Appears in the run trace.
 - **`retries`** (optional) — `{ max: number; backoff: "exponential" | "linear" }`. Default `{ max: 3, backoff: "exponential" }`.
 - **`timeout_ms`** (optional) — per-attempt timeout. Default varies by kind: 60s for `cli`/`mcp_tool`, 300s for `llm`, 30s for `code`.
+
+Exception: the outer `builtin` step takes only `description` — `retries`/`timeout_ms` go on its nested steps.
 
 ---
 

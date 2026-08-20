@@ -46,12 +46,18 @@ pub fn run(
     input: &JsonValue,
     user_id: &str,
     expected_binary: Option<&str>,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
     // 1. Resolve argv via the runner.
-    let cmd_call =
-        dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::CliCommand, input)?;
+    let cmd_call = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::CliCommand,
+        input,
+        selector,
+    )?;
     let spec: CommandSpec =
         serde_json::from_value(cmd_call.output.clone()).map_err(|e| BrokerError::BadEnvelope {
             envelope: cmd_call.output.to_string(),
@@ -137,7 +143,7 @@ pub fn run(
     }
 
     // 4. Parse stdout via the runner.
-    let parse_payload = json!({
+    let mut parse_payload = json!({
         "input": input,
         "parseCtx": {
             "stdout": stdout_str,
@@ -145,6 +151,9 @@ pub fn run(
             "exitCode": exit_code,
         }
     });
+    if let (Some(selector), Some(object)) = (selector, parse_payload.as_object_mut()) {
+        object.insert("selector".to_string(), json!(selector));
+    }
     let parse_call = dispatch::invoke(
         runtime,
         step_file_path,

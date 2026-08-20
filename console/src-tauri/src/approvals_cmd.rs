@@ -40,7 +40,11 @@ pub async fn list_decided_approvals() -> IpcResult<Value> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn decide_approval(nonce: String, approved: bool) -> IpcResult<()> {
+pub async fn decide_approval(
+    nonce: String,
+    approved: bool,
+    response: Option<Value>,
+) -> IpcResult<()> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         // Capture the request before deciding — decide() retires it.
         let request = approvals::list_pending()?
@@ -51,7 +55,9 @@ pub async fn decide_approval(nonce: String, approved: bool) -> IpcResult<()> {
         } else {
             approvals::Decision::Declined
         };
-        approvals::decide(&nonce, decision, "console")?;
+        // `response` carries an `agent_input` answer or a denial note
+        // back to the blocked requester.
+        approvals::decide_with_response(&nonce, decision, "console", response)?;
 
         // Approving a schedule re-consent carries an effect beyond the
         // decision file: trust the new sha and resume the schedule.
@@ -123,7 +129,8 @@ pub fn spawn_watcher(app: AppHandle) {
                 .unwrap_or_default();
             let nonces: BTreeSet<String> = pending.iter().map(|p| p.nonce.clone()).collect();
             if nonces != known {
-                let has_new = nonces.difference(&known).next().is_some();
+                let fresh: BTreeSet<String> = nonces.difference(&known).cloned().collect();
+                let has_new = !fresh.is_empty();
                 known = nonces;
                 if let Err(e) = app.emit(
                     "approvals:changed",
@@ -134,12 +141,53 @@ pub fn spawn_watcher(app: AppHandle) {
                 // Don't steal focus for items that predate this launch.
                 if has_new && !first {
                     crate::focus_or_show_launcher(&app);
+                    // Doorbell: an OS notification per new *consent-class*
+                    // item. Deliberately narrow — an approval prompt people
+                    // learn to click through is worse than none.
+                    for req in pending.iter().filter(|p| fresh.contains(&p.nonce)) {
+                        if rings_doorbell(req.kind) {
+                            ring_doorbell(&app, req);
+                        }
+                    }
                 }
             }
             first = false;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+/// Which approval kinds are worth an OS notification: the consent-class
+/// gates (run, trust, schedule change, agent approval). Agent questions
+/// and re-auth nudges surface in the inbox but never ring.
+fn rings_doorbell(kind: approvals::ApprovalKind) -> bool {
+    matches!(
+        kind,
+        approvals::ApprovalKind::RunConfirm
+            | approvals::ApprovalKind::TrustConsent
+            | approvals::ApprovalKind::ScheduleReconsent
+            | approvals::ApprovalKind::AgentApproval
+    )
+}
+
+fn ring_doorbell(app: &AppHandle, req: &approvals::ApprovalRequest) {
+    use tauri_plugin_notification::NotificationExt;
+    let title = match req.kind {
+        approvals::ApprovalKind::RunConfirm => "Cori — run request",
+        approvals::ApprovalKind::TrustConsent => "Cori — trust request",
+        approvals::ApprovalKind::ScheduleReconsent => "Cori — schedule changed",
+        approvals::ApprovalKind::AgentApproval => "Cori — approval request",
+        _ => "Cori — approval",
+    };
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(&req.message)
+        .show()
+    {
+        warn!(error = %e, "could not show doorbell notification");
+    }
 }
 
 /// Remove the heartbeat so requesters immediately fall back to their

@@ -154,8 +154,10 @@ pub fn preflight(arg: &str, update: bool, assume_yes: bool) -> Result<PreflightR
     })
 }
 
-/// Advisory lints on the compiled workflow shape.
-fn build_warnings(compiled: &CompiledWorkflow) -> Vec<String> {
+/// Advisory lints on the compiled workflow shape. Also surfaced at
+/// write time by the MCP authoring tools (`mcp_authoring`), so the
+/// agent hears about a violation on the write, not three calls later.
+pub(crate) fn build_warnings(compiled: &CompiledWorkflow) -> Vec<String> {
     let mut out = Vec::new();
     for step in &compiled.steps {
         if step.kind != StepKind::McpTool {

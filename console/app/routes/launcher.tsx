@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -28,16 +29,19 @@ import {
   installUpdate,
   isIpcError,
   listApprovals,
+  listAuthoringSessions,
   onUpdaterAvailable,
   listDir,
   listRecentWorkflows,
   listRemoteWorkflows,
   nearestExistingDirectory,
   onApprovalsChanged,
+  onSessionsChanged,
   onStackStatus,
   peekSource,
   sourceToCli,
   type ApprovalRequest,
+  type AuthoringSession,
   type DirEntry,
   type DirListing,
   type PeekResult,
@@ -47,7 +51,9 @@ import {
   type StackStatus,
   type StatusResponse,
 } from "../lib/api";
+import { formatRelative } from "../lib/format";
 import { fuzzyFilter } from "../lib/fuzzy";
+import { applyTheme, readChoice } from "../lib/theme";
 import { openRun, openSettings } from "../lib/windows";
 import { Inbox } from "./manage.approvals";
 import { ScheduleList } from "./manage.schedules";
@@ -120,7 +126,33 @@ type LauncherContext =
       error: string | null;
     };
 
+// Sessions are not a section: an agent editing a workflow shows up on
+// that workflow's library row, and on its canvas when picked.
 type LauncherSection = "workflows" | "inbox" | "schedules";
+
+/** Sort is a visible control — the list is never implicitly ordered. */
+type LibrarySort = "recent" | "name";
+
+const LIBRARY_SORT_KEY = "cori-library-sort";
+
+function readLibrarySort(): LibrarySort {
+  if (typeof window === "undefined") return "recent";
+  try {
+    return window.localStorage.getItem(LIBRARY_SORT_KEY) === "name"
+      ? "name"
+      : "recent";
+  } catch {
+    return "recent";
+  }
+}
+
+/** One header row per source: this machine first, then each pinned repo. */
+interface ListedGroup {
+  label: string;
+  remote: boolean;
+  startIndex: number;
+  count: number;
+}
 
 /**
  * Unified items model for the results pane. Each context yields a
@@ -135,14 +167,26 @@ type ListedItem =
       entry: RemoteWorkflowEntry;
       listing: RemoteListing;
       key: string;
+    }
+  | {
+      /** A live authoring session on a folder the library doesn't list
+       *  yet — typically a brand-new workflow being written right now. */
+      kind: "session";
+      session: AuthoringSession;
+      key: string;
     };
 
 export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
   const { recents, status } = loaderData;
   const revalidator = useRevalidator();
   const [input, setInput] = useState("");
-  const [peek, setPeek] = useState<PeekResult | null>(null);
   const [selIndex, setSelIndex] = useState(0);
+  const [sort, setSort] = useState<LibrarySort>(readLibrarySort);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  // Raw depth (⌥3): same screens, dark chrome, ids lead. A preference,
+  // not a different window.
+  const [raw, setRaw] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [stack, setStack] = useState<StackStatus | undefined>(undefined);
   const [ctx, setCtx] = useState<LauncherContext>({ kind: "recents" });
   const [dragOver, setDragOver] = useState(false);
@@ -179,6 +223,44 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       unlisten?.();
     };
   }, []);
+
+  // Authoring sessions: snapshot + live subscription, pushed by the Rust
+  // watcher. Sessions are merged into the workflow library — a live one
+  // badges its workflow's row and drives the canvas of the picked
+  // workflow; a session on an unlisted folder becomes its own row.
+  const [sessions, setSessions] = useState<AuthoringSession[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    listAuthoringSessions()
+      .then((rows) => !cancelled && setSessions(rows))
+      .catch(() => {});
+    onSessionsChanged((rows) => !cancelled && setSessions(rows))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Live sessions only: a stopped session is history, not presence.
+  const liveSessions = useMemo(
+    () => sessions.filter((s) => s.state === "writing" || s.state === "proposed"),
+    [sessions],
+  );
+  const sessionsByDir = useMemo(() => {
+    const map = new Map<string, AuthoringSession>();
+    // Oldest last so the newest session wins a (rare) same-dir collision.
+    for (const s of [...liveSessions].reverse()) map.set(normalizeDir(s.workflow_dir), s);
+    return map;
+  }, [liveSessions]);
+  const pickedSession = picked
+    ? (sessionsByDir.get(normalizeDir(picked)) ?? null)
+    : null;
 
   // Approval inbox: snapshot + live subscription. Items are human
   // gates (MCP run confirms, trust consent) — surfaced above the
@@ -266,19 +348,14 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     };
   }, []);
 
-  // `peek_source` on every keystroke. Cheap on the backend, so no
-  // debounce — the chip reacts instantly so Enter is never a surprise.
-  useEffect(() => {
-    let cancelled = false;
-    peekSource(input)
-      .then((p) => !cancelled && setPeek(p))
-      .catch(() => {
-        if (!cancelled) setPeek(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [input]);
+  const changeSort = useCallback((next: LibrarySort) => {
+    setSort(next);
+    try {
+      window.localStorage.setItem(LIBRARY_SORT_KEY, next);
+    } catch {
+      // Session-only when storage is unavailable.
+    }
+  }, []);
 
   // The workflow directory is reconstructed from persisted run traces,
   // so the loader's snapshot goes stale when another source is run for
@@ -303,18 +380,100 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     };
   }, [revalidator]);
 
-  // ⌘/Ctrl-L focuses + selects the bar contents from anywhere.
+  // Key scope model: the bar owns keys only while focused. Everywhere
+  // else, single letters act on the list — j/k move, y yanks the printed
+  // command, ⏎ dry-runs, ⌘⏎ runs for real, / (or ⌘L) returns to the bar.
+  // Handlers live in a ref so this listener never goes stale.
+  const keyApi = useRef<{
+    enter: (real: boolean) => void;
+    move: (d: 1 | -1) => void;
+  }>({ enter: () => {}, move: () => {} });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
         e.preventDefault();
         inputRef.current?.focus();
         inputRef.current?.select();
+        return;
+      }
+      const t = e.target as HTMLElement | null;
+      const inField =
+        t != null &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable);
+      if (inField) return;
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          keyApi.current.enter(true);
+        }
+        return;
+      }
+      if (e.altKey) {
+        // ⌥3 flips to Raw depth (dark chrome, ids lead); ⌥1/⌥2 return
+        // to Standard. One axis over the same screens, never a window.
+        if (e.code === "Digit3") {
+          e.preventDefault();
+          setRaw(true);
+        } else if (e.code === "Digit1" || e.code === "Digit2") {
+          e.preventDefault();
+          setRaw(false);
+        }
+        return;
+      }
+      switch (e.key) {
+        case "j":
+        case "ArrowDown":
+          e.preventDefault();
+          keyApi.current.move(1);
+          break;
+        case "k":
+        case "ArrowUp":
+          e.preventDefault();
+          keyApi.current.move(-1);
+          break;
+        case "Enter":
+          e.preventDefault();
+          keyApi.current.enter(false);
+          break;
+        case "y":
+          e.preventDefault();
+          paneRef.current?.yank();
+          break;
+        case "d":
+          e.preventDefault();
+          if (paneRef.current?.canRun()) paneRef.current.run(true);
+          break;
+        case "o":
+          e.preventDefault();
+          paneRef.current?.openFolder();
+          break;
+        case "?":
+          e.preventDefault();
+          setHelpOpen((o) => !o);
+          break;
+        case "Escape":
+          setHelpOpen(false);
+          break;
+        case "/":
+          e.preventDefault();
+          inputRef.current?.focus();
+          inputRef.current?.select();
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Raw flips to dark chrome — the honest signal that you're looking at
+  // the runtime — without disturbing the saved theme choice.
+  useEffect(() => {
+    if (raw) document.documentElement.classList.add("dark");
+    else applyTheme(readChoice());
+  }, [raw]);
 
   // ─── Context loading ──────────────────────────────────────────────────
 
@@ -469,20 +628,67 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
   // ─── Items derivation ────────────────────────────────────────────────
 
-  const items = useMemo<ListedItem[]>(() => {
+  const { items, groups } = useMemo<{
+    items: ListedItem[];
+    groups: ListedGroup[];
+  }>(() => {
     if (ctx.kind === "recents") {
       const uniqueRecents = dedupeRecentWorkflows(recents);
-      return fuzzyFilter(uniqueRecents, input.trim(), (r) => [
+      const matches = fuzzyFilter(uniqueRecents, input.trim(), (r) => [
         r.name ?? "",
         r.workflow_id,
         describeRecentSource(r),
-      ]).map((r, i) => ({
-        kind: "recent",
-        recent: r,
-        key: `${r.key}-${i}`,
-      }));
+      ]);
+      const items: ListedItem[] = [];
+      const groups: ListedGroup[] = [];
+      // Sessions on folders the library doesn't list yet (a brand-new
+      // workflow being written) lead the list — presence before history.
+      const listedDirs = new Set(
+        uniqueRecents
+          .filter((r) => r.source?.kind === "local")
+          .map((r) =>
+            normalizeDir(r.source?.kind === "local" ? r.source.path : ""),
+          ),
+      );
+      const unlisted = fuzzyFilter(
+        liveSessions.filter(
+          (s) => !listedDirs.has(normalizeDir(s.workflow_dir)),
+        ),
+        input.trim(),
+        (s) => [s.folder_name, s.workflow_dir, s.agent],
+      );
+      if (unlisted.length > 0) {
+        groups.push({
+          label: "being written",
+          remote: false,
+          startIndex: 0,
+          count: unlisted.length,
+        });
+        for (const s of unlisted) {
+          items.push({
+            kind: "session",
+            session: s,
+            key: `session:${s.session_id}`,
+          });
+        }
+      }
+      for (const g of groupRecents(sortRecents(matches, sort))) {
+        groups.push({
+          label: g.label,
+          remote: g.remote,
+          startIndex: items.length,
+          count: g.rows.length,
+        });
+        for (const r of g.rows) {
+          items.push({ kind: "recent", recent: r, key: `${r.key}-${items.length}` });
+        }
+      }
+      return { items, groups };
     }
-    if (ctx.kind === "local") {
+    return { items: flatItems(), groups: [] };
+
+    function flatItems(): ListedItem[] {
+      if (ctx.kind === "local") {
       const entries = ctx.listing?.entries ?? [];
       const matches = fuzzyFilter(entries, input.trim(), (e) => e.name).map(
         (e): ListedItem => ({
@@ -506,22 +712,23 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       }
       return matches;
     }
-    if (ctx.kind === "remote") {
-      const listing = ctx.listing;
-      if (!listing) return [];
-      return fuzzyFilter(listing.workflows, input.trim(), (w) => [
-        w.subpath || w.name,
-        w.name,
-        w.description,
-      ]).map((w) => ({
-        kind: "remote-entry",
-        entry: w,
-        listing,
-        key: `${listing.sha}:${w.subpath || "."}`,
-      }));
+      if (ctx.kind === "remote") {
+        const listing = ctx.listing;
+        if (!listing) return [];
+        return fuzzyFilter(listing.workflows, input.trim(), (w) => [
+          w.subpath || w.name,
+          w.name,
+          w.description,
+        ]).map((w) => ({
+          kind: "remote-entry",
+          entry: w,
+          listing,
+          key: `${listing.sha}:${w.subpath || "."}`,
+        }));
+      }
+      return [];
     }
-    return [];
-  }, [ctx, recents, input]);
+  }, [ctx, recents, input, sort, liveSessions]);
 
   // Keep selection in bounds whenever the filtered list shrinks.
   useEffect(() => {
@@ -567,6 +774,11 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
       setSection("workflows");
       return;
     }
+    if (item.kind === "session") {
+      setPicked(item.session.workflow_dir);
+      setSection("workflows");
+      return;
+    }
   }
 
   /** The source string the highlighted row would put in the pane, if any. */
@@ -575,40 +787,23 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     if (item.kind === "recent") return sourceToCli(item.recent.source);
     if (item.kind === "dir-entry")
       return item.entry.kind === "workflow" ? item.entry.path : null;
+    if (item.kind === "session") return item.session.workflow_dir;
     return buildRemoteSource(item.listing, item.entry);
   }
 
-  function handleEnter() {
-    // When the bar has a typed input, Enter prefers the classifier
-    // outcome over selecting from the current list — the user just
-    // told us what they want.
-    if (peek && input.trim().length > 0) {
-      if (peek.kind === "local" && peek.local_exists) {
-        enterLocalContext(peek.normalized);
-        return;
-      }
-      if (peek.kind === "remote") {
-        if (remoteRefHasSubpath(peek.normalized)) {
-          // A subpath-bearing ref names a specific workflow — put it
-          // straight in the pane, which surfaces consent or capability
-          // gaps as it resolves.
-          setPicked(peek.normalized);
-          return;
-        }
-        // Bare `host/owner/repo[@ref]` — list the repo's workflows so
-        // the user can pick a subpath.
-        enterRemoteContext(peek.normalized);
-        return;
-      }
-    }
-
+  /**
+   * ⏎ opens, then dry-runs; only ⌘⏎ (realRun) touches the world. The
+   * bar no longer routes paths or refs — Enter always means "act on the
+   * highlighted row", and typed sources go through the + source panel.
+   */
+  function handleEnter(realRun: boolean) {
     const item = items[selIndex];
     if (!item) return;
 
     // Open it. Press run. The second Enter on a workflow already in the
     // pane starts it, rather than resolving the same source again.
     if (sourceOf(item) === picked && paneRef.current?.canRun()) {
-      paneRef.current.run();
+      paneRef.current.run(!realRun);
       return;
     }
     activateItem(item);
@@ -655,7 +850,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         break;
       case "Enter":
         e.preventDefault();
-        handleEnter();
+        handleEnter(e.metaKey || e.ctrlKey);
         break;
       case "Escape":
         e.preventDefault();
@@ -663,6 +858,10 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           setInput("");
         } else if (ctx.kind !== "recents") {
           popContext();
+        } else {
+          // Hand the keyboard to the list — single-letter keys (y, j, k)
+          // only act while the bar is not focused.
+          inputRef.current?.blur();
         }
         break;
       case "Backspace":
@@ -739,8 +938,14 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
     updateListWidth(next, true);
   }
 
+  // Keep the global key handler pointing at this render's closures.
+  keyApi.current = { enter: handleEnter, move: moveSelection };
+
   return (
-    <div className={`launcher${dragOver ? " is-drag-over" : ""}`}>
+    <div
+      className={`launcher${dragOver ? " is-drag-over" : ""}${raw ? " is-raw" : ""}`}
+    >
+      {helpOpen && <KeyHelp onClose={() => setHelpOpen(false)} />}
       <header
         className="launcher-head"
         data-tauri-drag-region="deep"
@@ -773,17 +978,31 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
         />
       )}
 
-      <SearchBar
-        value={input}
-        onChange={setInput}
-        onKeyDown={handleBarKey}
-        peek={peek}
-        inputRef={inputRef}
-        placeholder={placeholderFor(ctx)}
-        onBrowse={() => {
-          void getLastLocalDir().then((p) => enterLocalContext(p));
-        }}
-      />
+      <div className="search-zone">
+        <SearchBar
+          value={input}
+          onChange={setInput}
+          onKeyDown={handleBarKey}
+          inputRef={inputRef}
+          placeholder={placeholderFor(ctx)}
+          addOpen={sourceOpen}
+          onToggleAdd={() => setSourceOpen((o) => !o)}
+        />
+        {sourceOpen && (
+          <SourcePanel
+            onClose={() => setSourceOpen(false)}
+            onPick={(src) => {
+              setPicked(src);
+              setSection("workflows");
+            }}
+            onEnterLocal={enterLocalContext}
+            onEnterRemote={enterRemoteContext}
+            onBrowse={() => {
+              void getLastLocalDir().then((p) => enterLocalContext(p));
+            }}
+          />
+        )}
+      </div>
 
       {/* Your workflows on the left, the one you picked on the right. */}
       <div
@@ -797,10 +1016,13 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           <LauncherSectionNav
             section={section}
             pendingApprovals={approvals.length}
+            liveSessions={liveSessions.length}
             onSelect={setSection}
           />
 
-          {ctx.kind !== "recents" && (
+          {ctx.kind === "recents" ? (
+            <LibraryHead sort={sort} onSort={changeSort} />
+          ) : (
             <Breadcrumb
               context={ctx}
               onPop={popContext}
@@ -815,8 +1037,10 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           <ResultsPane
             ctx={ctx}
             items={items}
+            groups={groups}
             selectedIndex={selIndex}
             pickedSource={picked}
+            sessionsByDir={sessionsByDir}
             sourceOf={sourceOf}
             onSelect={(i) => {
               setSelIndex(i);
@@ -857,6 +1081,7 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
           {section === "workflows" && (
             <WorkflowPane
               source={picked}
+              session={pickedSession}
               handleRef={paneRef}
               onLocateMissing={locateMissingWorkflow}
             />
@@ -876,6 +1101,15 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 
       <footer className="launcher-foot">
         <MachineFacts status={status} />
+        {/* The keys are on screen, not in a help modal. */}
+        <div className="launcher-foot-keys" aria-hidden>
+          <span>⏎ dry run</span>
+          <span>⌘⏎ run</span>
+          <span>y yank</span>
+          <span>o folder</span>
+          <span>⌥3 raw</span>
+          <span>? keys</span>
+        </div>
         <div className="launcher-foot-actions">
           <CliInstallAction />
           <button
@@ -895,10 +1129,14 @@ export default function Launcher({ loaderData }: { loaderData: LauncherData }) {
 function LauncherSectionNav({
   section,
   pendingApprovals,
+  liveSessions,
   onSelect,
 }: {
   section: LauncherSection;
   pendingApprovals: number;
+  /** Agents editing workflows right now — badged on Workflows, where
+   *  those sessions now live. */
+  liveSessions: number;
   onSelect: (section: LauncherSection) => void;
 }) {
   const entries: Array<{ id: LauncherSection; label: string }> = [
@@ -918,6 +1156,15 @@ function LauncherSectionNav({
         >
           <LauncherSectionIcon section={entry.id} />
           <span>{entry.label}</span>
+          {entry.id === "workflows" && liveSessions > 0 && (
+            <span
+              className="launcher-section-count is-live"
+              aria-label={`${liveSessions} agent session${liveSessions === 1 ? "" : "s"}`}
+              title={`${liveSessions} agent session${liveSessions === 1 ? "" : "s"} editing`}
+            >
+              {liveSessions}
+            </span>
+          )}
           {entry.id === "inbox" && pendingApprovals > 0 && (
             <span className="launcher-section-count" aria-label={`${pendingApprovals} pending`}>
               {pendingApprovals}
@@ -964,6 +1211,53 @@ function LauncherSectionContent({
       <h1>{title}</h1>
       {children}
     </section>
+  );
+}
+
+/** `?` — every key on one card. The footer shows the daily few; this is
+ *  the whole contract. */
+function KeyHelp({ onClose }: { onClose: () => void }) {
+  const rows: Array<[string, string]> = [
+    ["j / k", "move selection"],
+    ["⏎", "open · then dry run"],
+    ["⌘⏎", "run for real"],
+    ["d", "dry run"],
+    ["y", "yank the run command"],
+    ["o", "reveal workflow folder"],
+    ["/ or ⌘L", "filter the library"],
+    ["Esc", "clear filter · leave the bar"],
+    ["⌥3", "raw depth (dark, ids lead)"],
+    ["⌥1 / ⌥2", "back to standard"],
+    ["?", "this card"],
+  ];
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal key-help"
+        role="dialog"
+        aria-label="Keyboard shortcuts"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2>Keys</h2>
+        <table className="key-help-table">
+          <tbody>
+            {rows.map(([key, what]) => (
+              <tr key={key}>
+                <td className="key-help-key">
+                  <code>{key}</code>
+                </td>
+                <td className="key-help-what">{what}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1161,6 +1455,11 @@ function approvalSummary(a: ApprovalRequest): string {
       return `"${name}" is waiting on step approval`;
     case "reauth_required":
       return `${String(p.capability ?? "a capability")} needs sign-in — ${String(p.login_command ?? "")}`;
+    case "agent_input":
+      // The question is the message itself, in the agent's human voice.
+      return a.message;
+    case "agent_approval":
+      return typeof p.summary === "string" ? p.summary : a.message;
   }
 }
 
@@ -1176,19 +1475,21 @@ function approvalKindLabel(kind: ApprovalRequest["kind"]): string {
       return "step approval";
     case "reauth_required":
       return "sign-in needed";
+    case "agent_input":
+      return "agent question";
+    case "agent_approval":
+      return "approval request";
   }
 }
 
 function approvalPill(kind: ApprovalRequest["kind"]): string {
-  return kind === "trust_consent" ? "bad" : "warn";
+  return kind === "trust_consent" || kind === "agent_approval" ? "bad" : "warn";
 }
 
 function placeholderFor(ctx: LauncherContext): string {
-  if (ctx.kind === "local")
-    return "Filter folder, or type a new path to navigate";
-  if (ctx.kind === "remote")
-    return "Filter workflows in this repo, or type a new path / ref";
-  return "Type to filter, or paste a path / host/owner/repo";
+  if (ctx.kind === "local") return "Filter this folder";
+  if (ctx.kind === "remote") return "Filter workflows in this repo";
+  return "Filter workflows";
 }
 
 /**
@@ -1212,10 +1513,10 @@ interface SearchBarProps {
   value: string;
   onChange: (v: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
-  peek: PeekResult | null;
   inputRef: React.RefObject<HTMLInputElement | null>;
   placeholder: string;
-  onBrowse: () => void;
+  addOpen: boolean;
+  onToggleAdd: () => void;
 }
 
 /** ⌘ on Apple hardware, Ctrl everywhere else — the same key the global
@@ -1230,15 +1531,16 @@ function SearchBar({
   value,
   onChange,
   onKeyDown,
-  peek,
   inputRef,
   placeholder,
-  onBrowse,
+  addOpen,
+  onToggleAdd,
 }: SearchBarProps) {
   return (
     <div className="search-bar">
-      {/* One recessed pill holds the shortcut, the input and the chip, so
-          the bar reads as a single control rather than three. */}
+      {/* ⌘L filters the library and nothing else. Paths and refs go
+          through the explicit + source panel — Enter always means one
+          thing. */}
       <div className="search-bar-field">
         <span className="search-bar-key" aria-hidden>
           {FOCUS_KEY_HINT}
@@ -1250,23 +1552,187 @@ function SearchBar({
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
-          aria-label="Search workflows or paste a path / ref"
+          aria-label="Filter workflows"
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
           autoFocus
         />
-        {value.length > 0 && <Chip peek={peek} />}
       </div>
       <button
         type="button"
-        className="search-bar-browse"
-        onClick={onBrowse}
-        title="Browse a local folder"
-        aria-label="Browse a local folder"
+        className={`search-bar-add${addOpen ? " is-open" : ""}`}
+        onClick={onToggleAdd}
+        title="Add a source — a local folder or a host/owner/repo ref"
+        aria-label="Add a source"
+        aria-expanded={addOpen}
       >
-        <FolderIcon />
+        + source
       </button>
+    </div>
+  );
+}
+
+/**
+ * The explicit path in: a typed path or repo ref, classified live, with
+ * the resolve-and-pin step spelled out. Splitting this from the filter
+ * bar is what lets Enter mean exactly one thing in each place.
+ */
+function SourcePanel({
+  onClose,
+  onPick,
+  onEnterLocal,
+  onEnterRemote,
+  onBrowse,
+}: {
+  onClose: () => void;
+  /** A source that names one workflow — straight into the pane. */
+  onPick: (source: string) => void;
+  onEnterLocal: (path: string) => void;
+  onEnterRemote: (refStr: string) => void;
+  onBrowse: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [peek, setPeek] = useState<PeekResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const fieldRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fieldRef.current?.focus();
+  }, []);
+
+  // `peek_source` on every keystroke. Cheap on the backend, so no
+  // debounce — the chip reacts instantly so Enter is never a surprise.
+  useEffect(() => {
+    let cancelled = false;
+    if (value.trim().length === 0) {
+      setPeek(null);
+      return;
+    }
+    peekSource(value)
+      .then((p) => !cancelled && setPeek(p))
+      .catch(() => {
+        if (!cancelled) setPeek(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [value]);
+
+  const submit = () => {
+    if (!peek || value.trim().length === 0) return;
+    if (peek.kind === "local") {
+      if (!peek.local_exists) {
+        setError("That path does not exist on this machine.");
+        return;
+      }
+      if (peek.is_workflow_dir) onPick(peek.normalized);
+      else onEnterLocal(peek.normalized);
+      onClose();
+      return;
+    }
+    if (peek.kind === "remote") {
+      if (remoteRefHasSubpath(peek.normalized)) {
+        // A subpath-bearing ref names a specific workflow — put it
+        // straight in the pane, which surfaces consent or capability
+        // gaps as it resolves.
+        onPick(peek.normalized);
+      } else {
+        // Bare `host/owner/repo[@ref]` — list the repo's workflows so
+        // the user can pick a subpath.
+        onEnterRemote(peek.normalized);
+      }
+      onClose();
+      return;
+    }
+    setError("Type a path or a host/owner/repo reference.");
+  };
+
+  return (
+    <div className="source-panel" role="dialog" aria-label="Add a source">
+      <div className="search-bar-field source-panel-field">
+        <input
+          ref={fieldRef}
+          type="text"
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onClose();
+            }
+          }}
+          placeholder="Paste a path or host/owner/repo[@ref]"
+          aria-label="Path or repository reference"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+        {value.length > 0 && <Chip peek={peek} />}
+      </div>
+      <div className="source-panel-foot">
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            onBrowse();
+            onClose();
+          }}
+        >
+          <FolderIcon /> browse…
+        </button>
+        <span className="source-panel-hint">
+          A repo ref is resolved and pinned to its sha before anything runs.
+        </span>
+      </div>
+      {error && <div className="source-panel-error">{error}</div>}
+    </div>
+  );
+}
+
+/**
+ * Library header: identity on the left, the sort as a visible control on
+ * the right — the list is never implicitly ordered by trace-write time.
+ */
+function LibraryHead({
+  sort,
+  onSort,
+}: {
+  sort: LibrarySort;
+  onSort: (s: LibrarySort) => void;
+}) {
+  return (
+    <div className="crumb">
+      <span className="crumb-label">Workflows</span>
+      <div
+        className="crumb-sort"
+        role="group"
+        aria-label="Sort workflows"
+        title="Sort the library"
+      >
+        {(
+          [
+            ["recent", "last run"],
+            ["name", "name"],
+          ] as Array<[LibrarySort, string]>
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className={sort === id ? "is-active" : ""}
+            aria-pressed={sort === id}
+            onClick={() => onSort(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1394,9 +1860,14 @@ function remoteCrumbText(
 interface ResultsPaneProps {
   ctx: LauncherContext;
   items: ListedItem[];
+  /** Source-group boundaries (recents only; empty elsewhere). */
+  groups: ListedGroup[];
   selectedIndex: number;
   /** Source currently filling the right pane, so its row can say so. */
   pickedSource: string | null;
+  /** Live authoring sessions keyed by normalized workflow dir, so a row
+   *  whose workflow an agent is editing can wear the badge. */
+  sessionsByDir: Map<string, AuthoringSession>;
   sourceOf: (item: ListedItem | undefined) => string | null;
   onSelect: (index: number) => void;
   onHover: (index: number) => void;
@@ -1407,8 +1878,10 @@ interface ResultsPaneProps {
 function ResultsPane({
   ctx,
   items,
+  groups,
   selectedIndex,
   pickedSource,
+  sessionsByDir,
   sourceOf,
   onSelect,
   onHover,
@@ -1505,19 +1978,33 @@ function ResultsPane({
 
   return (
     <div className="results" role="listbox">
-      {items.map((item, i) => (
-        <ItemRow
-          key={item.key}
-          item={item}
-          selected={i === selectedIndex}
-          open={pickedSource != null && sourceOf(item) === pickedSource}
-          onClick={() => onSelect(i)}
-          onHover={() => onHover(i)}
-          buttonRef={(el) => {
-            refs.current[i] = el;
-          }}
-        />
-      ))}
+      {items.map((item, i) => {
+        const group = groups.find((g) => g.startIndex === i && g.count > 0);
+        return (
+          <Fragment key={item.key}>
+            {group && (
+              <div
+                className={`results-group${group.remote ? " is-remote" : ""}`}
+                aria-hidden
+              >
+                <span className="results-group-label">{group.label}</span>
+                <span className="results-group-count">{group.count}</span>
+              </div>
+            )}
+            <ItemRow
+              item={item}
+              selected={i === selectedIndex}
+              open={pickedSource != null && sourceOf(item) === pickedSource}
+              session={sessionFor(item, sessionsByDir)}
+              onClick={() => onSelect(i)}
+              onHover={() => onHover(i)}
+              buttonRef={(el) => {
+                refs.current[i] = el;
+              }}
+            />
+          </Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -1527,6 +2014,8 @@ interface ItemRowProps {
   selected: boolean;
   /** This row's workflow is the one currently in the right pane. */
   open: boolean;
+  /** A live authoring session on this row's workflow folder, if any. */
+  session: AuthoringSession | null;
   onClick: () => void;
   onHover: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
@@ -1539,13 +2028,96 @@ function ItemRow(props: ItemRowProps) {
   if (props.item.kind === "dir-entry") {
     return <DirEntryRow {...props} item={props.item} />;
   }
+  if (props.item.kind === "session") {
+    return <SessionRow {...props} item={props.item} />;
+  }
   return <RemoteEntryRow {...props} item={props.item} />;
+}
+
+/** Which live session (if any) is editing the workflow this row names. */
+function sessionFor(
+  item: ListedItem,
+  sessionsByDir: Map<string, AuthoringSession>,
+): AuthoringSession | null {
+  if (sessionsByDir.size === 0) return null;
+  if (item.kind === "recent") {
+    const s = item.recent.source;
+    if (s?.kind !== "local") return null;
+    return sessionsByDir.get(normalizeDir(s.path)) ?? null;
+  }
+  if (item.kind === "dir-entry") {
+    if (item.entry.kind !== "workflow") return null;
+    return sessionsByDir.get(normalizeDir(item.entry.path)) ?? null;
+  }
+  if (item.kind === "session") return item.session;
+  return null;
+}
+
+/** The pen badge a row wears while an agent is editing its workflow. */
+function SessionBadge({ session }: { session: AuthoringSession }) {
+  const writing = session.state === "writing";
+  return (
+    <span
+      className={`result-row-session${writing ? " is-writing" : " is-proposed"}`}
+      title={`${session.agent} · ${writing ? "writing" : "proposal awaiting review"} · ${session.current_seq} journal event${session.current_seq === 1 ? "" : "s"}`}
+    >
+      <span className="result-row-session-dot" aria-hidden />
+      {writing ? session.agent : "proposed"}
+    </span>
+  );
+}
+
+/**
+ * A live session on a folder the library has no history for yet — the
+ * workflow being born. Activating it fills the pane with that folder,
+ * where the canvas shows the agent writing.
+ */
+function SessionRow({
+  item,
+  selected,
+  open,
+  onClick,
+  onHover,
+  buttonRef,
+}: ItemRowProps & { item: Extract<ListedItem, { kind: "session" }> }) {
+  const s = item.session;
+  return (
+    <button
+      type="button"
+      ref={buttonRef}
+      className={rowClass(selected, open)}
+      onClick={onClick}
+      onMouseEnter={onHover}
+      role="option"
+      aria-selected={selected}
+      title={`${s.workflow_dir} — open in the pane`}
+    >
+      <span className="result-row-icon" aria-hidden>
+        <PenIcon />
+      </span>
+      <div className="result-row-body">
+        <div className="result-row-name">{s.folder_name}</div>
+        <div className="result-row-location">
+          <MiddleTruncate
+            text={s.workflow_dir}
+            tail={Math.min(18, Math.floor(s.workflow_dir.length / 2))}
+            className="result-row-source"
+          />
+        </div>
+      </div>
+      <span className="result-row-right">
+        <SessionBadge session={s} />
+        <span className="result-row-age">{formatRelative(s.updated_at)}</span>
+      </span>
+    </button>
+  );
 }
 
 function RecentRow({
   item,
   selected,
   open,
+  session,
   onClick,
   onHover,
   buttonRef,
@@ -1555,6 +2127,7 @@ function RecentRow({
   const sourceLabel = describeRecentSource(r);
   const displayName = r.name ?? r.workflow_id;
   const disabled = !src;
+  const outcome = outcomeMark(r.last_status);
   return (
     <button
       type="button"
@@ -1575,7 +2148,12 @@ function RecentRow({
         <WorkflowIcon />
       </span>
       <div className="result-row-body">
-        <div className="result-row-name">{displayName}</div>
+        <div className="result-row-name">
+          {displayName}
+          {r.name && r.name !== r.workflow_id && (
+            <span className="result-row-id"> {r.workflow_id}</span>
+          )}
+        </div>
         <div className="result-row-location">
           {sourceLabel && (
             <MiddleTruncate
@@ -1595,14 +2173,34 @@ function RecentRow({
           </div>
         )}
       </div>
+      {/* Outcome and age answer "still good?" without a click; the pen
+          badge answers "is an agent in there right now?". */}
+      <span
+        className="result-row-right"
+        title={`Last run ${r.last_status.replaceAll("_", " ")}`}
+      >
+        {session && <SessionBadge session={session} />}
+        <span className={`result-row-mark ${outcome.cls}`} aria-hidden>
+          {outcome.mark}
+        </span>
+        <span className="result-row-age">{formatRelative(r.last_run_at)}</span>
+      </span>
     </button>
   );
+}
+
+function outcomeMark(status: string): { mark: string; cls: string } {
+  if (status === "succeeded") return { mark: "✓", cls: "is-ok" };
+  if (status === "failed") return { mark: "×", cls: "is-bad" };
+  if (status === "running") return { mark: "•", cls: "is-live" };
+  return { mark: "–", cls: "is-muted" };
 }
 
 function DirEntryRow({
   item,
   selected,
   open,
+  session,
   onClick,
   onHover,
   buttonRef,
@@ -1642,6 +2240,11 @@ function DirEntryRow({
           <span>{subtitle}</span>
         </div>
       </div>
+      {session && (
+        <span className="result-row-right">
+          <SessionBadge session={session} />
+        </span>
+      )}
     </button>
   );
 }
@@ -1713,11 +2316,10 @@ function Welcome() {
       <section className="welcome-section">
         <h3 className="welcome-subtitle">Run an existing workflow</h3>
         <p className="welcome-body">
-          Open one you already have on your machine — click the folder
-          icon at the right of the search bar, or drag a folder onto
-          this window. To run a workflow from a git repository, paste
-          a reference like <code>github.com/cori-do/workflows</code> and press
-          Enter.
+          Open one you already have on your machine — click{" "}
+          <strong>+ source</strong> next to the filter bar, or drag a
+          folder onto this window. The same panel takes a repository
+          reference like <code>github.com/cori-do/workflows</code>.
         </p>
       </section>
 
@@ -1747,9 +2349,54 @@ function describeRecentSource(r: RecentWorkflow): string {
   if (s.kind === "local") return s.path;
   if (s.kind === "remote") {
     const tail = s.subpath ? `${s.repo}/${s.subpath}` : s.repo;
-    return s.ref ? `${s.host}/${tail}@${s.ref}` : `${s.host}/${tail}`;
+    const base = s.ref ? `${s.host}/${tail}@${s.ref}` : `${s.host}/${tail}`;
+    // The resolved sha is the pin — the part that says "still the same
+    // code as last time".
+    return s.sha ? `${base} · ${s.sha.slice(0, 8)}` : base;
   }
   return r.key;
+}
+
+// ─── Library sorting + grouping ──────────────────────────────────────────
+
+function sortRecents(
+  rows: RecentWorkflow[],
+  sort: LibrarySort,
+): RecentWorkflow[] {
+  if (sort === "name") {
+    return [...rows].sort((a, b) =>
+      (a.name ?? a.workflow_id).localeCompare(b.name ?? b.workflow_id),
+    );
+  }
+  // ISO-8601 strings order lexicographically.
+  return [...rows].sort((a, b) => b.last_run_at.localeCompare(a.last_run_at));
+}
+
+/** Local sources first, then each pinned repo in row order. */
+function groupRecents(rows: RecentWorkflow[]): Array<{
+  label: string;
+  remote: boolean;
+  rows: RecentWorkflow[];
+}> {
+  const byLabel = new Map<
+    string,
+    { label: string; remote: boolean; rows: RecentWorkflow[] }
+  >();
+  for (const r of rows) {
+    const remote = r.source?.kind === "remote";
+    const label =
+      r.source?.kind === "remote"
+        ? `${r.source.host}/${r.source.repo}`
+        : "this machine";
+    let g = byLabel.get(label);
+    if (!g) {
+      g = { label, remote, rows: [] };
+      byLabel.set(label, g);
+    }
+    g.rows.push(r);
+  }
+  const all = [...byLabel.values()];
+  return [...all.filter((g) => !g.remote), ...all.filter((g) => g.remote)];
 }
 
 /**
@@ -1782,6 +2429,12 @@ function formatErr(e: unknown): string {
   if (isIpcError(e)) return e.message;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/** Session dirs and picked sources are both absolute paths; a trailing
+ *  slash is the only normalization the comparison needs. */
+function normalizeDir(path: string): string {
+  return path.replace(/[\\/]+$/, "");
 }
 
 // ─── Self-update banner ──────────────────────────────────────────────────
@@ -2106,6 +2759,25 @@ function RefreshIcon() {
       <path d="M21 4v5h-5" />
       <path d="M20 12a8 8 0 0 1-13.7 5.6L3 15" />
       <path d="M3 20v-5h5" />
+    </svg>
+  );
+}
+
+/** A pen over a line of text: an agent holding the pen. */
+function PenIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M2.5 13.5h11M2.5 10.5l7.5-7.5 2.5 2.5-7.5 7.5h-2.5z" />
     </svg>
   );
 }

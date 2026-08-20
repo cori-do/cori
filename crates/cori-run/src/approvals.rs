@@ -45,6 +45,14 @@ pub enum ApprovalKind {
     /// an *action item* ("sign in again, then retry"), not a yes/no
     /// question. "Declined" means dismissed.
     ReauthRequired,
+    /// An authoring agent asks the human a question it genuinely can't
+    /// infer (MCP `request_input`) — the decision carries the answer in
+    /// [`ApprovalDecision::response`].
+    AgentInput,
+    /// An authoring agent asks permission for an irreversible action
+    /// (MCP `request_approval`). A denial may carry a human note in
+    /// [`ApprovalDecision::response`] — information, not an error.
+    AgentApproval,
 }
 
 /// A pending approval item, persisted to `pending/<nonce>.json`.
@@ -79,6 +87,12 @@ pub struct ApprovalDecision {
     pub decided_at: DateTime<Utc>,
     /// Which surface decided — `"console"`, `"dialog"`.
     pub via: String,
+    /// Optional structured payload accompanying the decision (an
+    /// `agent_input` answer, a denial note). Absent for plain yes/no —
+    /// both directions stay compatible with response-less readers and
+    /// writers (`docs/schedule-input-prompt-design.md` §D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<JsonValue>,
 }
 
 pub fn pending_dir() -> Result<PathBuf> {
@@ -152,6 +166,17 @@ pub fn list_pending() -> Result<Vec<ApprovalRequest>> {
 /// Record the human's decision and retire the pending item. This is the
 /// only authority transfer in the system.
 pub fn decide(nonce: &str, decision: Decision, via: &str) -> Result<ApprovalDecision> {
+    decide_with_response(nonce, decision, via, None)
+}
+
+/// [`decide`], carrying a structured response back to the requester —
+/// the answer to an `agent_input` question, or a note on a denial.
+pub fn decide_with_response(
+    nonce: &str,
+    decision: Decision,
+    via: &str,
+    response: Option<JsonValue>,
+) -> Result<ApprovalDecision> {
     let pending = pending_dir()?.join(format!("{nonce}.json"));
     anyhow::ensure!(pending.exists(), "no pending approval `{nonce}`");
     let dir = decided_dir()?;
@@ -161,6 +186,7 @@ pub fn decide(nonce: &str, decision: Decision, via: &str) -> Result<ApprovalDeci
         decision,
         decided_at: Utc::now(),
         via: via.to_string(),
+        response,
     };
     let tmp = dir.join(format!(".{nonce}.tmp"));
     let path = dir.join(format!("{nonce}.json"));
@@ -298,6 +324,27 @@ mod tests {
 
         // Deciding twice fails (single-use nonce).
         assert!(decide(&req.nonce, Decision::Approved, "console").is_err());
+
+        // A decision can carry a structured response (agent_input answer).
+        let asked = submit(
+            ApprovalKind::AgentInput,
+            "mcp",
+            "Parameter or hardcode?",
+            json!({ "options": ["parameter", "hardcode"] }),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        decide_with_response(
+            &asked.nonce,
+            Decision::Approved,
+            "console",
+            Some(json!({ "answer": "parameter" })),
+        )
+        .unwrap();
+        let dec = wait_decision(&asked.nonce, Duration::from_secs(2))
+            .unwrap()
+            .expect("answered");
+        assert_eq!(dec.response.unwrap()["answer"], "parameter");
 
         // Expired items vanish from list_pending (fail closed).
         let expired = submit(

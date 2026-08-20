@@ -175,10 +175,26 @@ export interface RunListEntry {
   started_at: string;
   ended_at: string;
   duration_ms: number;
+  /** True for `--dry-run` executions — excluded from median baselines. */
+  dry_run: boolean;
+  /** Content hash of the workflow folder at run time, when recorded. */
+  workflow_content_hash?: string | null;
   cost: { total_eur: number; input_tokens: number; output_tokens: number };
   error?: string | null;
   result_headline?: string | null;
+  /** Declared result fields, for workflow-specific comparisons. */
+  result_fields?: ResolvedResultField[] | null;
 }
+
+export interface StepMedianEntry {
+  activity_id: string;
+  median_ms: number;
+  samples: number;
+}
+
+/** Per-step median durations over recent real runs of one workflow. */
+export const stepMedians = (args: { history_key: string; limit?: number }) =>
+  call<StepMedianEntry[]>("step_medians", args);
 
 /** Mirrors `cori_protocol::trace::WorkflowSource` — kind-tagged. */
 export type WorkflowSource =
@@ -251,6 +267,36 @@ export interface ManifestSummary {
   schedule_tz?: string | null;
 }
 
+export type BuiltinKind =
+  | "branch"
+  | "switch"
+  | "for_each"
+  | "loop"
+  | "wait"
+  | "map"
+  | "parallel";
+
+/** One nested slot of a builtin: an inline step of some kind, or a
+ *  `goto` route to a later sibling step (`goto` = resolved activity id,
+ *  `goto_name` = the authored step name; `"end"` finishes the run). */
+export interface BuiltinSlot {
+  kind?: string;
+  goto?: string;
+  goto_name?: string;
+}
+
+/** Control-flow facts the compiler extracted from a builtin step. */
+export interface BuiltinDetail {
+  /** Nested slot → what the path does (inline step or goto route). */
+  nested?: Record<string, BuiltinSlot>;
+  /** `wait` only: the parsed `for` spec. */
+  wait?: { timeout_ms?: number; until?: string; signal?: string };
+  /** `for_each` only: compile-time item cap. */
+  max_items?: number;
+  /** `loop` only: compile-time iteration cap. */
+  max_iterations?: number;
+}
+
 export interface StepSummary {
   activity_id: string;
   name: string;
@@ -260,10 +306,36 @@ export interface StepSummary {
     | { type: "anywhere" }
     | { type: "local_fs" }
     | { type: "capability"; id: string };
+  /** Step source file, relative to the workflow root. */
+  source_path: string;
+  /** The step's TypeScript source — what actually runs. Absent when the
+   *  file could not be read back from the resolved folder. */
+  source?: string;
+  /** `cli` steps only: the frozen binary name. */
+  binary?: string;
+  /** `mcp_tool` steps only: the frozen server / tool pair. */
+  server?: string;
+  tool?: string;
   /** `llm` steps only: the normalized low/medium/high level. */
   level?: ModelLevel;
   /** `llm` steps only: which backend will serve it, under current settings. */
   llm_resolution?: LlmResolutionInfo;
+  /** `builtin` steps only: the control-flow sub-kind. */
+  builtin?: BuiltinKind;
+  /** `builtin` steps only: nested slots, wait spec, iteration bounds. */
+  builtin_detail?: BuiltinDetail;
+}
+
+export type EffectAccess = "none" | "read" | "prompt" | "may_write";
+
+/** Mirrors `cori_compiler::effects::StepEffect`. */
+export interface StepEffect {
+  activity_id: string;
+  step_name: string;
+  kind: string;
+  target: string;
+  access: EffectAccess;
+  external: boolean;
 }
 
 export interface ConsentRequired {
@@ -284,9 +356,18 @@ export interface WorkflowPreflight {
   required_cli_binaries: string[];
   required_mcp_servers: string[];
   required_llm_providers: string[];
-  capabilities: Capability[];
+  /** The worker's full capability report (null if serialization failed);
+   *  the per-capability list lives at `.capabilities`. */
+  capabilities: CapabilityReport | null;
   missing_capabilities: string[];
+  /** Used by a step's placement but never declared in the manifest. */
+  undeclared_capabilities: string[];
+  /** Compiled effect surface — derived per step, never agent-declared.
+   *  Conservative: an unproven operation counts as a write. */
+  effects: StepEffect[] | null;
   ready: boolean;
+  /** True only for builtins the runtime still defers (`map` / `parallel`).
+   *  Executable control flow (branch/switch/for_each/loop/wait) runs. */
   has_builtin_step: boolean;
 }
 
@@ -315,6 +396,9 @@ export type RunEvent =
       status: string;
       duration_ms: number;
       error: string | null;
+      /** Broker notes (dry-run "would call …", lints) — per-step log lines. */
+      notes?: string[];
+      cost_eur?: number | null;
     }
   | { type: "completed"; trace: RunTrace }
   | { type: "failed"; error: string };
@@ -684,7 +768,9 @@ export type ApprovalKind =
   | "trust_consent"
   | "schedule_reconsent"
   | "step_gate"
-  | "reauth_required";
+  | "reauth_required"
+  | "agent_input"
+  | "agent_approval";
 
 export interface ApprovalRequest {
   nonce: string;
@@ -712,13 +798,157 @@ export const listDecidedApprovals = (): Promise<ApprovalDecisionEntry[]> =>
 export const decideApproval = (
   nonce: string,
   approved: boolean,
-): Promise<void> => call<void>("decide_approval", { nonce, approved });
+  // Structured payload returned to the blocked requester: an
+  // `agent_input` answer ({ answer }) or a denial note ({ note }).
+  response?: Record<string, unknown>,
+): Promise<void> => call<void>("decide_approval", { nonce, approved, response });
 
 export const onApprovalsChanged = (
   cb: (pending: ApprovalRequest[]) => void,
 ): Promise<UnlistenFn> =>
   listen<{ pending: ApprovalRequest[] }>("approvals:changed", (ev) =>
     cb(ev.payload.pending),
+  );
+
+// ---------- Authoring sessions (MCP agents editing workflows) -----------
+// One row per journalled editing session in ~/.cori/sessions/. The
+// Console reads; the only write is the human's Stop.
+
+export interface AuthoringSessionEvent {
+  seq: number;
+  kind: string;
+  rel_path: string | null;
+  to_rel_path: string | null;
+  note: string | null;
+  ts: string;
+}
+
+/** Net effect of the session on one file, replayed from the journal. */
+export type ProposalChange =
+  | "added"
+  | "modified"
+  | "renamed"
+  | "deleted"
+  | "unchanged";
+
+/** One workflow step as the reviewer sees it — compiled identity,
+ * proven effect, and what the session did to its source file. */
+export interface ProposalStep {
+  activity_id: string;
+  index: number;
+  name: string;
+  description: string;
+  kind: string;
+  target: string;
+  access: "none" | "read" | "prompt" | "may_write";
+  external: boolean;
+  source_path: string;
+  source_sha256?: string | null;
+  change: ProposalChange;
+  renamed_from?: string | null;
+}
+
+export interface ProposalFileChange {
+  rel_path: string;
+  change: ProposalChange;
+  renamed_from?: string | null;
+}
+
+export interface ProposalResolution {
+  decision: "accepted" | "rejected";
+  by: string;
+  at: string;
+  published_version?: number | null;
+  reason?: string | null;
+  discarded_changes: boolean;
+}
+
+/** The frozen review card an agent submitted via the `propose` tool. */
+export interface SessionProposal {
+  session_id: string;
+  agent: string;
+  workflow_dir: string;
+  workflow_name: string;
+  description: string;
+  summary: string;
+  base_version: number | null;
+  manifest_version: number;
+  proposed_at: string;
+  steps: ProposalStep[];
+  files: ProposalFileChange[];
+  rollup: {
+    pure: number;
+    reads: number;
+    prompts: number;
+    may_writes: number;
+    external: number;
+  };
+  warnings: string[];
+  resolution?: ProposalResolution | null;
+}
+
+export interface AuthoringSession {
+  session_id: string;
+  agent: string;
+  workflow_dir: string;
+  folder_name: string;
+  state: "writing" | "proposed" | "stopped";
+  stop_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  current_seq: number;
+  last_event: AuthoringSessionEvent | null;
+  proposal: SessionProposal | null;
+}
+
+export const listAuthoringSessions = (): Promise<AuthoringSession[]> =>
+  call<AuthoringSession[]>("list_authoring_sessions");
+
+/** Full journal of one session, oldest-first — live diff + ledger data. */
+export const sessionJournal = (
+  sessionId: string,
+): Promise<AuthoringSessionEvent[]> =>
+  call<AuthoringSessionEvent[]>("session_journal", { session_id: sessionId });
+
+export const stopAuthoringSession = (
+  sessionId: string,
+  reason?: string,
+): Promise<void> =>
+  call<void>("stop_authoring_session", { session_id: sessionId, reason });
+
+/** Rewind the folder to the state after journal entry `seq`. */
+export const rewindAuthoringSession = (
+  sessionId: string,
+  seq: number,
+): Promise<void> =>
+  call<void>("rewind_authoring_session", { session_id: sessionId, seq });
+
+/** Accept a pending proposal: publishes the next version, stops the
+ * session. Returns { version, previous_version, schedules }. */
+export const acceptAuthoringProposal = (
+  sessionId: string,
+): Promise<{ version: number; previous_version: number; schedules: string[] }> =>
+  call("accept_authoring_proposal", { session_id: sessionId });
+
+/** Reject a pending proposal: stops the session with the reason,
+ * optionally rewinding the folder to its pre-session state. */
+export const rejectAuthoringProposal = (
+  sessionId: string,
+  reason?: string,
+  discardChanges = false,
+): Promise<void> =>
+  call<void>("reject_authoring_proposal", {
+    session_id: sessionId,
+    reason,
+    discard_changes: discardChanges,
+  });
+
+/** Pushed by the Rust watcher whenever any session's journal moves. */
+export const onSessionsChanged = (
+  cb: (sessions: AuthoringSession[]) => void,
+): Promise<UnlistenFn> =>
+  listen<{ sessions: AuthoringSession[] }>("sessions:changed", (ev) =>
+    cb(ev.payload.sessions),
   );
 
 // ---------- Self-update -------------------------------------------------

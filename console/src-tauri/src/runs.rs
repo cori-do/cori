@@ -31,6 +31,12 @@ pub enum RunEvent {
         status: String,
         duration_ms: u64,
         error: Option<String>,
+        /// Broker notes (dry-run "would call …", lints) — the honest
+        /// per-step log lines the live pane renders.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_eur: Option<f64>,
     },
     Completed {
         trace: Box<RunTrace>,

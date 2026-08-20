@@ -114,57 +114,49 @@ pub fn assign_queues(
         .collect();
 
     for step in compiled.steps.iter_mut() {
-        let (queue, reason) = match &step.placement {
-            Placement::Anywhere => match requesting {
-                WorkerIdentity::Person { user_id } => {
-                    (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
+        let (queue, reason) = queue_for_placement(
+            &step.placement,
+            &step.activity_id,
+            requesting,
+            cluster,
+            &cli_caps,
+        )?;
+
+        // A builtin's nested steps carry their own placement (a branch
+        // case invoking an MCP server must reach a worker with that
+        // capability). Resolve a queue per nested slot and store it in
+        // the slot's metadata; the workflow body dispatches nested
+        // activities on it.
+        if step.kind == cori_protocol::StepKind::Builtin
+            && let Some(nested) = step
+                .metadata
+                .get_mut("nested")
+                .and_then(|value| value.as_object_mut())
+        {
+            for (slot, meta) in nested.iter_mut() {
+                let Some(meta) = meta.as_object_mut() else {
+                    continue;
+                };
+                // A `goto` route dispatches nothing — no queue to plan.
+                if meta.contains_key("goto") {
+                    continue;
                 }
-                WorkerIdentity::Service { pool } => (
-                    format!("cori.service.{pool}"),
-                    AssignReason::RequestingService,
-                ),
-            },
-            Placement::RequiresLocalFs => match requesting {
-                WorkerIdentity::Person { user_id } => {
-                    (format!("cori.user.{user_id}"), AssignReason::LocalFsForUser)
-                }
-                WorkerIdentity::Service { pool } => {
-                    return Err(PlacementError::LocalFsFromService {
-                        step: step.activity_id.clone(),
-                        pool: pool.clone(),
-                    });
-                }
-            },
-            Placement::RequiresCapability { id } => {
-                if let Some(r) = cluster.first_service_with(id) {
-                    (r.task_queue.clone(), AssignReason::ServicePool)
-                } else if let WorkerIdentity::Person { user_id } = requesting {
-                    // CLI caps for Person identity always route to the
-                    // requesting user's own queue. Declaration is enforced
-                    // by the compiler; presence is verified at dispatch
-                    // (PATH probe in cori-broker::cli). The published
-                    // capability report's CLI list is for Service-pool
-                    // selection above, not for self-routing.
-                    if cli_caps.contains(id.as_str()) {
-                        (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
-                    } else if let Some(r) = cluster.first_user_with(user_id, id) {
-                        (r.task_queue.clone(), AssignReason::RequestingUser)
-                    } else if cluster.person_report(user_id).is_some() {
-                        return Err(PlacementError::MissingCapability {
-                            step: step.activity_id.clone(),
-                            capability: id.clone(),
-                        });
-                    } else {
-                        (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
-                    }
-                } else {
-                    return Err(PlacementError::MissingCapability {
-                        step: step.activity_id.clone(),
-                        capability: id.clone(),
-                    });
-                }
+                let nested_kind = match meta.get("kind").and_then(|v| v.as_str()) {
+                    Some("cli") => cori_protocol::StepKind::Cli,
+                    Some("mcp_tool") => cori_protocol::StepKind::McpTool,
+                    Some("llm") => cori_protocol::StepKind::Llm,
+                    _ => cori_protocol::StepKind::Code,
+                };
+                let placement = cori_compiler::compute_placement(nested_kind, meta);
+                let slot_id = format!("{}#{slot}", step.activity_id);
+                let (nested_queue, _) =
+                    queue_for_placement(&placement, &slot_id, requesting, cluster, &cli_caps)?;
+                meta.insert(
+                    "task_queue".to_string(),
+                    serde_json::Value::String(nested_queue),
+                );
             }
-        };
+        }
 
         step.task_queue = Some(queue.clone());
         summary.push(StepAssignment {
@@ -177,6 +169,69 @@ pub fn assign_queues(
     }
 
     Ok(summary)
+}
+
+/// Resolve one placement to a concrete task queue. Shared by top-level
+/// steps and a builtin's nested slots so both obey the same
+/// identity-derived routing rules.
+fn queue_for_placement(
+    placement: &Placement,
+    step_id: &str,
+    requesting: &WorkerIdentity,
+    cluster: &ClusterView,
+    cli_caps: &std::collections::HashSet<&str>,
+) -> Result<(String, AssignReason), PlacementError> {
+    Ok(match placement {
+        Placement::Anywhere => match requesting {
+            WorkerIdentity::Person { user_id } => {
+                (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
+            }
+            WorkerIdentity::Service { pool } => (
+                format!("cori.service.{pool}"),
+                AssignReason::RequestingService,
+            ),
+        },
+        Placement::RequiresLocalFs => match requesting {
+            WorkerIdentity::Person { user_id } => {
+                (format!("cori.user.{user_id}"), AssignReason::LocalFsForUser)
+            }
+            WorkerIdentity::Service { pool } => {
+                return Err(PlacementError::LocalFsFromService {
+                    step: step_id.to_string(),
+                    pool: pool.clone(),
+                });
+            }
+        },
+        Placement::RequiresCapability { id } => {
+            if let Some(r) = cluster.first_service_with(id) {
+                (r.task_queue.clone(), AssignReason::ServicePool)
+            } else if let WorkerIdentity::Person { user_id } = requesting {
+                // CLI caps for Person identity always route to the
+                // requesting user's own queue. Declaration is enforced
+                // by the compiler; presence is verified at dispatch
+                // (PATH probe in cori-broker::cli). The published
+                // capability report's CLI list is for Service-pool
+                // selection above, not for self-routing.
+                if cli_caps.contains(id.as_str()) {
+                    (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
+                } else if let Some(r) = cluster.first_user_with(user_id, id) {
+                    (r.task_queue.clone(), AssignReason::RequestingUser)
+                } else if cluster.person_report(user_id).is_some() {
+                    return Err(PlacementError::MissingCapability {
+                        step: step_id.to_string(),
+                        capability: id.clone(),
+                    });
+                } else {
+                    (format!("cori.user.{user_id}"), AssignReason::RequestingUser)
+                }
+            } else {
+                return Err(PlacementError::MissingCapability {
+                    step: step_id.to_string(),
+                    capability: id.clone(),
+                });
+            }
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

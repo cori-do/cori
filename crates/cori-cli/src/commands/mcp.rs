@@ -1,10 +1,17 @@
 //! `cori mcp` — serve Cori over the Model Context Protocol (stdio).
 //!
-//! Tools are a strict subset of the CLI verbs (`check`, `run`, `show`,
-//! `runs_list`, `runs_show`, `status`) — same arguments, same underlying
-//! code paths in `cori-run`. There are deliberately **no** `login`,
-//! `work`, `config`, or `save_workflow` tools: machine-trust operations
-//! stay human-initiated and credentials never transit an MCP client.
+//! Two tool families:
+//! - **Read/execute** — a strict subset of the CLI verbs (`check`, `run`,
+//!   `show`, `runs_list`, `runs_show`, `status`), same arguments, same
+//!   underlying code paths in `cori-run`.
+//! - **Authoring** — journalled, session-scoped workflow editing
+//!   (`workflow_create` … `session_rewind`, in `mcp_authoring`), added by
+//!   the 2026-08-16 authoring sign-off: external agents hold the pen and
+//!   every write is attributable and rewindable by the Console.
+//!
+//! There are deliberately **no** `login`, `work`, `config`, or one-shot
+//! `save_workflow` tools: machine-trust operations stay human-initiated
+//! and credentials never transit an MCP client.
 //!
 //! Consent model (two layers, decided in the Wave 2 sign-off):
 //! 1. `CORI_ASSUME_YES` is removed from this process's environment at
@@ -45,6 +52,9 @@ const LATEST_PROTOCOL: &str = "2025-06-18";
 /// How long an elicitation waits for the human before being treated as
 /// declined. Generous: the user may be reading a diff.
 const ELICIT_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long `request_input` / `request_approval` block for an answer —
+/// longer than a run confirm: the human may be reading an effects diff.
+const INPUT_TIMEOUT: Duration = Duration::from_secs(600);
 
 // Embedded copy of the `cori-save-workflow` skill, served as MCP
 // resources/prompts so any client receives the capture procedure without
@@ -75,6 +85,8 @@ struct Shared {
     cancelled: Arc<Mutex<Vec<JsonValue>>>,
     /// Did the client declare the `elicitation` capability at initialize?
     client_can_elicit: Arc<Mutex<bool>>,
+    /// `clientInfo.name` from initialize — authoring session attribution.
+    client_name: Arc<Mutex<String>>,
     /// In-flight tool-call threads, joined at stdin EOF so a client that
     /// closes stdin right after its last request still gets every response.
     workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
@@ -121,6 +133,7 @@ pub fn mcp() -> Result<()> {
         next_req_id: Arc::new(AtomicU64::new(1)),
         cancelled: Arc::new(Mutex::new(Vec::new())),
         client_can_elicit: Arc::new(Mutex::new(false)),
+        client_name: Arc::new(Mutex::new("unknown agent".to_string())),
         workers: Arc::new(Mutex::new(Vec::new())),
     };
 
@@ -195,6 +208,9 @@ fn handle_request(shared: &Shared, id: JsonValue, method: &str, params: JsonValu
             };
             let can_elicit = params.pointer("/capabilities/elicitation").is_some();
             *shared.client_can_elicit.lock().expect("elicit lock") = can_elicit;
+            if let Some(name) = params.pointer("/clientInfo/name").and_then(|n| n.as_str()) {
+                *shared.client_name.lock().expect("client name lock") = name.to_string();
+            }
             shared.reply(
                 &id,
                 json!({
@@ -307,18 +323,37 @@ fn handle_request(shared: &Shared, id: JsonValue, method: &str, params: JsonValu
 
 const SERVER_INSTRUCTIONS: &str = "Cori turns agent conversations into deterministic, \
 re-runnable workflows (a workflow is a reviewed folder on disk; `cori run` executes it \
-on Temporal with no LLM in the loop unless a step declares one). Tools mirror the CLI \
-verbs: check (preflight readiness), run (execute — always asks the human to confirm, \
-via elicitation or a native dialog on the machine; there is no auto-approve), show \
-(inspect a workflow), runs_list / runs_show (run history), status (machine overview). There are intentionally no login/work/config \
-tools over MCP. The `cori-save-workflow` prompt and the cori://skill/* resources contain \
-the full procedure for capturing the current conversation as a workflow folder.";
+on Temporal with no LLM in the loop unless a step declares one). Read/execute tools \
+mirror the CLI verbs: check (preflight readiness), run (execute — always asks the human \
+to confirm, via elicitation or a native dialog on the machine; there is no auto-approve), \
+show (inspect a workflow), runs_list / runs_show (run history), status (machine overview). \
+Authoring tools edit workflow folders through journalled sessions the Cori desktop app \
+can attribute, mirror, and undo: workflow_create / workflow_open start a session; \
+workflow_write_file / workflow_delete_file / workflow_rename_step mutate (writes return \
+the same lint warnings check enforces — fix them immediately); conventions returns the \
+step templates and house rules as data (call it before writing steps); capabilities \
+returns per-capability readiness with the exact remedy; session_status / session_stop / \
+session_rewind manage the session. Renames go through workflow_rename_step, never \
+write+delete — it renumbers siblings and makes orphaned step files impossible. Finish \
+authoring with propose: it freezes a per-step, per-effect review card the human accepts \
+(publishing the next version) or rejects in the Console — never leave a session open \
+when the work is done. There \
+are intentionally no login/work/config tools over MCP. The `cori-save-workflow` prompt \
+and the cori://skill/* resources contain the full capture procedure.";
 
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
 fn tool_definitions() -> JsonValue {
+    let mut tools = base_tool_definitions();
+    if let Some(arr) = tools.as_array_mut() {
+        arr.extend(super::mcp_authoring::tool_definitions());
+    }
+    tools
+}
+
+fn base_tool_definitions() -> JsonValue {
     json!([
         {
             "name": "check",
@@ -426,7 +461,17 @@ fn dispatch_tool(
         "runs_list" => tool_runs_list(args).map(|v| (v, false)),
         "runs_show" => tool_runs_show(args).map(|v| (v, false)),
         "status" => tool_status().map(|v| (v, false)),
-        other => bail!("unknown tool: {other}"),
+        // Blocking human-gate tools live here (they need `Shared` for
+        // elicitation); the rest of the authoring family dispatches below.
+        "request_input" => tool_request_input(shared, args),
+        "request_approval" => tool_request_approval(shared, args),
+        other => {
+            let agent = shared.client_name.lock().expect("client name lock").clone();
+            match super::mcp_authoring::dispatch(&agent, other, args)? {
+                Some(outcome) => Ok(outcome),
+                None => bail!("unknown tool: {other}"),
+            }
+        }
     }
 }
 
@@ -927,7 +972,20 @@ fn native_confirm_impl(message: &str) -> Result<ElicitOutcome> {
     })
 }
 
-fn elicit_confirm(shared: &Shared, message: &str) -> Result<ElicitOutcome> {
+/// One elicitation round-trip: `action` (`accept`/`decline`/`cancel`)
+/// plus whatever content the client returned. `None` = timeout — never
+/// treated as a yes.
+struct ElicitAnswer {
+    action: String,
+    content: JsonValue,
+}
+
+fn elicit(
+    shared: &Shared,
+    message: &str,
+    requested_schema: JsonValue,
+    timeout: Duration,
+) -> Result<Option<ElicitAnswer>> {
     let id = shared.next_req_id.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = mpsc::channel();
     shared.pending.lock().expect("pending lock").insert(id, tx);
@@ -938,40 +996,334 @@ fn elicit_confirm(shared: &Shared, message: &str) -> Result<ElicitOutcome> {
         "method": "elicitation/create",
         "params": {
             "message": message,
-            "requestedSchema": {
-                "type": "object",
-                "properties": {
-                    "confirm": {
-                        "type": "boolean",
-                        "title": "Confirm",
-                        "description": "true to proceed"
-                    }
-                },
-                "required": ["confirm"]
-            }
+            "requestedSchema": requested_schema
         }
     }));
 
-    let response = match rx.recv_timeout(ELICIT_TIMEOUT) {
+    let response = match rx.recv_timeout(timeout) {
         Ok(r) => r,
         Err(_) => {
             shared.pending.lock().expect("pending lock").remove(&id);
-            return Ok(ElicitOutcome::NoAnswer);
+            return Ok(None);
         }
     };
-    let action = response
-        .pointer("/result/action")
-        .and_then(|a| a.as_str())
-        .unwrap_or("cancel");
-    let confirmed = response
-        .pointer("/result/content/confirm")
+    Ok(Some(ElicitAnswer {
+        action: response
+            .pointer("/result/action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("cancel")
+            .to_string(),
+        content: response
+            .pointer("/result/content")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    }))
+}
+
+fn elicit_confirm(shared: &Shared, message: &str) -> Result<ElicitOutcome> {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "confirm": {
+                "type": "boolean",
+                "title": "Confirm",
+                "description": "true to proceed"
+            }
+        },
+        "required": ["confirm"]
+    });
+    let Some(answer) = elicit(shared, message, schema, ELICIT_TIMEOUT)? else {
+        return Ok(ElicitOutcome::NoAnswer);
+    };
+    let confirmed = answer
+        .content
+        .get("confirm")
         .and_then(|c| c.as_bool())
         // Some clients return no content for a plain accept; accept means yes.
         .unwrap_or(true);
-    Ok(match action {
+    Ok(match answer.action.as_str() {
         "accept" if confirmed => ElicitOutcome::Accepted,
         "accept" | "decline" => ElicitOutcome::Declined,
         _ => ElicitOutcome::NoAnswer,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Ask the human: request_input / request_approval
+//
+// Both live here rather than in `mcp_authoring` because they need the
+// elicitation plumbing (`Shared`). Channel order mirrors
+// `confirm_with_human`, and every rung fails closed: an unanswered
+// channel is never a yes, and a channel that exists but doesn't answer
+// never falls through to the next one.
+// ---------------------------------------------------------------------------
+
+fn tool_request_input(shared: &Shared, args: &JsonValue) -> Result<(JsonValue, bool)> {
+    use super::mcp_authoring::{err, load_session};
+
+    let session_id = arg_str(args, "session_id")?;
+    let session = match load_session(&session_id) {
+        Ok(s) => s,
+        Err(e) => return Ok(e),
+    };
+    let question = arg_str(args, "question")?;
+    let options: Vec<String> = args
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let default = args
+        .get("default")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let kind = args
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or(if options.is_empty() { "text" } else { "choice" });
+
+    if kind == "secret" {
+        return Ok(err(
+            "not_supported",
+            "secret input is not available yet: credentials never transit an MCP \
+             client, and the credential-reference path is not built"
+                .into(),
+            Some("have the human connect the credential with `cori login` or the Cori desktop app"),
+        ));
+    }
+
+    let answered = |answer: String, by: &str, ts: String| {
+        (json!({ "answer": answer, "by": by, "ts": ts }), false)
+    };
+    let declined = || {
+        err(
+            "input_declined",
+            "the human dismissed the question without answering".into(),
+            None,
+        )
+    };
+    // Timeout with a default is an answer, not an error — the agent
+    // proceeds with it (and `timed_out` says nobody chose it).
+    let timed_out = |default: Option<String>| match default {
+        Some(d) => (
+            json!({ "answer": d, "by": "default", "timed_out": true }),
+            false,
+        ),
+        None => err(
+            "timed_out",
+            format!(
+                "no answer within {}s and no default was provided",
+                INPUT_TIMEOUT.as_secs()
+            ),
+            Some("ask again, or provide a default the workflow can proceed with"),
+        ),
+    };
+
+    // Rung 1: MCP elicitation with a typed answer schema.
+    if *shared.client_can_elicit.lock().expect("elicit lock") {
+        let mut answer_schema = json!({
+            "type": "string",
+            "title": "Answer",
+            "description": question
+        });
+        if !options.is_empty() {
+            answer_schema["enum"] = json!(options);
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": { "answer": answer_schema },
+            "required": ["answer"]
+        });
+        return Ok(match elicit(shared, &question, schema, INPUT_TIMEOUT)? {
+            Some(ans) if ans.action == "accept" => {
+                match ans.content.get("answer").and_then(|a| a.as_str()) {
+                    Some(a) => answered(
+                        a.to_string(),
+                        "elicitation",
+                        chrono::Utc::now().to_rfc3339(),
+                    ),
+                    None => timed_out(default),
+                }
+            }
+            Some(_) => declined(),
+            None => timed_out(default),
+        });
+    }
+
+    // Rung 2: the Console inbox, response-carrying.
+    if cori_run::approvals::console_alive() {
+        let payload = json!({
+            "question": question,
+            "options": options,
+            "default": default,
+            "kind": kind,
+            "session_id": session_id,
+            "workflow_dir": session.workflow_dir.display().to_string(),
+            "agent": session.agent,
+        });
+        let req = cori_run::approvals::submit(
+            cori_run::approvals::ApprovalKind::AgentInput,
+            "mcp",
+            &question,
+            payload,
+            INPUT_TIMEOUT,
+        )?;
+        return Ok(
+            match cori_run::approvals::wait_decision(&req.nonce, INPUT_TIMEOUT)? {
+                Some(dec) if dec.decision == cori_run::approvals::Decision::Approved => {
+                    let answer = dec
+                        .response
+                        .as_ref()
+                        .and_then(|r| r.get("answer"))
+                        .and_then(|a| a.as_str())
+                        .map(str::to_string)
+                        .or_else(|| default.clone());
+                    match answer {
+                        Some(a) => answered(a, &dec.via, dec.decided_at.to_rfc3339()),
+                        None => timed_out(None),
+                    }
+                }
+                Some(_) => declined(),
+                None => timed_out(default),
+            },
+        );
+    }
+
+    // No text-capable channel (native dialogs are yes/no only).
+    Ok(err(
+        "no_channel",
+        "no channel can collect an answer: the MCP client does not support \
+         elicitation and the Cori desktop app is not running"
+            .into(),
+        Some("open the Cori desktop app, or proceed with a sensible default and say so"),
+    ))
+}
+
+const APPROVAL_ACTIONS: &[&str] = &[
+    "publish",
+    "new_external_effect",
+    "new_capability",
+    "schedule_change",
+    "run_live",
+];
+
+fn tool_request_approval(shared: &Shared, args: &JsonValue) -> Result<(JsonValue, bool)> {
+    use super::mcp_authoring::{err, load_session};
+
+    let session_id = arg_str(args, "session_id")?;
+    let session = match load_session(&session_id) {
+        Ok(s) => s,
+        Err(e) => return Ok(e),
+    };
+    let action = arg_str(args, "action")?;
+    if !APPROVAL_ACTIONS.contains(&action.as_str()) {
+        return Ok(err(
+            "bad_request",
+            format!(
+                "`{action}` is not an approvable action ({})",
+                APPROVAL_ACTIONS.join(", ")
+            ),
+            Some("only irreversible things request approval; reads and code-only diffs never do"),
+        ));
+    }
+    let summary = arg_str(args, "summary")?;
+
+    // Scope is always `once` for now: `shape` standing rules need the
+    // Console's house-rules surface, which is not built. Never invent
+    // invisible standing consent.
+    let verdict = |granted: bool, by: &str, note: Option<String>, ledger_id: Option<String>| {
+        // A grant is recorded on the session, where `publish` consumes
+        // it — one grant, one ship.
+        if granted {
+            let _ =
+                cori_run::sessions::record_approval(&session_id, &action, by, ledger_id.as_deref());
+        }
+        let mut v = json!({
+            "granted": granted,
+            "by": by,
+            "scope": "once",
+            "rules_now_active": [],
+        });
+        if let Some(n) = note {
+            v["note"] = json!(n);
+        }
+        if let Some(l) = ledger_id {
+            v["ledger_id"] = json!(l);
+        }
+        // A denial is information, not an error — the agent keeps
+        // working; it just can't ship.
+        (v, false)
+    };
+    let timed_out = || {
+        err(
+            "timed_out",
+            format!("no decision within {}s", INPUT_TIMEOUT.as_secs()),
+            Some("ask again when the human is present, or stop and report what is pending"),
+        )
+    };
+    let message = format!("[{action}] {summary}");
+
+    // Rung 1: elicitation (yes/no; the client renders the summary).
+    if *shared.client_can_elicit.lock().expect("elicit lock") {
+        return Ok(match elicit_confirm(shared, &message)? {
+            ElicitOutcome::Accepted => verdict(true, "elicitation", None, None),
+            ElicitOutcome::Declined => verdict(false, "elicitation", None, None),
+            ElicitOutcome::NoAnswer => timed_out(),
+        });
+    }
+
+    // Rung 2: the Console inbox — the rich surface (effects diff,
+    // evidence, denial note); the nonce is the audit handle.
+    if cori_run::approvals::console_alive() {
+        let payload = json!({
+            "action": action,
+            "summary": summary,
+            "effects_diff": args.get("effects_diff"),
+            "evidence": args.get("evidence"),
+            "requested_scope": args.get("requested_scope"),
+            "session_id": session_id,
+            "workflow_dir": session.workflow_dir.display().to_string(),
+            "agent": session.agent,
+        });
+        let req = cori_run::approvals::submit(
+            cori_run::approvals::ApprovalKind::AgentApproval,
+            "mcp",
+            &message,
+            payload,
+            INPUT_TIMEOUT,
+        )?;
+        return Ok(
+            match cori_run::approvals::wait_decision(&req.nonce, INPUT_TIMEOUT)? {
+                Some(dec) => {
+                    let granted = dec.decision == cori_run::approvals::Decision::Approved;
+                    let note = dec
+                        .response
+                        .as_ref()
+                        .and_then(|r| r.get("note"))
+                        .and_then(|n| n.as_str())
+                        .map(str::to_string);
+                    verdict(granted, &dec.via, note, Some(req.nonce.clone()))
+                }
+                None => timed_out(),
+            },
+        );
+    }
+
+    // Rung 3: native OS dialog (yes/no).
+    Ok(match native_confirm(&message)? {
+        ElicitOutcome::Accepted => verdict(true, "dialog", None, None),
+        ElicitOutcome::Declined => verdict(false, "dialog", None, None),
+        ElicitOutcome::NoAnswer => err(
+            "no_channel",
+            "no channel can collect a decision: the MCP client does not support \
+             elicitation, the Cori desktop app is not running, and no native \
+             dialog could be shown"
+                .into(),
+            Some("open the Cori desktop app and ask again"),
+        ),
     })
 }
 

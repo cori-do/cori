@@ -161,8 +161,32 @@ fn handshake_tools_resources_prompts() {
         .collect();
     assert_eq!(
         names,
-        ["check", "run", "show", "runs_list", "runs_show", "status"],
-        "tools must be exactly the CLI-verb subset"
+        [
+            // Read/execute: the CLI-verb subset.
+            "check",
+            "run",
+            "show",
+            "runs_list",
+            "runs_show",
+            "status",
+            // Authoring: journalled, session-scoped editing.
+            "workflow_create",
+            "workflow_open",
+            "workflow_write_file",
+            "workflow_delete_file",
+            "workflow_rename_step",
+            "conventions",
+            "capabilities",
+            "request_input",
+            "request_approval",
+            "propose",
+            "publish",
+            "revert",
+            "session_status",
+            "session_stop",
+            "session_rewind",
+        ],
+        "tools must be exactly the CLI-verb subset plus the authoring surface"
     );
     // Locked exclusions — never expose these over MCP.
     for forbidden in ["login", "work", "config", "save_workflow"] {
@@ -489,5 +513,698 @@ fn show_inspects_a_local_workflow_offline() {
     assert!(
         sc["consent_required"].is_null(),
         "local paths never need consent"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Authoring surface
+// ---------------------------------------------------------------------------
+
+const VALID_CODE_STEP: &str = r#"import { step } from "@cori-do/sdk";
+import { z } from "zod";
+
+const Input = z.object({}).passthrough();
+const Output = z.object({ n: z.number() });
+
+export default step.code({
+  description: "Count one thing",
+  input: Input,
+  output: Output,
+  run: () => ({ n: 1 }),
+});
+"#;
+
+/// Spawn a client whose authoring root is a scratch directory outside
+/// the real user home (`CORI_AUTHORING_ROOTS` is the test seam).
+fn spawn_authoring() -> (McpClient, tempfile::TempDir) {
+    let work = tempfile::tempdir().expect("workdir");
+    let c = McpClient::spawn(&[(
+        "CORI_AUTHORING_ROOTS",
+        work.path().to_str().expect("utf8 tmpdir"),
+    )]);
+    (c, work)
+}
+
+#[test]
+fn authoring_create_write_rename_delete_rewind_stop_roundtrip() {
+    let (mut c, work) = spawn_authoring();
+    c.initialize(false);
+
+    // Create: scaffold + session + conventions inline.
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Count Products",
+            "goal": "Count products per universe from the export."
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap().clone();
+    let session_id = sc["session_id"].as_str().expect("session id").to_string();
+    assert!(session_id.starts_with("ses_"));
+    let wf_dir = std::path::PathBuf::from(sc["workflow_dir"].as_str().unwrap());
+    assert_eq!(
+        wf_dir,
+        work.path().join("count_products").canonicalize().unwrap(),
+        "workflow_dir is canonical from birth"
+    );
+    let written: Vec<&str> = sc["files_written"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert!(written.contains(&"manifest.md"));
+    assert!(written.contains(&"deno.json"));
+    assert!(written.contains(&"tests/assert.ts"));
+    assert!(
+        sc["conventions"]["house_rules"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty()),
+        "conventions returned inline"
+    );
+    assert!(wf_dir.join("steps").is_dir());
+
+    // Write a valid step: sha comes back, no lint warnings.
+    let resp = c.call_tool(
+        3,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_count.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sha = resp
+        .pointer("/result/structuredContent/sha256")
+        .and_then(|s| s.as_str())
+        .expect("sha256")
+        .to_string();
+    assert_eq!(
+        resp.pointer("/result/structuredContent/warnings").unwrap(),
+        &json!([]),
+        "a valid folder lints clean"
+    );
+
+    // Optimistic concurrency: a stale sha refuses and returns current truth.
+    let resp = c.call_tool(
+        4,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_count.ts",
+            "content": "// clobber",
+            "expect_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "stale_file"
+    );
+    assert_eq!(
+        resp.pointer("/result/structuredContent/current_sha")
+            .unwrap(),
+        &json!(sha),
+    );
+    assert_eq!(
+        std::fs::read_to_string(wf_dir.join("steps/01_count.ts")).unwrap(),
+        VALID_CODE_STEP,
+        "nothing was written on stale"
+    );
+
+    // Rename: the orphan-file class of bug, killed. Old name gone, new
+    // name present, nothing else claiming step 01.
+    let resp = c.call_tool(
+        5,
+        "workflow_rename_step",
+        json!({
+            "session_id": session_id,
+            "from_rel_path": "steps/01_count.ts",
+            "to_rel_path": "steps/01_count_per_universe.ts",
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    assert!(!wf_dir.join("steps/01_count.ts").exists(), "no orphan left");
+    assert!(wf_dir.join("steps/01_count_per_universe.ts").is_file());
+
+    // Delete: the half that was missing from the write-only bridge.
+    let resp = c.call_tool(
+        6,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/02_scratch.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false);
+    let resp = c.call_tool(
+        7,
+        "workflow_delete_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/02_scratch.ts",
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false);
+    assert!(!wf_dir.join("steps/02_scratch.ts").exists());
+
+    // Rewind to the session's very start: every journalled write undone.
+    let resp = c.call_tool(
+        8,
+        "session_rewind",
+        json!({
+            "session_id": session_id, "to_seq": 1,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    assert!(
+        resp.pointer("/result/structuredContent/files_restored")
+            .and_then(|f| f.as_array())
+            .is_some_and(|f| !f.is_empty())
+    );
+    assert!(!wf_dir.join("manifest.md").exists(), "scaffold undone");
+    assert!(!wf_dir.join("steps/01_count_per_universe.ts").exists());
+
+    // Stop: mutations refuse with the reason, status reports the state.
+    let resp = c.call_tool(
+        9,
+        "session_stop",
+        json!({
+            "session_id": session_id, "reason": "review finished",
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false);
+    let resp = c.call_tool(
+        10,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_again.ts",
+            "content": "// nope",
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "session_stopped"
+    );
+    let resp = c.call_tool(11, "session_status", json!({ "session_id": session_id }));
+    assert_eq!(
+        resp.pointer("/result/structuredContent/state").unwrap(),
+        "stopped"
+    );
+}
+
+#[test]
+fn authoring_open_reports_tree_and_refuses_bad_roots() {
+    let (mut c, work) = spawn_authoring();
+    c.initialize(false);
+
+    // Refused: outside every allowed root.
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": "/System/Library",
+            "name": "Nope",
+            "goal": "should be refused"
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "allowed_roots"
+    );
+
+    // Refused: inside Cori's own state, even when a root covers it.
+    let inside_cori = c.home_path.join("workflows");
+    let resp = c.call_tool(
+        3,
+        "workflow_create",
+        json!({
+            "target_dir": inside_cori.to_str().unwrap(),
+            "name": "Nope",
+            "goal": "should be refused"
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true, "{resp}");
+
+    // Create then reopen: the tree carries per-file truth.
+    let resp = c.call_tool(
+        4,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Reopen Me",
+            "goal": "roundtrip"
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let wf_dir = resp
+        .pointer("/result/structuredContent/workflow_dir")
+        .and_then(|d| d.as_str())
+        .unwrap()
+        .to_string();
+
+    let resp = c.call_tool(5, "workflow_open", json!({ "path": wf_dir }));
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert!(sc["session_id"].as_str().unwrap().starts_with("ses_"));
+    assert_eq!(sc["live"], json!(false));
+    assert_eq!(sc["version"], json!(1));
+    let tree = sc["tree"].as_array().unwrap();
+    let manifest_row = tree
+        .iter()
+        .find(|r| r["rel_path"] == "manifest.md")
+        .expect("manifest in tree");
+    assert_eq!(
+        manifest_row["sha256"].as_str().unwrap().len(),
+        64,
+        "tree rows carry sha256"
+    );
+    assert!(
+        sc["manifest"]["id"] == json!("reopen_me"),
+        "manifest parsed: {sc}"
+    );
+}
+
+#[test]
+fn request_input_answered_via_elicitation() {
+    let (mut c, work) = spawn_authoring();
+    c.initialize(true); // client declares elicitation
+
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Ask Me",
+            "goal": "exercise request_input"
+        }),
+    );
+    let session_id = resp
+        .pointer("/result/structuredContent/session_id")
+        .and_then(|s| s.as_str())
+        .expect("session id")
+        .to_string();
+
+    // The call blocks on a server→client elicitation carrying the
+    // question and the options as an enum schema.
+    c.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "request_input", "arguments": {
+            "session_id": session_id,
+            "question": "Parameter or hardcode?",
+            "options": ["parameter", "hardcode"],
+            "default": "parameter"
+        } }
+    }));
+    let elicit = c.recv_server_request("elicitation/create");
+    assert_eq!(
+        elicit.pointer("/params/message").unwrap(),
+        "Parameter or hardcode?"
+    );
+    assert_eq!(
+        elicit
+            .pointer("/params/requestedSchema/properties/answer/enum/0")
+            .unwrap(),
+        "parameter"
+    );
+
+    // Answer like a client would.
+    let elicit_id = elicit["id"].clone();
+    c.send(json!({
+        "jsonrpc": "2.0", "id": elicit_id,
+        "result": { "action": "accept", "content": { "answer": "hardcode" } }
+    }));
+    let resp = c.recv_response(3);
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["answer"], "hardcode");
+    assert_eq!(sc["by"], "elicitation");
+    assert!(sc["ts"].is_string());
+
+    // `secret` is refused, never collected.
+    let resp = c.call_tool(
+        4,
+        "request_input",
+        json!({
+            "session_id": session_id,
+            "question": "API key?",
+            "kind": "secret"
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "not_supported"
+    );
+}
+
+#[test]
+fn request_approval_denied_via_inbox_carries_note_and_ledger_id() {
+    let (mut c, work) = spawn_authoring();
+
+    // Fake a live Console; no elicitation, native dialogs disabled via
+    // the client env below is not needed since the inbox rung precedes
+    // the dialog rung.
+    let state_dir = c.home_path.join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("console.heartbeat"), "test").unwrap();
+
+    c.initialize(false);
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Ship It",
+            "goal": "exercise request_approval"
+        }),
+    );
+    let session_id = resp
+        .pointer("/result/structuredContent/session_id")
+        .and_then(|s| s.as_str())
+        .expect("session id")
+        .to_string();
+
+    c.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "request_approval", "arguments": {
+            "session_id": session_id,
+            "action": "publish",
+            "summary": "Publish ship_it v1 (2 steps, no external effects).",
+            "effects_diff": { "added": [], "removed": [], "unchanged": [] }
+        } }
+    }));
+
+    // Play the Console: find the pending item, deny it with a note.
+    let pending_dir = c.home_path.join("approvals").join("pending");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let pending_file = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no approval item appeared"
+        );
+        if let Ok(entries) = std::fs::read_dir(&pending_dir)
+            && let Some(f) = entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        {
+            break f;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let req: JsonValue = serde_json::from_slice(&std::fs::read(&pending_file).unwrap()).unwrap();
+    assert_eq!(req["kind"], "agent_approval");
+    assert_eq!(req["payload"]["action"], "publish");
+    assert_eq!(req["payload"]["effects_diff"]["added"], json!([]));
+
+    let nonce = req["nonce"].as_str().unwrap();
+    let decided_dir = c.home_path.join("approvals").join("decided");
+    std::fs::create_dir_all(&decided_dir).unwrap();
+    std::fs::write(
+        decided_dir.join(format!("{nonce}.json")),
+        serde_json::to_vec(&json!({
+            "nonce": nonce,
+            "decision": "declined",
+            "decided_at": chrono::Utc::now().to_rfc3339(),
+            "via": "console",
+            "response": { "note": "add a test for step 02 first" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(&pending_file).unwrap();
+
+    // A denial is information, not an error.
+    let resp = c.recv_response(3);
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["granted"], false);
+    assert_eq!(sc["by"], "console");
+    assert_eq!(sc["scope"], "once");
+    assert_eq!(sc["note"], "add a test for step 02 first");
+    assert_eq!(sc["ledger_id"], json!(nonce));
+}
+
+#[test]
+fn publish_gated_then_ships_and_revert_restores() {
+    let (mut c, work) = spawn_authoring();
+    c.initialize(true); // elicitation answers the approval
+
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Release Train",
+            "goal": "exercise publish and revert"
+        }),
+    );
+    let session_id = resp
+        .pointer("/result/structuredContent/session_id")
+        .and_then(|s| s.as_str())
+        .expect("session id")
+        .to_string();
+    let wf_dir = std::path::PathBuf::from(
+        resp.pointer("/result/structuredContent/workflow_dir")
+            .and_then(|d| d.as_str())
+            .unwrap(),
+    );
+
+    // Not compiling (no steps yet) → check_failed, before any approval.
+    let resp = c.call_tool(3, "publish", json!({ "session_id": session_id }));
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "check_failed"
+    );
+
+    // Make it compile, then publish without approval → approval_required.
+    let resp = c.call_tool(
+        4,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_count.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let resp = c.call_tool(5, "publish", json!({ "session_id": session_id }));
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "approval_required"
+    );
+
+    // Grant via elicitation, then publish ships v2 (manifest was v1).
+    c.send(json!({
+        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+        "params": { "name": "request_approval", "arguments": {
+            "session_id": session_id,
+            "action": "publish",
+            "summary": "Publish release_train v2 (1 code step, no external effects)."
+        } }
+    }));
+    let elicit = c.recv_server_request("elicitation/create");
+    let elicit_id = elicit["id"].clone();
+    c.send(json!({
+        "jsonrpc": "2.0", "id": elicit_id,
+        "result": { "action": "accept", "content": { "confirm": true } }
+    }));
+    let resp = c.recv_response(6);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/granted").unwrap(),
+        true
+    );
+
+    let resp = c.call_tool(
+        7,
+        "publish",
+        json!({
+            "session_id": session_id, "notes": "first cut"
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["version"], 2);
+    assert_eq!(sc["previous_version"], 1);
+    assert_eq!(sc["notified"]["schedules"], json!([]));
+    let manifest = std::fs::read_to_string(wf_dir.join("manifest.md")).unwrap();
+    assert!(manifest.contains("version: 2"), "manifest bumped");
+    let versions_root = c.home_path.join("versions");
+    assert!(versions_root.is_dir(), "snapshots live in ~/.cori/versions");
+
+    // One grant, one publish: a second publish needs a fresh approval.
+    let resp = c.call_tool(8, "publish", json!({ "session_id": session_id }));
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "approval_required"
+    );
+
+    // Drift the folder, then revert to v2 restores the published state.
+    let resp = c.call_tool(
+        9,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/02_extra.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false);
+    let resp = c.call_tool(
+        10,
+        "revert",
+        json!({
+            "path": wf_dir.to_str().unwrap(), "to_version": 2
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    assert_eq!(
+        resp.pointer("/result/structuredContent/version").unwrap(),
+        2
+    );
+    assert!(!wf_dir.join("steps/02_extra.ts").exists(), "drift removed");
+    assert!(wf_dir.join("steps/01_count.ts").is_file());
+    let manifest = std::fs::read_to_string(wf_dir.join("manifest.md")).unwrap();
+    assert!(manifest.contains("version: 2"));
+
+    // Reverting to a version that was never published names the options.
+    let resp = c.call_tool(
+        11,
+        "revert",
+        json!({
+            "path": wf_dir.to_str().unwrap(), "to_version": 9
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "not_found"
+    );
+}
+
+#[test]
+fn propose_freezes_review_card_and_console_accept_publishes() {
+    let (mut c, work) = spawn_authoring();
+    c.initialize(false);
+
+    let resp = c.call_tool(
+        2,
+        "workflow_create",
+        json!({
+            "target_dir": work.path().to_str().unwrap(),
+            "name": "Review Train",
+            "goal": "exercise the proposal flow"
+        }),
+    );
+    let session_id = resp
+        .pointer("/result/structuredContent/session_id")
+        .and_then(|s| s.as_str())
+        .expect("session id")
+        .to_string();
+    let wf_dir = std::path::PathBuf::from(
+        resp.pointer("/result/structuredContent/workflow_dir")
+            .and_then(|d| d.as_str())
+            .unwrap(),
+    );
+
+    // Not compiling (no steps yet) → check_failed, with the errors listed.
+    let resp = c.call_tool(
+        3,
+        "propose",
+        json!({ "session_id": session_id, "summary": "Too early." }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "check_failed"
+    );
+
+    // Make it compile, then propose freezes the per-step review card.
+    let resp = c.call_tool(
+        4,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_count.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let resp = c.call_tool(
+        5,
+        "propose",
+        json!({
+            "session_id": session_id,
+            "summary": "Add a counting workflow with one pure code step."
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), false, "{resp}");
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["state"], "proposed");
+    let steps = sc["proposal"]["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["activity_id"], "01_count");
+    assert_eq!(steps[0]["kind"], "code");
+    assert_eq!(steps[0]["access"], "none");
+    assert_eq!(steps[0]["external"], false);
+    assert_eq!(steps[0]["change"], "added");
+    assert_eq!(sc["proposal"]["rollup"]["pure"], 1);
+
+    // While proposed, every mutation is refused with the review pointer.
+    let resp = c.call_tool(
+        6,
+        "workflow_write_file",
+        json!({
+            "session_id": session_id,
+            "rel_path": "steps/01_count.ts",
+            "content": VALID_CODE_STEP,
+        }),
+    );
+    assert_eq!(resp.pointer("/result/isError").unwrap(), true);
+    assert_eq!(
+        resp.pointer("/result/structuredContent/error/code")
+            .unwrap(),
+        "session_proposed"
+    );
+
+    // The human accepts in the Console (same library call the Tauri
+    // command makes), from a different process than the MCP server —
+    // disk is the only truth. In-process env is safe here: no other
+    // test in this binary reads CORI_HOME in-process, and every child
+    // gets its CORI_HOME passed explicitly.
+    // SAFETY: single writer; see above.
+    unsafe { std::env::set_var("CORI_HOME", &c.home_path) };
+    let out = cori_run::proposals::accept(&session_id, "console", None).expect("accept");
+    unsafe { std::env::remove_var("CORI_HOME") };
+    assert_eq!(out.version, 2);
+    let manifest = std::fs::read_to_string(wf_dir.join("manifest.md")).unwrap();
+    assert!(manifest.contains("version: 2"), "manifest bumped");
+
+    let resp = c.call_tool(7, "session_status", json!({ "session_id": session_id }));
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["state"], "stopped");
+    assert!(
+        sc["stop_reason"].as_str().unwrap().contains("published v2"),
+        "{sc}"
     );
 }

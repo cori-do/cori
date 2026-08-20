@@ -125,11 +125,18 @@ pub struct RunListEntry {
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub duration_ms: u128,
+    pub dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_content_hash: Option<String>,
     pub cost: CostSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_headline: Option<String>,
+    /// The declared result fields (label/value/format/tone), so
+    /// workflow-specific numbers can join duration/cost in comparisons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_fields: Option<Value>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -202,6 +209,14 @@ fn collect_traces(
             {
                 continue;
             }
+            let (result_headline, result_fields) = match trace.result {
+                Some(result) => (
+                    (!result.headline.is_empty()).then(|| result.headline.clone()),
+                    (!result.fields.is_empty())
+                        .then(|| serde_json::to_value(&result.fields).unwrap_or(Value::Null)),
+                ),
+                None => (None, None),
+            };
             out.push(RunListEntry {
                 key: key.clone(),
                 utc,
@@ -212,17 +227,114 @@ fn collect_traces(
                 started_at: trace.started_at,
                 ended_at: trace.ended_at,
                 duration_ms: trace.duration_ms,
+                dry_run: trace.dry_run,
+                workflow_content_hash: trace.workflow_content_hash,
                 cost: trace.cost,
                 error: trace.error,
-                result_headline: trace
-                    .result
-                    .and_then(|result| (!result.headline.is_empty()).then_some(result.headline)),
+                result_headline,
+                result_fields,
             });
         }
     }
     out.sort_by_key(|e| Reverse(e.started_at));
     out.truncate(limit);
     Ok(out)
+}
+
+// ---------- step_medians ----------
+
+#[derive(Serialize)]
+pub struct StepMedianEntry {
+    pub activity_id: String,
+    pub median_ms: u128,
+    pub samples: usize,
+}
+
+/// Per-step median durations over this workflow's recent real runs —
+/// the ticks the trace timeline draws against. Dry runs and failed runs
+/// are excluded; a step contributes only when its activity finished ok.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn step_medians(
+    history_key: String,
+    limit: Option<usize>,
+) -> IpcResult<Vec<StepMedianEntry>> {
+    if !is_safe_segment(&history_key) {
+        return Err(IpcError::BadRequest("invalid history key".into()));
+    }
+    let runs_root = paths::runs_dir().map_err(IpcError::Internal)?;
+    let limit = limit.unwrap_or(20);
+    tokio::task::spawn_blocking(move || collect_step_medians(&runs_root, &history_key, limit))
+        .await
+        .map_err(|e| IpcError::Internal(anyhow::anyhow!("runs task join: {e}")))?
+        .map_err(IpcError::Internal)
+}
+
+fn collect_step_medians(
+    runs_root: &Path,
+    history_key: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<StepMedianEntry>> {
+    let dir = runs_root.join(history_key);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    // Filenames are UTC timestamps, so a lexical sort is chronological.
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .flatten()
+        .map(|f| f.path())
+        .filter(|p| {
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| !n.starts_with('.'))
+        })
+        .collect();
+    files.sort();
+    files.reverse();
+
+    let mut durations: std::collections::BTreeMap<String, Vec<u128>> =
+        std::collections::BTreeMap::new();
+    let mut used = 0usize;
+    for path in files {
+        if used >= limit {
+            break;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(trace) = serde_json::from_slice::<RunTrace>(&bytes) else {
+            continue;
+        };
+        if trace.dry_run || trace.status != "succeeded" {
+            continue;
+        }
+        used += 1;
+        for a in &trace.activities {
+            if a.status == "ok" {
+                durations
+                    .entry(a.activity_id.clone())
+                    .or_default()
+                    .push(a.duration_ms);
+            }
+        }
+    }
+    Ok(durations
+        .into_iter()
+        .map(|(activity_id, mut ds)| {
+            ds.sort_unstable();
+            let mid = ds.len() / 2;
+            let median_ms = if ds.len() % 2 == 1 {
+                ds[mid]
+            } else {
+                (ds[mid - 1] + ds[mid]) / 2
+            };
+            StepMedianEntry {
+                activity_id,
+                median_ms,
+                samples: ds.len(),
+            }
+        })
+        .collect())
 }
 
 // ---------- get_run ----------

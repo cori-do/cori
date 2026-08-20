@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cori_protocol::StepKind;
+use cori_protocol::{Placement, StepKind};
 use cori_run::remote::trust;
 use cori_run::{
     ConsentCallback, ConsentDecision, PreflightOutcome, ProgressSink, RunRequest, Trigger,
@@ -37,7 +37,17 @@ pub struct WorkflowPreflight {
     pub required_llm_providers: Vec<String>,
     pub capabilities: Value,
     pub missing_capabilities: Vec<String>,
+    /// Capabilities a step's placement requires but the manifest never
+    /// declared — the third display state (`not declared`), computed
+    /// from the same compiled steps `check` sees.
+    pub undeclared_capabilities: Vec<String>,
+    /// Per-step compiled effect surface (`cori_compiler::effects`) —
+    /// what each step touches, derived, never agent-declared.
+    pub effects: Value,
     pub ready: bool,
+    /// True when a step uses a builtin the runtime still defers
+    /// (`map` / `parallel`). Executable control flow (`branch`,
+    /// `switch`, `for_each`, `loop`, `wait`) does not set this.
     pub has_builtin_step: bool,
 }
 
@@ -48,6 +58,22 @@ pub struct StepSummary {
     pub kind: String,
     pub description: String,
     pub placement: Value,
+    /// Step source file, relative to the workflow root.
+    pub source_path: String,
+    /// The step's TypeScript source, read back from the resolved folder —
+    /// what the inspector shows as the command / code / prompt actually
+    /// executed. `None` when the file cannot be read (or is implausibly
+    /// large for a step file).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// `cli` steps only: the frozen binary name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// `mcp_tool` steps only: the frozen server / tool pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
     /// What an `llm` step declared. The compiler always normalizes omission
     /// to `medium`. Absent for every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +85,15 @@ pub struct StepSummary {
     /// step isn't an `llm` step, or when nothing is ready to serve it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_resolution: Option<crate::llm_cmd::LlmResolutionInfo>,
+    /// Builtin sub-kind (`branch` / `switch` / `for_each` / `loop` /
+    /// `wait` / `map` / `parallel`). Absent for every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+    /// Control-flow details for builtin steps: nested slot names and
+    /// kinds, case labels, wait spec, iteration bounds. Absent
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin_detail: Option<Value>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -142,9 +177,15 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
         .steps
         .iter()
         .map(|s| {
-            if matches!(s.kind, StepKind::Builtin) {
+            let builtin = s
+                .metadata
+                .get("builtin")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if matches!(s.kind, StepKind::Builtin) && is_deferred_builtin(builtin.as_deref()) {
                 has_builtin = true;
             }
+            let builtin_detail = builtin.as_deref().and_then(|_| builtin_detail(s));
             let level = s
                 .metadata
                 .get("level")
@@ -160,20 +201,53 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
                     })
                 })
                 .flatten();
+            let meta_string = |key: &str| {
+                s.metadata
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
             StepSummary {
                 activity_id: s.activity_id.clone(),
                 name: s.name.clone(),
                 kind: kind_label(&s.kind).to_string(),
                 description: s.description.clone(),
                 placement: serde_json::to_value(&s.placement).unwrap_or(Value::Null),
+                source_path: s.source_path.clone(),
+                source: read_step_source(&outcome.loaded.absolute_path, &s.source_path),
+                binary: meta_string("binary"),
+                server: meta_string("server"),
+                tool: meta_string("tool"),
                 level,
                 llm_resolution,
+                builtin,
+                builtin_detail,
             }
         })
         .collect();
 
     let capabilities = serde_json::to_value(&outcome.cap_report).unwrap_or(Value::Null);
     let ready = outcome.missing_caps.is_empty();
+
+    let declared: std::collections::BTreeSet<&str> = compiled
+        .manifest
+        .tools_required
+        .iter()
+        .chain(compiled.manifest.mcp_servers.iter())
+        .map(String::as_str)
+        .collect();
+    let undeclared_capabilities: Vec<String> = compiled
+        .steps
+        .iter()
+        .filter_map(|s| match &s.placement {
+            Placement::RequiresCapability { id } if !declared.contains(id.as_str()) => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     WorkflowPreflight {
         manifest,
@@ -186,6 +260,9 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
         required_llm_providers: compiled.required_llm_providers.clone(),
         capabilities,
         missing_capabilities: outcome.missing_caps,
+        undeclared_capabilities,
+        effects: serde_json::to_value(cori_compiler::effects::compute_effects(compiled))
+            .unwrap_or(Value::Null),
         ready,
         has_builtin_step: has_builtin,
     }
@@ -198,6 +275,69 @@ fn kind_label(k: &StepKind) -> &'static str {
         StepKind::Code => "code",
         StepKind::Llm => "llm",
         StepKind::Builtin => "builtin",
+    }
+}
+
+/// A step source file is a page of TypeScript; anything past this is not
+/// one, and the inspector would choke rendering it.
+const MAX_STEP_SOURCE_BYTES: u64 = 256 * 1024;
+
+fn read_step_source(workflow_root: &std::path::Path, source_path: &str) -> Option<String> {
+    let path = workflow_root.join(source_path);
+    let len = std::fs::metadata(&path).ok()?.len();
+    if len > MAX_STEP_SOURCE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(&path).ok()
+}
+
+/// `map` / `parallel` (or an unknown/legacy sub-kind) are still deferred
+/// at runtime; the executable five are not.
+fn is_deferred_builtin(sub_kind: Option<&str>) -> bool {
+    !matches!(
+        sub_kind,
+        Some("branch") | Some("switch") | Some("for_each") | Some("loop") | Some("wait")
+    )
+}
+
+/// Project a builtin step's compiled control-flow metadata for display:
+/// nested slots with their kinds, plus the wait spec / iteration bounds.
+fn builtin_detail(step: &cori_protocol::CompiledStep) -> Option<Value> {
+    let mut detail = serde_json::Map::new();
+    if let Some(nested) = step.metadata.get("nested").and_then(Value::as_object) {
+        let slots: serde_json::Map<String, Value> = nested
+            .iter()
+            .map(|(slot, meta)| {
+                let mut out = serde_json::Map::new();
+                // A routing slot carries its resolved target; an inline
+                // slot carries its nested step kind.
+                if let Some(target) = meta.get("goto").and_then(Value::as_str) {
+                    out.insert("goto".to_string(), Value::String(target.to_string()));
+                    if let Some(name) = meta.get("goto_name").and_then(Value::as_str) {
+                        out.insert("goto_name".to_string(), Value::String(name.to_string()));
+                    }
+                } else {
+                    let kind = meta
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("code")
+                        .to_string();
+                    out.insert("kind".to_string(), Value::String(kind));
+                }
+                (slot.clone(), Value::Object(out))
+            })
+            .collect();
+        detail.insert("nested".to_string(), Value::Object(slots));
+    }
+    for key in ["wait", "max_items", "max_iterations"] {
+        if let Some(value) = step.metadata.get(key) {
+            detail.insert(key.to_string(), value.clone());
+        }
+    }
+    if detail.is_empty() {
+        None
+    } else {
+        Some(Value::Object(detail))
     }
 }
 
@@ -413,6 +553,8 @@ impl ProgressSink for ChannelProgressSink {
             status: s.status.clone(),
             duration_ms: s.duration_ms,
             error: s.error.clone(),
+            notes: s.notes.clone(),
+            cost_eur: s.cost_eur,
         });
     }
 }

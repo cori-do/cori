@@ -19,6 +19,21 @@ export async function clientLoader({ params }: LoaderArgs): Promise<RunTrace> {
   return getRun({ key, filename });
 }
 
-export default function RunDetail({ loaderData }: { loaderData: RunTrace }) {
-  return <RunView runId={loaderData.run_id} initialTrace={loaderData} />;
+export default function RunDetail({
+  loaderData,
+  params,
+}: {
+  loaderData: RunTrace;
+  params: { key?: string; utc?: string };
+}) {
+  const key = params.key;
+  const utc = params.utc?.replace(/\.json$/, "");
+  return (
+    <RunView
+      runId={loaderData.run_id}
+      initialTrace={loaderData}
+      historyKey={key}
+      tracePath={key && utc ? `~/.cori/runs/${key}/${utc}.json` : undefined}
+    />
+  );
 }

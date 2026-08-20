@@ -67,6 +67,7 @@ struct ArgsSpec {
     args: JsonValue,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     runtime: &Runtime,
     capabilities: &Capabilities,
@@ -75,12 +76,18 @@ pub fn run(
     user_id: &str,
     credentials_dir: &Path,
     expected_target: Option<(&str, &str)>,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
     // 1. Resolve args via the runner.
-    let args_call =
-        dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::McpArgs, input)?;
+    let args_call = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::McpArgs,
+        input,
+        selector,
+    )?;
     let spec: ArgsSpec =
         serde_json::from_value(args_call.output.clone()).map_err(|e| BrokerError::BadEnvelope {
             envelope: args_call.output.to_string(),
@@ -108,7 +115,7 @@ pub fn run(
 
     // 3. Spawn + call.
     let output = call_tool(server_cfg, &spec.tool, &spec.args, &extra_env)?;
-    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &output)?;
+    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &output, selector)?;
 
     let mut stderr = args_call.stderr;
     if !validated.stderr.trim().is_empty() {

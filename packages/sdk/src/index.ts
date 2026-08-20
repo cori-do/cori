@@ -181,48 +181,165 @@ export interface LlmStepDef extends StepDef<"llm"> {
 }
 
 // ---------------------------------------------------------------------------
-// builtins
+// builtins — Cori's control-flow primitives.
+//
+// Four are executable: `branch` (if / else), `switch`, `for_each` / `loop`,
+// and `wait` (delay). `map` and `parallel` are still accepted by the
+// compiler but deferred at runtime.
+//
+// A builtin's nested steps (`then`, `cases.<label>`, `apply`, `body`, …)
+// are ordinary non-builtin StepDefs declared inline in the same file. The
+// worker evaluates the selector function (`if` / `on` / `over` / `until`)
+// in the sandboxed runner, then dispatches the selected nested step like
+// any other activity. Builtins cannot nest other builtins.
 // ---------------------------------------------------------------------------
+
+export type BuiltinKind =
+  | "map"
+  | "for_each"
+  | "branch"
+  | "switch"
+  | "loop"
+  | "parallel"
+  | "wait";
+
+/** Steps a builtin may contain. Builtins cannot nest builtins. */
+export type NestedStepDef = CliStepDef | McpStepDef | CodeStepDef | LlmStepDef;
+
+/**
+ * A routing target produced by [`goto`]. Where a `branch` / `switch`
+ * path accepts one, the path jumps to the named sibling step instead of
+ * running an inline nested step.
+ */
+export interface GotoRef {
+  readonly __cori_goto: string;
+}
+
+/**
+ * Route a `branch` / `switch` path to a later sibling step (forward
+ * only), or to `"end"` to finish the run after this step.
+ *
+ * `target` is the step's *name* — the snake_case part of its
+ * `NN_name.ts` filename, without the number — so renumbering steps
+ * never breaks a route. The compiler resolves it and rejects unknown,
+ * ambiguous, backward, or self targets.
+ */
+export function goto(target: string): GotoRef {
+  return { __cori_goto: target };
+}
+
+/** What a `branch` / `switch` path may be: run one step, or route. */
+export type BranchPath = NestedStepDef | GotoRef;
 
 export interface MapOpts<I, O> extends BaseStepOpts {
   readonly over: (input: I) => readonly unknown[];
-  readonly apply: StepDef;
+  readonly apply: NestedStepDef;
   readonly concurrency?: number;
   readonly _phantom?: O;
 }
 
 export interface ForEachOpts<I, O> extends BaseStepOpts {
+  /** Extract the list to iterate from the accumulated input. Pure. */
   readonly over: (input: I) => readonly unknown[];
-  readonly apply: StepDef;
+  /**
+   * Step applied to each item, sequentially. Receives the accumulated
+   * input plus `item` and `item_index` fields.
+   */
+  readonly apply: NestedStepDef;
+  /** Upper bound on iterated items (default 100). */
+  readonly max_items?: number;
   readonly _phantom?: O;
 }
 
-export interface BranchOpts<T extends string> extends BaseStepOpts {
-  readonly on: (input: unknown) => T;
-  readonly cases: Record<T, StepDef>;
+/** If / Else: splits the path based on whether a rule is met. */
+export interface BranchOpts<I> extends BaseStepOpts {
+  /** The rule. Evaluated in the sandboxed runner; must be pure. */
+  readonly if: (input: I) => boolean;
+  /** Path when the rule holds: run a step, or `goto(...)` a later one. */
+  readonly then: BranchPath;
+  /** Optional path when it does not; omitting it makes `false` a no-op. */
+  readonly else?: BranchPath;
 }
 
-type InferredBranchOpts<
-  C extends Readonly<Record<string, StepDef>>,
-> = BaseStepOpts & {
-  readonly cases: C;
-  readonly on: (input: unknown) => NoInfer<Extract<keyof C, string>>;
-};
+/**
+ * Switch: sends the process down one of many paths based on a value.
+ *
+ * Without a `default`, `on` must provably return one of the declared
+ * case labels (an unmatched label fails the run). Declaring a `default`
+ * relaxes `on` to any string — unmatched labels take the default path.
+ */
+type SwitchOpts<C extends Readonly<Record<string, BranchPath>>> =
+  BaseStepOpts & { readonly cases: C } & (
+    | {
+        /** Fallback for labels not declared in `cases`. */
+        readonly default: BranchPath;
+        /** Compute the case label from the accumulated input. Pure. */
+        readonly on: (input: unknown) => string;
+      }
+    | {
+        readonly default?: undefined;
+        /** Compute the case label from the accumulated input. Pure. */
+        readonly on: (input: unknown) => NoInfer<Extract<keyof C, string>>;
+      }
+  );
+
+/** Loop: repeats a step until a goal is met. */
+export interface LoopOpts<I> extends BaseStepOpts {
+  /**
+   * Step to repeat. Its output is merged into the accumulated input
+   * before `until` is evaluated and before the next iteration.
+   */
+  readonly body: NestedStepDef;
+  /** The goal. Checked after each iteration; `true` ends the loop. */
+  readonly until: (input: I) => boolean;
+  /**
+   * Iteration cap (default 10, max 100). Reaching it without `until`
+   * turning true fails the run.
+   */
+  readonly max_iterations?: number;
+}
 
 export interface ParallelOpts extends BaseStepOpts {
-  readonly steps: readonly StepDef[];
+  readonly steps: readonly NestedStepDef[];
 }
 
+/** Wait / Delay: pauses the workflow until a time or event occurs. */
 export interface WaitOpts extends BaseStepOpts {
   readonly for: {
+    /**
+     * Name of an external event to wait for (delivered via the
+     * workflow's `event_received` signal).
+     */
     readonly signal?: string;
+    /**
+     * Duration to pause, in milliseconds. Combined with `signal` it
+     * acts as the wait's timeout instead of a plain delay.
+     */
     readonly timeout_ms?: number;
+    /** Absolute RFC 3339 timestamp to resume at (e.g. `2026-09-01T09:00:00Z`). */
     readonly until?: string;
   };
 }
 
 export interface BuiltinStepDef extends StepDef<"builtin"> {
-  readonly builtin: "map" | "for_each" | "branch" | "parallel" | "wait";
+  readonly builtin: BuiltinKind;
+  // Control-flow fields are kept on the runtime object so the runner can
+  // evaluate selectors and resolve nested steps at execution time.
+  readonly if?: (input: unknown) => boolean;
+  readonly on?: (input: unknown) => string;
+  readonly over?: (input: unknown) => readonly unknown[];
+  readonly until?: (input: unknown) => boolean;
+  readonly then?: BranchPath;
+  readonly else?: BranchPath;
+  readonly cases?: Readonly<Record<string, BranchPath>>;
+  readonly default?: BranchPath;
+  readonly apply?: NestedStepDef;
+  readonly body?: NestedStepDef;
+  readonly steps?: readonly NestedStepDef[];
+  readonly for?: WaitOpts["for"];
+  readonly max_items?: number;
+  readonly max_iterations?: number;
+  readonly concurrency?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,25 +426,70 @@ export const step = {
     };
   },
 
+  /** Deferred in v1: accepted by the compiler, not yet executed. */
   map<I, O>(opts: MapOpts<I, O>): BuiltinStepDef {
-    return { ...base("builtin", opts), builtin: "map" };
+    return {
+      ...base("builtin", opts),
+      builtin: "map",
+      over: opts.over as (input: unknown) => readonly unknown[],
+      apply: opts.apply,
+      concurrency: opts.concurrency,
+    };
   },
 
+  /** Repeat a nested step once per item of a runtime-derived list. */
   for_each<I, O>(opts: ForEachOpts<I, O>): BuiltinStepDef {
-    return { ...base("builtin", opts), builtin: "for_each" };
+    return {
+      ...base("builtin", opts),
+      builtin: "for_each",
+      over: opts.over as (input: unknown) => readonly unknown[],
+      apply: opts.apply,
+      max_items: opts.max_items,
+    };
   },
 
-  branch<const C extends Readonly<Record<string, StepDef>>>(
-    opts: InferredBranchOpts<C>,
+  /** If / Else: split the path based on whether a rule is met. */
+  branch<I>(opts: BranchOpts<I>): BuiltinStepDef {
+    return {
+      ...base("builtin", opts),
+      builtin: "branch",
+      if: opts.if as (input: unknown) => boolean,
+      then: opts.then,
+      else: opts.else,
+    };
+  },
+
+  /** Switch: send the process down one of many paths based on a value. */
+  switch<const C extends Readonly<Record<string, BranchPath>>>(
+    opts: SwitchOpts<C>,
   ): BuiltinStepDef {
-    return { ...base("builtin", opts), builtin: "branch" };
+    return {
+      ...base("builtin", opts),
+      builtin: "switch",
+      on: opts.on as (input: unknown) => string,
+      cases: opts.cases,
+      default: opts.default,
+    };
   },
 
+  /** Loop: repeat a nested step until a goal is met. */
+  loop<I>(opts: LoopOpts<I>): BuiltinStepDef {
+    return {
+      ...base("builtin", opts),
+      builtin: "loop",
+      body: opts.body,
+      until: opts.until as (input: unknown) => boolean,
+      max_iterations: opts.max_iterations,
+    };
+  },
+
+  /** Deferred in v1: accepted by the compiler, not yet executed. */
   parallel(opts: ParallelOpts): BuiltinStepDef {
-    return { ...base("builtin", opts), builtin: "parallel" };
+    return { ...base("builtin", opts), builtin: "parallel", steps: opts.steps };
   },
 
+  /** Wait / Delay: pause until a time or event occurs. */
   wait(opts: WaitOpts): BuiltinStepDef {
-    return { ...base("builtin", opts), builtin: "wait" };
+    return { ...base("builtin", opts), builtin: "wait", for: opts.for };
   },
 } as const;

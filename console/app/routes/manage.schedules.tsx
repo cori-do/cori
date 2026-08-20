@@ -42,6 +42,9 @@ export function ScheduleList({
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<ScheduleDto | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Two-step delete confirmation: native confirm() is a silent no-op in
+  // the Tauri webview, so the button itself asks for the second click.
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -92,7 +95,7 @@ export function ScheduleList({
   }
 
   async function remove(s: ScheduleDto) {
-    if (!confirm(`Delete schedule for ${s.source}?`)) return;
+    setConfirmingDelete(null);
     setBusy(s.id);
     setError(null);
     try {
@@ -239,13 +242,32 @@ export function ScheduleList({
                   >
                     {s.enabled ? "Disable" : "Enable"}
                   </button>
-                  <button
-                    className="btn"
-                    disabled={busy === s.id}
-                    onClick={() => remove(s)}
-                  >
-                    Delete
-                  </button>
+                  {confirmingDelete === s.id ? (
+                    <>
+                      <button
+                        className="btn danger"
+                        disabled={busy === s.id}
+                        onClick={() => remove(s)}
+                      >
+                        Confirm delete
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={busy === s.id}
+                        onClick={() => setConfirmingDelete(null)}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="btn"
+                      disabled={busy === s.id}
+                      onClick={() => setConfirmingDelete(s.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </div>
               )}
               {!s.is_self_identity && (

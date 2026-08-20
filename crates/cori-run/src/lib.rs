@@ -14,11 +14,14 @@ pub mod config;
 pub mod cron_driver;
 pub mod paths;
 pub mod planner;
+pub mod proposals;
 pub mod remote;
 pub mod result;
 pub mod runtime;
 pub mod schedules;
+pub mod sessions;
 pub mod temporal_endpoint;
+pub mod versions;
 pub mod workflow_loader;
 
 use std::sync::Arc;
@@ -105,11 +108,21 @@ pub trait ProgressSink: Send + Sync {
 /// Bridges durable Temporal activity events into the surface-specific
 /// [`ProgressSink`]. It retains the IDs already sent so the final workflow
 /// trace can fill only lifecycle events a remote history observation missed.
+///
+/// Builtin control flow dispatches its internals with suffixed activity
+/// ids (`02_route#then`, `04_each#apply[3]`, `02_route#if`). Those are
+/// forwarded as *lane events* — same shape, suffixed id — so the Console
+/// can pulse the exact path being worked. The first lane event also opens
+/// its parent builtin as `running`; the parent closes when a later step's
+/// activity starts (steps are strictly sequential), or at the final
+/// backfill when the builtin was the last thing the run did.
 struct StreamingProgressReporter {
     sink: Arc<dyn ProgressSink>,
     steps: std::collections::HashMap<String, LiveStepTemplate>,
     started: std::sync::Mutex<std::collections::HashSet<String>>,
     completed: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The builtin step currently running via lane events, if any.
+    open_builtin: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -140,14 +153,24 @@ impl StreamingProgressReporter {
             steps,
             started: std::sync::Mutex::new(std::collections::HashSet::new()),
             completed: std::sync::Mutex::new(std::collections::HashSet::new()),
+            open_builtin: std::sync::Mutex::new(None),
         }
     }
 
     fn synthetic(&self, activity_id: &str, status: &str) -> Option<ActivitySummary> {
-        let step = self.steps.get(activity_id)?;
+        // Lane events keep their suffixed id; the template comes from the
+        // parent builtin step.
+        let (base, suffix) = activity_id
+            .split_once('#')
+            .map_or((activity_id, None), |(base, suffix)| (base, Some(suffix)));
+        let step = self.steps.get(base)?;
+        let step_name = match suffix {
+            Some(suffix) => format!("{} · {suffix}", step.step_name),
+            None => step.step_name.clone(),
+        };
         Some(ActivitySummary {
             activity_id: activity_id.to_string(),
-            step_name: step.step_name.clone(),
+            step_name,
             kind: step.kind,
             status: status.to_string(),
             started_at: None,
@@ -162,6 +185,51 @@ impl StreamingProgressReporter {
             error: None,
             notes: Vec::new(),
         })
+    }
+
+    /// A started activity implies its predecessors are done: steps run
+    /// strictly sequentially, so an event whose base id differs from the
+    /// open builtin closes that builtin as succeeded. A *failed* builtin
+    /// never gets a later base event — its honest status arrives with the
+    /// final trace backfill instead.
+    fn advance_open_builtin(&self, activity_id: &str) {
+        let base = activity_id
+            .split_once('#')
+            .map_or(activity_id, |(base, _)| base);
+        let previous = {
+            let Ok(mut open) = self.open_builtin.lock() else {
+                return;
+            };
+            if open.as_deref() == Some(base) {
+                return;
+            }
+            let is_builtin_lane = activity_id.contains('#')
+                && self
+                    .steps
+                    .get(base)
+                    .is_some_and(|step| matches!(step.kind, StepKind::Builtin));
+            std::mem::replace(&mut *open, is_builtin_lane.then(|| base.to_string()))
+        };
+        if let Some(previous) = previous {
+            // Open the parent lazily too: the first lane event arrives
+            // before any bare-id event ever would (builtins have none).
+            if self.mark_completed(&previous)
+                && let Some(summary) = self.synthetic(&previous, "ok")
+            {
+                self.sink.on_step_finish(&summary);
+            }
+        }
+        // Ensure the (new) open builtin's parent row is running.
+        if activity_id.contains('#')
+            && self
+                .steps
+                .get(base)
+                .is_some_and(|step| matches!(step.kind, StepKind::Builtin))
+            && self.mark_started(base)
+            && let Some(summary) = self.synthetic(base, "running")
+        {
+            self.sink.on_step_start(&summary);
+        }
     }
 
     fn mark_started(&self, activity_id: &str) -> bool {
@@ -188,6 +256,7 @@ impl StreamingProgressReporter {
 
 impl ActivityProgressSink for StreamingProgressReporter {
     fn on_activity_started(&self, activity_id: &str) {
+        self.advance_open_builtin(activity_id);
         if self.mark_started(activity_id)
             && let Some(summary) = self.synthetic(activity_id, "running")
         {
@@ -825,6 +894,71 @@ fn projected_attempts(step: &cori_protocol::CompiledStep) -> usize {
     .unwrap_or(usize::MAX)
 }
 
+/// Worst-case activity dispatches a builtin step can perform: selector
+/// evaluations (pure `code`-class activities, up to 3 attempts each)
+/// plus nested step dispatches, multiplied by the compile-time
+/// iteration bounds for `for_each` / `loop`. Feeds the source-bundle
+/// history budget, which is why it must over- rather than under-count.
+fn projected_builtin_dispatches(step: &cori_protocol::CompiledStep) -> usize {
+    const EVAL_ATTEMPTS: usize = 3;
+    let sub_kind = step
+        .metadata
+        .get("builtin")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let nested_attempts = |slot_filter: fn(&str) -> bool| -> usize {
+        step.metadata
+            .get("nested")
+            .and_then(JsonValue::as_object)
+            .map(|slots| {
+                slots
+                    .iter()
+                    .filter(|(slot, _)| slot_filter(slot))
+                    .filter_map(|(_, meta)| meta.as_object())
+                    .map(|meta| {
+                        let default: u32 = match meta.get("kind").and_then(JsonValue::as_str) {
+                            Some("cli") | Some("mcp_tool") => 1,
+                            _ => 3,
+                        };
+                        usize::try_from(bounded_activity_attempts(
+                            meta.get("retries")
+                                .and_then(|value| value.get("max"))
+                                .and_then(JsonValue::as_u64),
+                            default,
+                        ))
+                        .unwrap_or(usize::MAX)
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    };
+    let bound = |key: &str, default: u64| {
+        usize::try_from(
+            step.metadata
+                .get(key)
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(default),
+        )
+        .unwrap_or(usize::MAX)
+    };
+    match sub_kind {
+        "branch" | "switch" => EVAL_ATTEMPTS + nested_attempts(|_| true),
+        "for_each" => {
+            let per_item = nested_attempts(|slot| slot == "apply");
+            EVAL_ATTEMPTS
+                + bound("max_items", cori_protocol::DEFAULT_FOR_EACH_ITEMS).saturating_mul(per_item)
+        }
+        "loop" => {
+            let per_iteration = nested_attempts(|slot| slot == "body") + EVAL_ATTEMPTS;
+            bound("max_iterations", cori_protocol::DEFAULT_LOOP_ITERATIONS)
+                .saturating_mul(per_iteration)
+        }
+        // `wait` never dispatches; `map` / `parallel` are deferred.
+        _ => 0,
+    }
+}
+
 /// Build and budget the immutable source payload exactly as `cori run` will.
 ///
 /// `cori check` calls this after freezing and validating modules so it cannot
@@ -840,8 +974,13 @@ pub fn build_source_bundle_for_execution(
         .compiled
         .steps
         .iter()
-        .filter(|step| step.kind != StepKind::Builtin)
-        .map(projected_attempts)
+        .map(|step| {
+            if step.kind == StepKind::Builtin {
+                projected_builtin_dispatches(step)
+            } else {
+                projected_attempts(step)
+            }
+        })
         .try_fold(0_usize, usize::checked_add)
         .ok_or_else(|| anyhow::anyhow!("projected activity attempt count overflow"))?;
     cori_broker::source_bundle::validate_history_budget(&bundle, projected_dispatches)?;
@@ -849,7 +988,16 @@ pub fn build_source_bundle_for_execution(
 }
 
 fn requires_source_transport(steps: &[cori_protocol::CompiledStep]) -> bool {
-    steps.iter().any(|step| step.kind != StepKind::Builtin)
+    steps.iter().any(|step| match step.kind {
+        StepKind::Builtin => {
+            // Builtins with nested steps (branch / switch / for_each /
+            // loop) evaluate selectors and dispatch nested activities
+            // from the step file, so workers need the source. A pure
+            // `wait` (and deferred `map` / `parallel`) never touches it.
+            step.metadata.contains_key("nested")
+        }
+        _ => true,
+    })
 }
 
 pub fn new_run_id() -> String {
@@ -999,6 +1147,126 @@ pub(crate) mod test_env {
         if let Err(p) = result {
             std::panic::resume_unwind(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod lane_event_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl ProgressSink for RecordingSink {
+        fn on_plan(&self, _plan: &[planner::StepAssignment]) {}
+        fn on_step_start(&self, s: &ActivitySummary) {
+            if let Ok(mut events) = self.events.lock() {
+                events.push(("start".into(), s.activity_id.clone(), s.status.clone()));
+            }
+        }
+        fn on_step_finish(&self, s: &ActivitySummary) {
+            if let Ok(mut events) = self.events.lock() {
+                events.push(("finish".into(), s.activity_id.clone(), s.status.clone()));
+            }
+        }
+    }
+
+    fn compiled_with_builtin() -> cori_protocol::CompiledWorkflow {
+        let manifest = cori_manifest::parse_manifest(
+            "---\nid: x\nname: X\ndescription: d\ncreated: 2026-08-20\nversion: 1\n---\n# b\n",
+        )
+        .expect("manifest");
+        let step = |id: &str, kind: StepKind| cori_protocol::CompiledStep {
+            activity_id: id.to_string(),
+            index: 0,
+            source_path: format!("steps/{id}.ts"),
+            source_sha256: None,
+            kind,
+            name: id
+                .split_once('_')
+                .map(|(_, n)| n.to_string())
+                .unwrap_or_default(),
+            description: String::new(),
+            route: None,
+            depends_on: Vec::new(),
+            metadata: serde_json::Map::new(),
+            placement: cori_protocol::Placement::Anywhere,
+            task_queue: None,
+        };
+        cori_protocol::CompiledWorkflow {
+            manifest,
+            steps: vec![
+                step("01_route", StepKind::Builtin),
+                step("02_next", StepKind::Code),
+            ],
+            required_cli_binaries: Vec::new(),
+            required_mcp_servers: Vec::new(),
+            required_llm_providers: Vec::new(),
+            requires_llm: false,
+        }
+    }
+
+    #[test]
+    fn lane_events_open_and_close_their_parent_builtin() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = StreamingProgressReporter::new(sink.clone(), &compiled_with_builtin());
+
+        // The builtin's internals stream with suffixed ids…
+        reporter.on_activity_started("01_route#if");
+        reporter.on_activity_completed("01_route#if");
+        reporter.on_activity_started("01_route#cases.low");
+        reporter.on_activity_completed("01_route#cases.low");
+        // …and the next top-level step closes the builtin as succeeded.
+        reporter.on_activity_started("02_next");
+
+        let events = sink.events.lock().expect("events").clone();
+        assert!(
+            events.contains(&("start".into(), "01_route".into(), "running".into())),
+            "first lane event opens the parent builtin: {events:?}"
+        );
+        assert!(
+            events.contains(&(
+                "start".into(),
+                "01_route#cases.low".into(),
+                "running".into()
+            )),
+            "lane events keep their suffixed id: {events:?}"
+        );
+        let parent_close = events
+            .iter()
+            .position(|e| e == &("finish".into(), "01_route".into(), "ok".into()))
+            .expect("next step closes the builtin");
+        let next_open = events
+            .iter()
+            .position(|e| e == &("start".into(), "02_next".into(), "running".into()))
+            .expect("next step opens");
+        assert!(
+            parent_close < next_open,
+            "close precedes the next open: {events:?}"
+        );
+
+        // The final backfill must not re-emit what streaming covered.
+        let backfill = reporter
+            .synthetic("01_route", "ok")
+            .expect("template exists");
+        reporter.emit_missing(&backfill);
+        let events_after = sink.events.lock().expect("events").clone();
+        assert_eq!(
+            events_after.len(),
+            events.len(),
+            "backfill after streaming is a no-op for the parent"
+        );
+    }
+
+    #[test]
+    fn unknown_base_ids_stay_silent() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = StreamingProgressReporter::new(sink.clone(), &compiled_with_builtin());
+        reporter.on_activity_started("99_ghost#then");
+        reporter.on_activity_completed("99_ghost#then");
+        assert!(sink.events.lock().expect("events").is_empty());
     }
 }
 

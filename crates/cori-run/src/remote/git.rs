@@ -84,9 +84,24 @@ pub fn clone_bare(url: &str, dest: &Path) -> Result<()> {
 }
 
 pub fn fetch_all(bare: &Path) -> Result<()> {
-    let out = run_git(&["fetch", "--all", "--tags", "--force"], Some(bare))?;
+    // A bare clone carries no `remote.origin.fetch` refspec, so a plain
+    // `git fetch --all` only updates FETCH_HEAD from the remote's default
+    // branch — commits on other branches (or branches created after the
+    // clone) never arrive. Spell out the refspecs so every head and tag
+    // lands; `--prune` drops refs deleted upstream from the cache.
+    let out = run_git(
+        &[
+            "fetch",
+            "origin",
+            "--force",
+            "--prune",
+            "+refs/heads/*:refs/heads/*",
+            "+refs/tags/*:refs/tags/*",
+        ],
+        Some(bare),
+    )?;
     if !out.status.success() {
-        return Err(fail_with("git fetch --all --tags", &out));
+        return Err(fail_with("git fetch origin", &out));
     }
     Ok(())
 }
@@ -136,6 +151,66 @@ pub fn checkout_sha(bare: &Path, sha: &str, dest: &Path) -> Result<()> {
         return Err(fail_with("tar -x", &tar_out));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = run_git(args, Some(dir)).unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit_empty(repo: &Path, msg: &str) -> String {
+        git_in(
+            repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                msg,
+            ],
+        );
+        let out = run_git(&["rev-parse", "HEAD"], Some(repo)).unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare clone has no fetch refspec, so a refspec-less fetch never
+    /// retrieves commits from non-default branches — which broke the
+    /// console's remote refresh for anything but the default branch.
+    #[test]
+    fn fetch_all_retrieves_non_default_branch_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        commit_empty(&origin, "c1");
+
+        let bare = tmp.path().join("bare.git");
+        clone_bare(&origin.to_string_lossy(), &bare).unwrap();
+
+        // New branch + commit after the clone.
+        git_in(&origin, &["checkout", "-q", "-b", "feature"]);
+        let feat_sha = commit_empty(&origin, "feat");
+        git_in(&origin, &["checkout", "-q", "main"]);
+
+        assert!(!has_commit(&bare, &feat_sha).unwrap());
+        fetch_all(&bare).unwrap();
+        assert!(
+            has_commit(&bare, &feat_sha).unwrap(),
+            "fetch_all must retrieve commits on non-default branches"
+        );
+    }
 }
 
 /// Add one line of context to auth-style errors so the user knows where

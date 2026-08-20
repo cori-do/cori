@@ -5,6 +5,7 @@ pub mod check;
 pub mod config;
 pub mod login;
 pub mod mcp;
+pub mod mcp_authoring;
 pub mod run;
 pub mod runs;
 pub mod show;
