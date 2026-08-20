@@ -4,6 +4,7 @@ import {
   type BranchOpts,
   type CliStepOpts,
   type CodeStepOpts,
+  goto,
   step,
 } from "../src/index.js";
 
@@ -143,17 +144,17 @@ const explicitCode: CodeStepOpts<typeof parsedInput, typeof literalOutput> = {
 };
 step.code(explicitCode);
 
-const readyStep = step.wait({
+const readyStep = step.code({
   description: "ready",
-  for: { signal: "ready" },
+  run: () => ({ handled: "ready" }),
 });
-const blockedStep = step.wait({
+const blockedStep = step.code({
   description: "blocked",
-  for: { signal: "blocked" },
+  run: () => ({ handled: "blocked" }),
 });
 
-step.branch({
-  description: "cases determine branch keys",
+step.switch({
+  description: "cases determine switch keys",
   on: () => "ready",
   cases: {
     ready: readyStep,
@@ -161,15 +162,31 @@ step.branch({
   },
 });
 
-const explicitBranch: BranchOpts<"ready" | "blocked"> = {
+step.branch({
+  description: "if / else takes nested steps",
+  if: (input: { count: number }) => input.count > 0,
+  then: readyStep,
+  else: blockedStep,
+});
+
+const explicitBranch: BranchOpts<{ count: number }> = {
   description: "explicit branch options",
-  on: () => "blocked",
-  cases: {
-    ready: readyStep,
-    blocked: blockedStep,
-  },
+  if: (input) => input.count > 0,
+  then: readyStep,
 };
 step.branch(explicitBranch);
+
+step.loop({
+  description: "loop repeats until the goal is met",
+  body: readyStep,
+  until: (input: { done: boolean }) => input.done,
+  max_iterations: 5,
+});
+
+step.wait({
+  description: "wait pauses for a delay or event",
+  for: { signal: "approved", timeout_ms: 60_000 },
+});
 
 step.cli({
   description: "reject wrong literal",
@@ -209,12 +226,64 @@ step.cli({
   parse: () => ({ rows: unknownRows }),
 });
 
-step.branch({
-  description: "reject a key absent from cases",
-  // @ts-expect-error cases, not on, determine the valid key union
-  on: () => "missing",
+step.switch(
+  // @ts-expect-error without a default, cases determine the valid key union
+  {
+    description: "reject a key absent from cases",
+    on: () => "missing",
+    cases: {
+      ready: readyStep,
+      blocked: blockedStep,
+    },
+  },
+);
+
+step.switch({
+  description: "a default relaxes on to any string",
+  on: (input) => (input as { label: string }).label,
   cases: {
     ready: readyStep,
     blocked: blockedStep,
   },
+  default: readyStep,
+});
+
+// Routing: branch / switch paths accept goto() refs, freely mixed with
+// inline nested steps.
+step.branch({
+  description: "route the false path",
+  if: (input) => (input as { big: boolean }).big,
+  then: readyStep,
+  else: goto("summarize_small"),
+});
+
+step.switch({
+  description: "route cases to later steps",
+  on: () => "ready",
+  cases: {
+    ready: goto("fast_path"),
+    blocked: blockedStep,
+  },
+  default: goto("end"),
+});
+
+step.for_each({
+  description: "loop bodies cannot route",
+  over: (input) => (input as { rows: unknown[] }).rows,
+  // @ts-expect-error for_each.apply is inline-only — no goto refs
+  apply: goto("later_step"),
+});
+
+step.loop({
+  description: "loop bodies cannot route either",
+  // @ts-expect-error loop.body is inline-only — no goto refs
+  body: goto("later_step"),
+  until: () => true,
+});
+
+step.branch({
+  description: "reject a builtin nested inside a builtin",
+  if: () => true,
+  // @ts-expect-error builtins cannot nest builtins
+  then: step.wait({ description: "nested wait", for: { timeout_ms: 1 } }),
 });

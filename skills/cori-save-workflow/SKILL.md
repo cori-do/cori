@@ -74,7 +74,7 @@ Each step file declares exactly one of five **activity kinds**:
 - **`mcp_tool`** — calls a specific tool on a connected MCP server.
 - **`code`** — runs a sandboxed TypeScript function. Pure computation, no I/O except inputs/outputs.
 - **`llm`** — calls an LLM with a typed prompt template and parses the response against a typed schema.
-- **`builtin`** — Cori's own primitives (`map`, `for_each`, `branch`, `parallel`, `wait`). The DAG glue. **Note:** the compiler accepts these but the v1 runtime does not yet execute them — avoid emitting builtins unless the user has confirmed they understand it's deferred.
+- **`builtin`** — Cori's own control-flow primitives. Five are executable: `branch` (If/Else — splits the path based on whether a rule is met), `switch` (Switch — sends the process down one of many paths based on a value), `for_each` and `loop` (Loop/For Each — repeats a step over a list, or until a goal is met), and `wait` (Wait/Delay — pauses the workflow until a time or event occurs). Branch/switch paths can also **route**: `goto("step_name")` jumps forward to a later step, `goto("end")` finishes the run. **Note:** only `map` and `parallel` remain deferred — the compiler accepts them but the v1 runtime skips them with a notice; flag those to the user before emitting them.
 
 The full TS template for each kind is in [`references/activity_kinds.md`](references/activity_kinds.md). The full manifest schema is in [`references/manifest_schema.md`](references/manifest_schema.md). **Read both before writing your first workflow in a session.**
 
@@ -148,8 +148,8 @@ The action was…
 │                                     → llm
 ├── pure data transformation (parse, filter, format, validate, math)?
 │                                     → code
-└── flow control (loop, branch, fan-out, wait)?
-                                      → builtin   (deferred in v1 — flag this)
+└── flow control (branch, switch, loop, for-each, wait)?
+                                      → builtin   (executable; only map/parallel deferred)
 ```
 
 Rules that matter:
@@ -202,11 +202,11 @@ uniquely addressable from later steps. Use a `messages` array, a
 `label_ids_by_message` array/map, or explicit unique wrapper keys; do not let
 successive fetch/create steps overwrite a shared `message` or `label_id` key.
 Never copy captured message IDs, subjects, senders, timestamps, classifications,
-summaries, or counts into runtime source. If v1's missing `for_each` requires a
-fixed-cardinality layout, add a pure `code` step that validates the expected
-cardinality and expands runtime-derived IDs into unique keys, then use explicit
-GWS lanes. If the cardinality is not fixed by the task contract, stop and explain
-that the workflow cannot yet be captured safely.
+summaries, or counts into runtime source. For per-message work over a
+runtime-discovered list, use a `step.for_each` builtin: iterate `over` the
+`messages` array and apply one inline nested step per item. Mind `max_items`
+(default 100, hard cap 1000) — a list longer than `max_items` fails the run,
+so raise it deliberately when the inbox can be large.
 
 **Pre-write lint — run this checklist on every step of your draft decomposition, before Step 5. Answer each item explicitly; do not skip it because the decomposition "looks done":**
 
@@ -468,4 +468,4 @@ export default step.cli({
 - **The user is the safety mechanism.** The Step-7 review (before disk write) is the spine of trust. Never skip it. Never write a workflow to disk you didn't show the user first.
 - **Conversations are messy; workflows are clean.** When saving, do the work of cleaning up. Don't preserve the meandering; preserve the distilled procedure.
 - **Be honest about what failed.** If `cori check` rejects the workflow, say so plainly. If a step is wrong, say so. The user values truth over polish.
-- **Builtins are deferred in v1.** The compiler accepts `map` / `for_each` / `branch` / `parallel` / `wait`, but the runtime doesn't execute them yet. If the conversation needs branching or fan-out, flag this to the user before emitting the step — they may prefer a linear workaround for now.
+- **Only `map` and `parallel` are deferred in v1.** The runtime executes `branch`, `switch`, `for_each`, `loop`, and `wait`; the compiler still accepts `map` / `parallel` but skips them with a notice — flag those to the user before emitting them. When authoring the executable five, nested steps (`then` / `else` / `cases.<label>` / `default` / `apply` / `body`) must be inline `step.<kind>({…})` calls — no helper variables, no imported steps, and never another builtin (inner control flow goes in its own step file). Nested capability declarations still apply: a nested cli's binary goes in `tools_required`, a nested mcp_tool's server in `mcp_servers`. The outer builtin takes only `description` — put `retries` / `timeout_ms` on the nested steps. A branch/switch path may instead be `goto("step_name")` (forward-only routing by step name; `goto("end")` finishes the run) — the compiler rejects unknown, ambiguous, backward, and unreachable-making routes, and skipped steps get `not_taken` trace rows.

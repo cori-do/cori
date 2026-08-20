@@ -27,8 +27,15 @@ pub fn cli(
     step_file_path: &Path,
     input: &JsonValue,
     expected_binary: Option<&str>,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
-    let call = dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::CliCommand, input)?;
+    let call = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::CliCommand,
+        input,
+        selector,
+    )?;
     let binary = call
         .output
         .get("command")
@@ -45,7 +52,7 @@ pub fn cli(
         .get("command")
         .cloned()
         .unwrap_or(JsonValue::Null);
-    let stub = output_stub(runtime, step_file_path)?;
+    let stub = output_stub(runtime, step_file_path, selector)?;
     Ok(ActivityOutcome {
         status: ActivityStatus::Skipped,
         output: stub.output,
@@ -66,8 +73,15 @@ pub fn mcp(
     input: &JsonValue,
     expected_server: Option<&str>,
     expected_tool: Option<&str>,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
-    let call = dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::McpArgs, input)?;
+    let call = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::McpArgs,
+        input,
+        selector,
+    )?;
     let actual_server = call
         .output
         .get("server")
@@ -90,7 +104,7 @@ pub fn mcp(
         actual_server,
         actual_tool,
     )?;
-    let stub = output_stub(runtime, step_file_path)?;
+    let stub = output_stub(runtime, step_file_path, selector)?;
     Ok(ActivityOutcome {
         status: ActivityStatus::Skipped,
         output: stub.output,
@@ -109,13 +123,19 @@ pub fn llm(
     step_file_path: &Path,
     input: &JsonValue,
     expected_level: &crate::llm::ExpectedLevel,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
-    let prompt =
-        dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::LlmPrompt, input)?;
+    let prompt = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::LlmPrompt,
+        input,
+        selector,
+    )?;
     let actual_level = prompt.output.get("level").and_then(JsonValue::as_str);
     let legacy_model = prompt.output.get("legacyModel").and_then(JsonValue::as_str);
     let level = crate::llm::validate_level_boundary(expected_level, actual_level, legacy_model)?;
-    let stub = output_stub(runtime, step_file_path)?;
+    let stub = output_stub(runtime, step_file_path, selector)?;
     Ok(ActivityOutcome {
         status: ActivityStatus::Skipped,
         output: stub.output,
@@ -129,8 +149,16 @@ pub fn llm(
     })
 }
 
-fn output_stub(runtime: &Runtime, step_file_path: &Path) -> Result<dispatch::RunnerCall> {
-    dispatch::invoke(runtime, step_file_path, RunnerMode::OutputStub, &json!({}))
+fn output_stub(
+    runtime: &Runtime,
+    step_file_path: &Path,
+    selector: Option<&str>,
+) -> Result<dispatch::RunnerCall> {
+    let payload = match selector {
+        Some(selector) => json!({ "selector": selector }),
+        None => json!({}),
+    };
+    dispatch::invoke(runtime, step_file_path, RunnerMode::OutputStub, &payload)
 }
 
 fn combine_stderr(left: String, right: String) -> String {

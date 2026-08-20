@@ -30,6 +30,10 @@ cori-secrets.workspace = true
 rpassword.workspace = true
 cori-worker.workspace = true
 cori-run = { path = "../cori-run" }
+cori-compiler.workspace = true
+cori-manifest.workspace = true
+dirs.workspace = true
+regex.workspace = true
 tokio.workspace = true
 comfy-table.workspace = true
 chrono-humanize.workspace = true

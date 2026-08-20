@@ -91,13 +91,19 @@ pub fn run(
     input: &JsonValue,
     opts: &LlmOptions,
     expected_level: &ExpectedLevel,
+    selector: Option<&str>,
 ) -> Result<ActivityOutcome> {
     let started = Instant::now();
 
     // The runner parses the input and renders every batch prompt in one
     // process, preserving transformed values that cannot cross JSON intact.
-    let initial =
-        dispatch::invoke_with_input(runtime, step_file_path, RunnerMode::LlmPrompt, input)?;
+    let initial = dispatch::invoke_with_input(
+        runtime,
+        step_file_path,
+        RunnerMode::LlmPrompt,
+        input,
+        selector,
+    )?;
     let spec: PromptSpec =
         serde_json::from_value(initial.output.clone()).map_err(|e| BrokerError::BadEnvelope {
             envelope: initial.output.to_string(),
@@ -131,6 +137,7 @@ pub fn run(
             runtime,
             step_file_path,
             spec.has_output_schema,
+            selector,
         )?;
         (vec![resp.text], resp.usage)
     } else {
@@ -145,6 +152,7 @@ pub fn run(
             runtime,
             step_file_path,
             spec.has_output_schema,
+            selector,
         )?
     };
 
@@ -171,7 +179,8 @@ pub fn run(
         })?;
         merge_batched_outputs(outputs, &batch.by)
     };
-    let validated = dispatch::invoke_validate_output(runtime, step_file_path, &final_output)?;
+    let validated =
+        dispatch::invoke_validate_output(runtime, step_file_path, &final_output, selector)?;
     if !validated.stderr.trim().is_empty() {
         if !combined_stderr.is_empty() && !combined_stderr.ends_with('\n') {
             combined_stderr.push('\n');
@@ -283,6 +292,7 @@ impl ExpectedLevel {
 }
 
 /// Fan out one provider call per prompt across worker threads.
+#[allow(clippy::too_many_arguments)]
 fn fan_out(
     provider: &dyn providers::LlmProvider,
     model: &str,
@@ -291,6 +301,7 @@ fn fan_out(
     runtime: &Runtime,
     step_file_path: &Path,
     has_output_schema: bool,
+    selector: Option<&str>,
 ) -> Result<(Vec<String>, TokenUsage)> {
     let concurrency = DEFAULT_BATCH_CONCURRENCY.min(prompts.len().max(1));
     let results: Arc<Mutex<Vec<Option<Result<providers::LlmResponse>>>>> =
@@ -326,6 +337,7 @@ fn fan_out(
                         runtime,
                         step_file_path,
                         has_output_schema,
+                        selector,
                     );
                     results.lock().unwrap()[i] = Some(r);
                 }
@@ -354,12 +366,13 @@ fn call_with_schema_retry(
     runtime: &Runtime,
     step_file_path: &Path,
     has_output_schema: bool,
+    selector: Option<&str>,
 ) -> Result<providers::LlmResponse> {
     let first = provider.complete(req)?;
     if !has_output_schema {
         return Ok(first);
     }
-    if candidate_schema_error(runtime, step_file_path, &first.text)?.is_none() {
+    if candidate_schema_error(runtime, step_file_path, &first.text, selector)?.is_none() {
         return Ok(first);
     }
     // Retry once with a stricter system message.
@@ -373,7 +386,7 @@ fn call_with_schema_retry(
         }
     };
     let second = provider.complete(&retry_req)?;
-    if let Some(reason) = candidate_schema_error(runtime, step_file_path, &second.text)? {
+    if let Some(reason) = candidate_schema_error(runtime, step_file_path, &second.text, selector)? {
         return Err(BrokerError::LlmSchemaMismatch {
             provider: provider.name(),
             attempts: 2,
@@ -391,12 +404,13 @@ fn candidate_schema_error(
     runtime: &Runtime,
     step_file_path: &Path,
     text: &str,
+    selector: Option<&str>,
 ) -> Result<Option<String>> {
     let candidate = match serde_json::from_str::<JsonValue>(strip_json_fences(text)) {
         Ok(candidate) => candidate,
         Err(error) => return Ok(Some(format!("response was not valid JSON: {error}"))),
     };
-    match dispatch::invoke_validate_output(runtime, step_file_path, &candidate) {
+    match dispatch::invoke_validate_output(runtime, step_file_path, &candidate, selector) {
         Ok(_) => Ok(None),
         Err(BrokerError::SchemaValidation { message, .. }) => Ok(Some(message)),
         Err(error) => Err(error),

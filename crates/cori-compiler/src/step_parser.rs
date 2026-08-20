@@ -25,7 +25,11 @@
 use regex::Regex;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use cori_protocol::{MAX_ACTIVITY_ATTEMPTS, MAX_ACTIVITY_TIMEOUT_MS, StepKind};
+use cori_protocol::{
+    DEFAULT_FOR_EACH_ITEMS, DEFAULT_LOOP_ITERATIONS, MAX_ACTIVITY_ATTEMPTS,
+    MAX_ACTIVITY_TIMEOUT_MS, MAX_FOR_EACH_ITEMS, MAX_LOOP_ITERATIONS, MAX_WAIT_TIMEOUT_MS,
+    StepKind, parse_wait_until,
+};
 
 #[derive(Debug, Clone)]
 pub struct ParsedStep {
@@ -102,10 +106,12 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         "mcp_tool" => StepKind::McpTool,
         "code" => StepKind::Code,
         "llm" => StepKind::Llm,
-        "map" | "for_each" | "branch" | "parallel" | "wait" => StepKind::Builtin,
+        "map" | "for_each" | "branch" | "switch" | "loop" | "parallel" | "wait" => {
+            StepKind::Builtin
+        }
         other => {
             return Err(vec![ParseError::new(format!(
-                "unknown step kind `step.{other}` — must be one of: cli, mcp_tool, code, llm, map, for_each, branch, parallel, wait"
+                "unknown step kind `step.{other}` — must be one of: cli, mcp_tool, code, llm, branch, switch, for_each, loop, wait, map, parallel"
             ))]);
         }
     };
@@ -126,8 +132,12 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         .filter(|byte| *byte == b'\n')
         .count();
 
-    // 4. Pull `description` out of the options object.
-    let description = match extract_string_field(args_span, "description") {
+    // 4. Pull `description` out of the options object. Builtins hold
+    //    nested step definitions whose own `description` fields would
+    //    satisfy a span-wide regex, so they only accept the top-level
+    //    property.
+    let top_level_only = kind == StepKind::Builtin;
+    let description = match extract_description(args_span, top_level_only) {
         Some(s) => s,
         None => {
             errors.push(
@@ -138,24 +148,32 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         }
     };
 
-    let route = extract_string_field(args_span, "route");
+    let route = if top_level_only {
+        top_level_string_field(args_span, "route")
+    } else {
+        extract_string_field(args_span, "route")
+    };
 
     // 5. Kind-agnostic scalar metadata shared by every step kind
-    //    (`BaseStepOpts` in the SDK).
+    //    (`BaseStepOpts` in the SDK). Builtins skip this: their nested
+    //    steps carry their own `retries` / `timeout_ms`, extracted per
+    //    slot below, and the outer control flow is not an activity.
     let mut metadata = JsonMap::new();
-    match extract_retries_field(args_span) {
-        Ok(Some(retries)) => {
-            metadata.insert("retries".into(), JsonValue::Object(retries));
+    if kind != StepKind::Builtin {
+        match extract_retries_field(args_span) {
+            Ok(Some(retries)) => {
+                metadata.insert("retries".into(), JsonValue::Object(retries));
+            }
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         }
-        Ok(None) => {}
-        Err(error) => errors.push(error),
-    }
-    match extract_timeout_field(args_span) {
-        Ok(Some(timeout_ms)) => {
-            metadata.insert("timeout_ms".into(), JsonValue::Number(timeout_ms.into()));
+        match extract_timeout_field(args_span) {
+            Ok(Some(timeout_ms)) => {
+                metadata.insert("timeout_ms".into(), JsonValue::Number(timeout_ms.into()));
+            }
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         }
-        Ok(None) => {}
-        Err(error) => errors.push(error),
     }
 
     // 6. Kind-specific scalar metadata.
@@ -232,12 +250,18 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
                 metadata.insert("batch".into(), JsonValue::Object(batch));
             }
         }
-        StepKind::Code | StepKind::Builtin => {}
+        StepKind::Code => {}
+        StepKind::Builtin => {
+            metadata.insert("builtin".into(), JsonValue::String(kind_str.to_string()));
+            extract_builtin_metadata(args_span, kind_str, &mut metadata, &mut errors);
+        }
     }
 
     // 7. Code-step import audit: scan the *full* source (not just the call)
-    //    for `node:*` imports. Done with a simple line scan.
-    if kind == StepKind::Code {
+    //    for `node:*` imports. Done with a simple line scan. Builtin files
+    //    get the same audit: their nested `code` steps run in the same
+    //    sandbox, and nothing else in a builtin file may do I/O either.
+    if kind == StepKind::Code || kind == StepKind::Builtin {
         let banned = find_node_imports(&stripped);
         if !banned.is_empty() {
             let arr: Vec<JsonValue> = banned.into_iter().map(JsonValue::String).collect();
@@ -254,6 +278,604 @@ pub fn parse(source: &str) -> Result<ParsedStep, Vec<ParseError>> {
         route,
         metadata,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Builtin control-flow extraction
+// ---------------------------------------------------------------------------
+
+/// Extract the control-flow metadata for one builtin step:
+///
+/// - `branch`   → requires `if`, nested `then`, optional nested `else`
+/// - `switch`   → requires `on`, nested `cases.<label>`, optional `default`
+/// - `for_each` → requires `over`, nested `apply`, optional `max_items`
+/// - `loop`     → requires `until`, nested `body`, optional `max_iterations`
+/// - `wait`     → requires `for: { timeout_ms | until | signal }`
+///
+/// Nested steps land in `metadata.nested` as `{ "<slot>": { kind, ...} }`
+/// where `<slot>` doubles as the runner's selector dot-path.
+fn extract_builtin_metadata(
+    args_span: &str,
+    sub_kind: &str,
+    metadata: &mut JsonMap<String, JsonValue>,
+    errors: &mut Vec<ParseError>,
+) {
+    let mut nested = JsonMap::new();
+
+    match sub_kind {
+        "branch" => {
+            require_selector_fn(args_span, sub_kind, "if", errors);
+            extract_nested_slot(args_span, "then", true, Routable::Yes, &mut nested, errors);
+            extract_nested_slot(args_span, "else", false, Routable::Yes, &mut nested, errors);
+        }
+        "switch" => {
+            require_selector_fn(args_span, sub_kind, "on", errors);
+            extract_switch_cases(args_span, &mut nested, errors);
+            extract_nested_slot(
+                args_span,
+                "default",
+                false,
+                Routable::Yes,
+                &mut nested,
+                errors,
+            );
+        }
+        "for_each" => {
+            require_selector_fn(args_span, sub_kind, "over", errors);
+            extract_nested_slot(args_span, "apply", true, Routable::No, &mut nested, errors);
+            let max_items = bounded_top_level_integer(
+                args_span,
+                "max_items",
+                MAX_FOR_EACH_ITEMS,
+                DEFAULT_FOR_EACH_ITEMS,
+                errors,
+            );
+            metadata.insert("max_items".into(), JsonValue::Number(max_items.into()));
+        }
+        "loop" => {
+            require_selector_fn(args_span, sub_kind, "until", errors);
+            extract_nested_slot(args_span, "body", true, Routable::No, &mut nested, errors);
+            let max_iterations = bounded_top_level_integer(
+                args_span,
+                "max_iterations",
+                MAX_LOOP_ITERATIONS,
+                DEFAULT_LOOP_ITERATIONS,
+                errors,
+            );
+            metadata.insert(
+                "max_iterations".into(),
+                JsonValue::Number(max_iterations.into()),
+            );
+        }
+        "wait" => {
+            extract_wait_spec(args_span, metadata, errors);
+        }
+        // `map` / `parallel`: accepted, deferred at runtime — no metadata.
+        _ => {}
+    }
+
+    if !nested.is_empty() {
+        metadata.insert("nested".into(), JsonValue::Object(nested));
+    }
+}
+
+/// Require the builtin's selector function (`if` / `on` / `over` /
+/// `until`) to be declared. Presence is all the static parser can check;
+/// the runner validates it is a function returning the right type.
+fn require_selector_fn(
+    args_span: &str,
+    sub_kind: &str,
+    field: &'static str,
+    errors: &mut Vec<ParseError>,
+) {
+    if top_level_field_value(args_span, field).is_none() {
+        errors.push(
+            ParseError::new(format!(
+                "builtin `{sub_kind}` requires a `{field}` function (a pure arrow function of the accumulated input)"
+            ))
+            .field(field),
+        );
+    }
+}
+
+/// Whether a slot's value may be a `goto("name")` route instead of an
+/// inline nested step. Branch / switch paths route; loop bodies do not.
+#[derive(Clone, Copy, PartialEq)]
+enum Routable {
+    Yes,
+    No,
+}
+
+/// Extract one nested `slot: step.<kind>({...})` (or, for routable
+/// slots, `slot: goto("name")`) declaration into `nested["<slot>"]`.
+/// Nested steps must be non-builtin; their scalar capability metadata
+/// (CLI binary, MCP server/tool, LLM level) is extracted with the same
+/// rules as top-level steps so placement, preflight, and the
+/// activity-boundary checks see through the builtin.
+fn extract_nested_slot(
+    args_span: &str,
+    slot: &str,
+    required: bool,
+    routable: Routable,
+    nested: &mut JsonMap<String, JsonValue>,
+    errors: &mut Vec<ParseError>,
+) {
+    let Some(value) = top_level_field_value(args_span, slot) else {
+        if required {
+            errors.push(
+                ParseError::new(format!(
+                    "builtin step is missing its required `{slot}: step.<kind>({{...}})` nested step"
+                ))
+                .field(slot),
+            );
+        }
+        return;
+    };
+    match parse_path(value, slot, routable) {
+        Ok(meta) => {
+            nested.insert(slot.to_string(), JsonValue::Object(meta));
+        }
+        Err(es) => errors.extend(es),
+    }
+}
+
+/// Parse a routable slot value: either `goto("name")` or an inline
+/// nested step.
+fn parse_path(
+    value: &str,
+    slot: &str,
+    routable: Routable,
+) -> Result<JsonMap<String, JsonValue>, Vec<ParseError>> {
+    let goto_re = Regex::new(r#"^goto\s*\(\s*["']([^"']*)["']\s*\)"#).expect("static regex");
+    if let Some(cap) = goto_re.captures(value.trim_start()) {
+        if routable == Routable::No {
+            return Err(vec![
+                ParseError::new(format!(
+                    "`{slot}` cannot be a `goto(...)` route — only branch/switch paths route; loop bodies are inline steps"
+                ))
+                .field(slot),
+            ]);
+        }
+        let target = cap.get(1).unwrap().as_str().to_string();
+        let name_re = Regex::new(r"^[a-z][a-z0-9_]*$").expect("static regex");
+        if !name_re.is_match(&target) {
+            return Err(vec![
+                ParseError::new(format!(
+                    "`{slot}` has invalid goto target `{target}` — use the target step's snake_case name (the part of `NN_name.ts` after the number), or `end`"
+                ))
+                .field(slot),
+            ]);
+        }
+        let mut meta = JsonMap::new();
+        meta.insert("goto_name".into(), JsonValue::String(target));
+        return Ok(meta);
+    }
+    parse_nested_step(value, slot)
+}
+
+/// Enumerate `cases: { <label>: step.<kind>({...}) | goto("name"), ... }`.
+fn extract_switch_cases(
+    args_span: &str,
+    nested: &mut JsonMap<String, JsonValue>,
+    errors: &mut Vec<ParseError>,
+) {
+    let Some(value) = top_level_field_value(args_span, "cases") else {
+        errors.push(
+            ParseError::new(
+                "builtin `switch` requires a `cases: { <label>: step.<kind>({...}), ... }` object",
+            )
+            .field("cases"),
+        );
+        return;
+    };
+    if !value.starts_with('{') {
+        errors.push(
+            ParseError::new("`cases` must be an inline object literal of nested steps")
+                .field("cases"),
+        );
+        return;
+    }
+    let Some(inner) = extract_balanced(value, 0, '{', '}') else {
+        errors.push(ParseError::new("unbalanced `cases` object").field("cases"));
+        return;
+    };
+    let label_re = Regex::new(r"^[A-Za-z0-9_-]+$").expect("static regex");
+    let properties = object_properties(inner);
+    if properties.is_empty() {
+        errors.push(
+            ParseError::new("`cases` must declare at least one `<label>: step.<kind>({...})` case")
+                .field("cases"),
+        );
+        return;
+    }
+    for (label, value_offset) in properties {
+        if !label_re.is_match(&label) {
+            errors.push(
+                ParseError::new(format!(
+                    "invalid case label `{label}` — labels must match [A-Za-z0-9_-]+ so they can address the nested step"
+                ))
+                .field("cases"),
+            );
+            continue;
+        }
+        let slot = format!("cases.{label}");
+        match parse_path(inner[value_offset..].trim_start(), &slot, Routable::Yes) {
+            Ok(meta) => {
+                nested.insert(slot, JsonValue::Object(meta));
+            }
+            Err(es) => errors.extend(es),
+        }
+    }
+}
+
+/// Parse a nested `step.<kind>({...})` expression starting at `value`.
+/// Returns the nested step's metadata map (always carrying `kind`).
+fn parse_nested_step(
+    value: &str,
+    slot: &str,
+) -> Result<JsonMap<String, JsonValue>, Vec<ParseError>> {
+    let header_re = Regex::new(r"^step\.([A-Za-z_][A-Za-z0-9_]*)\s*\(").expect("static regex");
+    let Some(cap) = header_re.captures(value) else {
+        return Err(vec![
+            ParseError::new(format!(
+                "`{slot}` must be an inline `step.<kind>({{...}})` call — helper variables and imports cannot be statically verified"
+            ))
+            .field(slot),
+        ]);
+    };
+    let nested_kind_str = cap.get(1).unwrap().as_str();
+    let nested_kind = match nested_kind_str {
+        "cli" => StepKind::Cli,
+        "mcp_tool" => StepKind::McpTool,
+        "code" => StepKind::Code,
+        "llm" => StepKind::Llm,
+        "map" | "for_each" | "branch" | "switch" | "loop" | "parallel" | "wait" => {
+            return Err(vec![
+                ParseError::new(format!(
+                    "`{slot}` is `step.{nested_kind_str}` — builtins cannot nest other builtins; move the inner control flow into its own step file"
+                ))
+                .field(slot),
+            ]);
+        }
+        other => {
+            return Err(vec![
+                ParseError::new(format!(
+                    "`{slot}` uses unknown step kind `step.{other}` — nested steps must be one of: cli, mcp_tool, code, llm"
+                ))
+                .field(slot),
+            ]);
+        }
+    };
+    let open_paren = cap.get(0).unwrap().end();
+    let Some(nested_span) = extract_balanced(value, open_paren - 1, '(', ')') else {
+        return Err(vec![
+            ParseError::new(format!("unbalanced parentheses in `{slot}` nested step")).field(slot),
+        ]);
+    };
+
+    let mut errors: Vec<ParseError> = Vec::new();
+    let mut meta = JsonMap::new();
+    meta.insert(
+        "kind".into(),
+        JsonValue::String(nested_kind_str.to_string()),
+    );
+
+    match nested_kind {
+        StepKind::Cli => {
+            if let Some(bin) = extract_cli_binary(nested_span) {
+                meta.insert("binary".into(), JsonValue::String(bin));
+            } else {
+                errors.push(
+                    ParseError::new(format!(
+                        "could not statically determine the CLI binary of `{slot}` — the first element of its `command(...)` array must be a string literal"
+                    ))
+                    .field(slot),
+                );
+            }
+        }
+        StepKind::McpTool => {
+            match extract_string_field(nested_span, "server") {
+                Some(server) => {
+                    meta.insert("server".into(), JsonValue::String(server));
+                }
+                None => errors.push(
+                    ParseError::new(format!(
+                        "`{slot}` is missing its required `server: \"...\"` field"
+                    ))
+                    .field(slot),
+                ),
+            }
+            match extract_string_field(nested_span, "tool") {
+                Some(tool) => {
+                    meta.insert("tool".into(), JsonValue::String(tool));
+                }
+                None => errors.push(
+                    ParseError::new(format!(
+                        "`{slot}` is missing its required `tool: \"...\"` field"
+                    ))
+                    .field(slot),
+                ),
+            }
+        }
+        StepKind::Llm => {
+            if top_level_field_value(nested_span, "model").is_some() {
+                errors.push(
+                    ParseError::new(format!(
+                        "`model` is not supported on the `{slot}` llm step — use `level: \"low\" | \"medium\" | \"high\"`"
+                    ))
+                    .field(slot),
+                );
+            } else {
+                let level = match top_level_field_value(nested_span, "level") {
+                    None => Some("medium".to_string()),
+                    Some(value) => match leading_string_literal(value) {
+                        Some(level) if matches!(level.as_str(), "low" | "medium" | "high") => {
+                            Some(level)
+                        }
+                        _ => {
+                            errors.push(
+                                ParseError::new(format!(
+                                    "`{slot}.level` must be a direct string literal: `low`, `medium`, or `high`"
+                                ))
+                                .field(slot),
+                            );
+                            None
+                        }
+                    },
+                };
+                if let Some(level) = level {
+                    meta.insert("level".into(), JsonValue::String(level));
+                }
+            }
+        }
+        StepKind::Code => {}
+        StepKind::Builtin => unreachable!("rejected above"),
+    }
+
+    // Nested retries / timeout apply to the nested activity dispatch.
+    match extract_retries_field(nested_span) {
+        Ok(Some(retries)) => {
+            meta.insert("retries".into(), JsonValue::Object(retries));
+        }
+        Ok(None) => {}
+        Err(error) => errors.push(error),
+    }
+    match extract_timeout_field(nested_span) {
+        Ok(Some(timeout_ms)) => {
+            meta.insert("timeout_ms".into(), JsonValue::Number(timeout_ms.into()));
+        }
+        Ok(None) => {}
+        Err(error) => errors.push(error),
+    }
+
+    if errors.is_empty() {
+        Ok(meta)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Extract `for: { timeout_ms?, until?, signal? }` for a `wait` builtin.
+fn extract_wait_spec(
+    args_span: &str,
+    metadata: &mut JsonMap<String, JsonValue>,
+    errors: &mut Vec<ParseError>,
+) {
+    let Some(value) = top_level_field_value(args_span, "for") else {
+        errors.push(
+            ParseError::new(
+                "builtin `wait` requires a `for: { timeout_ms?, until?, signal? }` object",
+            )
+            .field("for"),
+        );
+        return;
+    };
+    if !value.starts_with('{') {
+        errors.push(ParseError::new("`for` must be an inline object literal").field("for"));
+        return;
+    }
+    let Some(inner) = extract_balanced(value, 0, '{', '}') else {
+        errors.push(ParseError::new("unbalanced `for` object").field("for"));
+        return;
+    };
+
+    let mut wait = JsonMap::new();
+
+    let timeout_re =
+        Regex::new(r"(?m)(^|[\s,{])\s*timeout_ms\s*:\s*(-?\d+)").expect("static regex");
+    if let Some(cap) = timeout_re.captures(inner) {
+        match cap.get(2).unwrap().as_str().parse::<u64>() {
+            Ok(ms) if (1..=MAX_WAIT_TIMEOUT_MS).contains(&ms) => {
+                wait.insert("timeout_ms".into(), JsonValue::Number(ms.into()));
+            }
+            _ => errors.push(
+                ParseError::new(format!(
+                    "`for.timeout_ms` must be an integer from 1 through {MAX_WAIT_TIMEOUT_MS} (30 days)"
+                ))
+                .field("for.timeout_ms"),
+            ),
+        }
+    } else if inner.contains("timeout_ms") {
+        errors.push(
+            ParseError::new("`for.timeout_ms` must be a direct integer literal")
+                .field("for.timeout_ms"),
+        );
+    }
+
+    if let Some(until) = extract_string_field(inner, "until") {
+        if parse_wait_until(&until).is_some() {
+            wait.insert("until".into(), JsonValue::String(until));
+        } else {
+            errors.push(
+                ParseError::new(format!(
+                    "`for.until` must be an RFC 3339 timestamp with an explicit offset (e.g. `2026-09-01T09:00:00Z`); got `{until}`"
+                ))
+                .field("for.until"),
+            );
+        }
+    }
+
+    if let Some(signal) = extract_string_field(inner, "signal") {
+        let signal_re = Regex::new(r"^[A-Za-z0-9_.-]+$").expect("static regex");
+        if signal_re.is_match(&signal) {
+            wait.insert("signal".into(), JsonValue::String(signal));
+        } else {
+            errors.push(
+                ParseError::new(format!(
+                    "`for.signal` must match [A-Za-z0-9_.-]+; got `{signal}`"
+                ))
+                .field("for.signal"),
+            );
+        }
+    }
+
+    if wait.is_empty() && errors.is_empty() {
+        errors.push(
+            ParseError::new(
+                "`for` must declare at least one of `timeout_ms` (delay), `until` (absolute time), or `signal` (external event)",
+            )
+            .field("for"),
+        );
+        return;
+    }
+    if !wait.is_empty() {
+        metadata.insert("wait".into(), JsonValue::Object(wait));
+    }
+}
+
+/// Extract a bounded top-level integer field, falling back to `default`
+/// when the field is absent.
+fn bounded_top_level_integer(
+    args_span: &str,
+    field: &str,
+    max: u64,
+    default: u64,
+    errors: &mut Vec<ParseError>,
+) -> u64 {
+    let Some(value) = top_level_field_value(args_span, field) else {
+        return default;
+    };
+    let literal_re = Regex::new(r"^(-?\d+)").expect("static regex");
+    let parsed = literal_re
+        .captures(value)
+        .and_then(|cap| cap.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok());
+    match parsed {
+        Some(n) if (1..=max).contains(&n) => n,
+        _ => {
+            errors.push(
+                ParseError::new(format!("`{field}` must be an integer from 1 through {max}"))
+                    .field(field),
+            );
+            default
+        }
+    }
+}
+
+/// Extract the top-level `description`, optionally restricted to the
+/// direct options object (used for builtins, whose nested steps carry
+/// their own descriptions).
+fn extract_description(args_span: &str, top_level_only: bool) -> Option<String> {
+    if top_level_only {
+        top_level_string_field(args_span, "description")
+    } else {
+        extract_string_field(args_span, "description")
+    }
+}
+
+/// A top-level property whose value is a direct string literal.
+fn top_level_string_field(body: &str, field: &str) -> Option<String> {
+    top_level_field_value(body, field).and_then(leading_string_literal)
+}
+
+/// Enumerate the properties of an object literal's inner span (the text
+/// between its braces). Returns `(name, value_offset)` pairs where
+/// `value_offset` points just past the `:`. Handles identifier keys and
+/// quoted string keys; skips nested structures.
+fn object_properties(inner: &str) -> Vec<(String, usize)> {
+    let bytes = inner.as_bytes();
+    let mut properties = Vec::new();
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+    let mut brace_depth = 0_i32;
+    let mut paren_depth = 0_i32;
+    let mut bracket_depth = 0_i32;
+    let mut expecting_key = true;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' && index + 1 < bytes.len() {
+                index += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        let at_top = brace_depth == 0 && paren_depth == 0 && bracket_depth == 0;
+        if at_top && expecting_key {
+            if byte.is_ascii_whitespace() {
+                index += 1;
+                continue;
+            }
+            // Identifier or quoted key.
+            let (name, mut cursor) = if matches!(byte, b'\'' | b'"') {
+                let delimiter = byte;
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != delimiter {
+                    if bytes[end] == b'\\' {
+                        end += 1;
+                    }
+                    end += 1;
+                }
+                if end >= bytes.len() {
+                    return properties;
+                }
+                (inner[start..end].to_string(), end + 1)
+            } else if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'-') {
+                let start = index;
+                let mut end = index;
+                while end < bytes.len() && (is_js_identifier_byte(bytes[end]) || bytes[end] == b'-')
+                {
+                    end += 1;
+                }
+                (inner[start..end].to_string(), end)
+            } else {
+                index += 1;
+                continue;
+            };
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b':' {
+                properties.push((name, cursor + 1));
+                expecting_key = false;
+                index = cursor + 1;
+                continue;
+            }
+            index = cursor.max(index + 1);
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth -= 1,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth -= 1,
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth -= 1,
+            b',' if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                expecting_key = true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    properties
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,6 +1834,216 @@ export default step.code({
         let src = "import { step } from \"@cori-do/sdk\";\nexport default step.map({ description: \"each\", apply: x });";
         let p = parse(src).unwrap();
         assert_eq!(p.kind, StepKind::Builtin);
+        assert_eq!(p.metadata.get("builtin").unwrap(), "map");
+    }
+
+    #[test]
+    fn parses_builtin_branch_with_nested_steps() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.branch({
+  description: "big or small",
+  if: ({ count }) => count > 10,
+  then: step.cli({
+    description: "summarise the big list",
+    command: () => ["gws", "sheets", "append"],
+  }),
+  else: step.code({
+    description: "pass through",
+    run: (input) => input,
+  }),
+});"#;
+        let p = parse(src).unwrap();
+        assert_eq!(p.kind, StepKind::Builtin);
+        assert_eq!(p.description, "big or small");
+        assert_eq!(p.metadata.get("builtin").unwrap(), "branch");
+        let nested = p.metadata.get("nested").unwrap().as_object().unwrap();
+        let then = nested.get("then").unwrap().as_object().unwrap();
+        assert_eq!(then.get("kind").unwrap(), "cli");
+        assert_eq!(then.get("binary").unwrap(), "gws");
+        let alt = nested.get("else").unwrap().as_object().unwrap();
+        assert_eq!(alt.get("kind").unwrap(), "code");
+    }
+
+    #[test]
+    fn branch_requires_if_and_then() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.branch({ description: \"x\" });";
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.field.as_deref() == Some("if")));
+        assert!(errs.iter().any(|e| e.field.as_deref() == Some("then")));
+    }
+
+    #[test]
+    fn parses_builtin_switch_with_cases_and_default() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.switch({
+  description: "route by severity",
+  on: ({ severity }) => severity,
+  cases: {
+    high: step.mcp_tool({
+      description: "page the on-call",
+      server: "pagerduty",
+      tool: "create_incident",
+      args: (input) => ({ summary: input.title }),
+    }),
+    low: step.llm({
+      description: "draft a note",
+      level: "low",
+      prompt: () => `summarise`,
+    }),
+  },
+  default: step.code({ description: "record unknown", run: (x) => x }),
+});"#;
+        let p = parse(src).unwrap();
+        assert_eq!(p.metadata.get("builtin").unwrap(), "switch");
+        let nested = p.metadata.get("nested").unwrap().as_object().unwrap();
+        let high = nested.get("cases.high").unwrap().as_object().unwrap();
+        assert_eq!(high.get("kind").unwrap(), "mcp_tool");
+        assert_eq!(high.get("server").unwrap(), "pagerduty");
+        assert_eq!(high.get("tool").unwrap(), "create_incident");
+        let low = nested.get("cases.low").unwrap().as_object().unwrap();
+        assert_eq!(low.get("kind").unwrap(), "llm");
+        assert_eq!(low.get("level").unwrap(), "low");
+        assert_eq!(
+            nested
+                .get("default")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .get("kind")
+                .unwrap(),
+            "code"
+        );
+    }
+
+    #[test]
+    fn switch_requires_at_least_one_case() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.switch({ description: \"x\", on: (i) => i.k, cases: {} });";
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("at least one")));
+    }
+
+    #[test]
+    fn parses_builtin_for_each_with_default_cap() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.for_each({
+  description: "translate every sheet",
+  over: ({ sheets }) => sheets,
+  apply: step.llm({
+    description: "translate one sheet",
+    prompt: ({ item }) => `translate ${JSON.stringify(item)}`,
+  }),
+});"#;
+        let p = parse(src).unwrap();
+        assert_eq!(p.metadata.get("builtin").unwrap(), "for_each");
+        assert_eq!(
+            p.metadata.get("max_items").unwrap().as_u64().unwrap(),
+            DEFAULT_FOR_EACH_ITEMS
+        );
+        let nested = p.metadata.get("nested").unwrap().as_object().unwrap();
+        let apply = nested.get("apply").unwrap().as_object().unwrap();
+        assert_eq!(apply.get("kind").unwrap(), "llm");
+        assert_eq!(apply.get("level").unwrap(), "medium");
+    }
+
+    #[test]
+    fn parses_builtin_loop_with_bounds() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.loop({
+  description: "poll until exported",
+  body: step.cli({
+    description: "poll the export job",
+    command: ({ job_id }) => ["gws", "drive", "export-status", job_id],
+    retries: { max: 2 },
+  }),
+  until: ({ export_state }) => export_state === "done",
+  max_iterations: 25,
+});"#;
+        let p = parse(src).unwrap();
+        assert_eq!(p.metadata.get("builtin").unwrap(), "loop");
+        assert_eq!(p.metadata.get("max_iterations").unwrap().as_u64(), Some(25));
+        let nested = p.metadata.get("nested").unwrap().as_object().unwrap();
+        let body = nested.get("body").unwrap().as_object().unwrap();
+        assert_eq!(body.get("kind").unwrap(), "cli");
+        assert_eq!(body.get("binary").unwrap(), "gws");
+        let retries = body.get("retries").unwrap().as_object().unwrap();
+        assert_eq!(retries.get("max").unwrap(), 2);
+    }
+
+    #[test]
+    fn loop_iteration_bound_is_enforced() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.loop({ description: \"x\", body: step.code({ description: \"b\", run: (x) => x }), until: (i) => true, max_iterations: 5000 });";
+        let errs = parse(src).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.field.as_deref() == Some("max_iterations"))
+        );
+    }
+
+    #[test]
+    fn parses_builtin_wait_variants() {
+        let delay = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"cool down\", for: { timeout_ms: 60000 } });";
+        let p = parse(delay).unwrap();
+        assert_eq!(p.metadata.get("builtin").unwrap(), "wait");
+        let wait = p.metadata.get("wait").unwrap().as_object().unwrap();
+        assert_eq!(wait.get("timeout_ms").unwrap().as_u64(), Some(60000));
+
+        let until = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"until launch\", for: { until: \"2026-09-01T09:00:00Z\" } });";
+        let p = parse(until).unwrap();
+        let wait = p.metadata.get("wait").unwrap().as_object().unwrap();
+        assert_eq!(wait.get("until").unwrap(), "2026-09-01T09:00:00Z");
+
+        let signal = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"await approval\", for: { signal: \"approved\", timeout_ms: 3600000 } });";
+        let p = parse(signal).unwrap();
+        let wait = p.metadata.get("wait").unwrap().as_object().unwrap();
+        assert_eq!(wait.get("signal").unwrap(), "approved");
+        assert_eq!(wait.get("timeout_ms").unwrap().as_u64(), Some(3600000));
+    }
+
+    #[test]
+    fn wait_rejects_empty_or_invalid_specs() {
+        let empty = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"x\", for: {} });";
+        let errs = parse(empty).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("at least one")));
+
+        let bad_until = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"x\", for: { until: \"tomorrow\" } });";
+        let errs = parse(bad_until).unwrap_err();
+        assert!(errs.iter().any(|e| e.field.as_deref() == Some("for.until")));
+
+        let offsetless = "import { step } from \"@cori-do/sdk\";\nexport default step.wait({ description: \"x\", for: { until: \"2026-09-01T09:00:00\" } });";
+        let errs = parse(offsetless).unwrap_err();
+        assert!(errs.iter().any(|e| e.field.as_deref() == Some("for.until")));
+    }
+
+    #[test]
+    fn builtins_cannot_nest_builtins() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.branch({ description: \"x\", if: (i) => true, then: step.wait({ description: \"w\", for: { timeout_ms: 1 } }) });";
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("cannot nest")));
+    }
+
+    #[test]
+    fn nested_steps_must_be_inline_calls() {
+        let src = "import { step } from \"@cori-do/sdk\";\nconst helper = step.code({ description: \"h\", run: (x) => x });\nexport default step.branch({ description: \"x\", if: (i) => true, then: helper });";
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("inline")));
+    }
+
+    #[test]
+    fn builtin_description_ignores_nested_descriptions() {
+        let src = r#"import { step } from "@cori-do/sdk";
+export default step.branch({
+  if: ({ ok }) => ok,
+  then: step.code({ description: "nested only", run: (x) => x }),
+});"#;
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("description")));
+    }
+
+    #[test]
+    fn nested_llm_rejects_legacy_model() {
+        let src = "import { step } from \"@cori-do/sdk\";\nexport default step.branch({ description: \"x\", if: (i) => true, then: step.llm({ description: \"n\", model: \"gpt-4o\", prompt: () => `p` }) });";
+        let errs = parse(src).unwrap_err();
+        assert!(errs.iter().any(|e| e.reason.contains("level")));
     }
 
     #[test]

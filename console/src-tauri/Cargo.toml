@@ -42,6 +42,7 @@ reqwest.workspace = true
 cori-worker.workspace = true
 cori-compiler.workspace = true
 cori-manifest.workspace = true
+tauri-plugin-notification = "2.3.3"
 
 [dev-dependencies]
 tempfile = "3"

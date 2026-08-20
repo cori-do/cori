@@ -18,10 +18,16 @@
 //   llm_stub     — return a cardinality-correct dry-run output.
 //   output_stub  — return a schema-shaped output for any dry-run step without
 //                  evaluating its input or step implementation.
+//   builtin_eval — evaluate a builtin step's pure selector function
+//                  (payload.eval: "if" | "on" | "over" | "until") against
+//                  payload.input and return its coerced result.
 //
 // Protocol (every mode):
 //   stdin  : JSON object — `{ "input": <value>, ... mode-specific extras }`.
 //            Empty stdin is treated as `{}`.
+//            `selector` (optional): dot-path into the default export picking
+//            a builtin's nested step (e.g. "then", "cases.big", "apply") —
+//            the mode then operates on that nested step instead.
 //   stdout : exactly one JSON envelope, written as the last line and prefixed
 //            with ENVELOPE_PREFIX so the broker can tolerate stray user logs.
 //   stderr : free-form Deno diagnostics; never parsed by the broker.
@@ -110,11 +116,50 @@ try {
 }
 
 // deno-lint-ignore no-explicit-any
-const stepDef: any = (mod as { default?: unknown }).default;
+let stepDef: any = (mod as { default?: unknown }).default;
 if (!stepDef || stepDef.__cori_step !== true) {
   fail(
     `step file's default export is not a Cori step (expected an object with __cori_step === true; got ${typeof stepDef})`,
   );
+}
+
+// A builtin's nested step is addressed by a dot-path selector relative to
+// the default export ("then", "else", "cases.<label>", "default", "apply",
+// "body"). Resolving it up front lets every existing mode run unchanged
+// against the nested definition.
+const selector = payload.selector;
+if (selector !== undefined) {
+  if (typeof selector !== "string" || selector.length === 0) {
+    fail("`selector` must be a non-empty dot-path string");
+  }
+  if (stepDef.kind !== "builtin") {
+    fail(
+      `selector '${selector}' is only valid on builtin steps; this step declares kind '${stepDef.kind}'`,
+    );
+  }
+  // deno-lint-ignore no-explicit-any
+  let nested: any = stepDef;
+  for (const segment of selector.split(".")) {
+    nested = nested?.[segment];
+  }
+  if (nested && nested.__cori_goto !== undefined) {
+    // Routing decisions are executed by the workflow body, never
+    // dispatched here — reaching this is a compiler/worker bug.
+    fail(
+      `selector '${selector}' resolves to a goto route (to '${nested.__cori_goto}') — routes are not executable steps`,
+    );
+  }
+  if (!nested || nested.__cori_step !== true) {
+    fail(
+      `selector '${selector}' does not resolve to a nested Cori step in this builtin`,
+    );
+  }
+  if (nested.kind === "builtin") {
+    fail(
+      `selector '${selector}' resolves to another builtin — builtins cannot nest builtins`,
+    );
+  }
+  stepDef = nested;
 }
 
 function expectKind(want: string): void {
@@ -267,6 +312,52 @@ try {
     case "output_stub": {
       const output = await validatedStubFromZod(stepDef.output);
       emit({ ok: true, output: output ?? null });
+      break;
+    }
+
+    case "builtin_eval": {
+      expectKind("builtin");
+      const fnName = payload.eval;
+      if (
+        fnName !== "if" && fnName !== "on" && fnName !== "over" &&
+        fnName !== "until"
+      ) {
+        fail(
+          `builtin_eval requires payload.eval to be one of "if" | "on" | "over" | "until"; got ${
+            JSON.stringify(fnName)
+          }`,
+        );
+      }
+      const selectorFn = stepDef[fnName];
+      if (typeof selectorFn !== "function") {
+        fail(
+          `builtin '${stepDef.builtin}' step is missing its \`${fnName}\` function`,
+        );
+      }
+      const result = await selectorFn(payload.input);
+      switch (fnName) {
+        case "if":
+        case "until":
+          if (typeof result !== "boolean") {
+            fail(
+              `\`${fnName}\` must return a boolean; got ${typeof result} — coerce explicitly in the step (e.g. \`Boolean(...)\`)`,
+            );
+          }
+          break;
+        case "on":
+          if (typeof result !== "string") {
+            fail(
+              `\`on\` must return a string case label; got ${typeof result}`,
+            );
+          }
+          break;
+        case "over":
+          if (!Array.isArray(result)) {
+            fail(`\`over\` must return an array; got ${typeof result}`);
+          }
+          break;
+      }
+      emit({ ok: true, output: result ?? null });
       break;
     }
 

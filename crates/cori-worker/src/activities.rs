@@ -113,6 +113,16 @@ pub struct ActivityInput {
     /// histories created before source-boundary enforcement was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_step: Option<FrozenStep>,
+    /// Dot-path selecting a builtin's nested step inside `source_path`
+    /// (e.g. `then`, `cases.big`, `apply`, `body`). `None` targets the
+    /// file's default export. Set only by builtin control-flow dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_slot: Option<String>,
+    /// When set, this activity evaluates the named builtin selector
+    /// function (`if` / `on` / `over` / `until`) instead of executing a
+    /// step. Always dispatched as `cori_code` (pure, retryable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_eval: Option<String>,
 }
 
 /// Per-activity output. Mirrors what the in-process executor previously
@@ -211,6 +221,8 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
     let bundled_source = input.source_bundle.clone();
     let llm_config = input.llm_config.clone();
     let source_path = input.source_path.clone();
+    let nested_slot = input.nested_slot.clone();
+    let builtin_eval = input.builtin_eval.clone();
     let source_cache_dir = ctx.source_cache_dir.clone();
     let credentials_dir = ctx.credentials_dir.clone();
     let started_at = Utc::now();
@@ -225,8 +237,14 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
         )?;
         let absolute_path = workflow_root.join(&source_path);
         verify_source_boundary(&workflow_root, &absolute_path, frozen_step.as_ref())?;
+        // Builtin selector evaluation: pure, sandboxed, real even under
+        // --dry-run so control flow is exercised end to end.
+        if let Some(eval_fn) = builtin_eval.as_deref() {
+            return code::eval_builtin(&ctx.runtime, &absolute_path, eval_fn, &step_input);
+        }
+        let selector = nested_slot.as_deref();
         match (kind, dry_run) {
-            (BrokerKind::Code, _) => code::run(&ctx.runtime, &absolute_path, &step_input),
+            (BrokerKind::Code, _) => code::run(&ctx.runtime, &absolute_path, &step_input, selector),
             (BrokerKind::Cli, false) => {
                 let expected_binary = expected_cli_binary(&absolute_path, frozen_step.as_ref())?;
                 cli_broker::run(
@@ -236,6 +254,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &step_input,
                     &user_id,
                     Some(&expected_binary),
+                    selector,
                 )
             }
             (BrokerKind::Cli, true) => {
@@ -245,6 +264,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &absolute_path,
                     &step_input,
                     Some(&expected_binary),
+                    selector,
                 )
             }
             (BrokerKind::Mcp, false) => {
@@ -261,6 +281,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &user_id,
                     &credentials_dir,
                     expected_target,
+                    selector,
                 )
             }
             (BrokerKind::Mcp, true) => {
@@ -274,6 +295,7 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &step_input,
                     expected_server.as_deref(),
                     expected_tool.as_deref(),
+                    selector,
                 )
             }
             (BrokerKind::Llm, false) => {
@@ -293,11 +315,18 @@ async fn run_step(input: ActivityInput, kind: BrokerKind) -> Result<ActivityOutp
                     &step_input,
                     &llm_opts,
                     &expected_level,
+                    selector,
                 )
             }
             (BrokerKind::Llm, true) => {
                 let expected_level = expected_level(frozen_step.as_ref())?;
-                dry_run::llm(&ctx.runtime, &absolute_path, &step_input, &expected_level)
+                dry_run::llm(
+                    &ctx.runtime,
+                    &absolute_path,
+                    &step_input,
+                    &expected_level,
+                    selector,
+                )
             }
         }
     })

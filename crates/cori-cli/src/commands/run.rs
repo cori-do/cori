@@ -106,6 +106,11 @@ impl cori_run::ProgressSink for CliProgressSink {
     fn on_step_start(&self, _summary: &cori_worker::workflow::ActivitySummary) {}
 
     fn on_step_finish(&self, summary: &cori_worker::workflow::ActivitySummary) {
+        // Lane events (`02_route#then`, `04_each#apply[3]`) are Console
+        // fodder; the CLI prints one line per step, from the real trace.
+        if summary.activity_id.contains('#') {
+            return;
+        }
         print_step_summary(summary);
     }
 }

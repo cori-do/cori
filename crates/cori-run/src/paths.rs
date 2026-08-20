@@ -80,3 +80,16 @@ pub fn schedules_dir() -> Result<PathBuf> {
 pub fn approvals_dir() -> Result<PathBuf> {
     Ok(home()?.join("approvals"))
 }
+
+/// `~/.cori/sessions/` — MCP authoring session journals (one directory
+/// per session: metadata, append-only journal, content blobs). See the
+/// `sessions` module.
+pub fn sessions_dir() -> Result<PathBuf> {
+    Ok(home()?.join("sessions"))
+}
+
+/// `~/.cori/versions/<key>/v<N>/` — published workflow version
+/// snapshots. See the `versions` module.
+pub fn versions_dir() -> Result<PathBuf> {
+    Ok(home()?.join("versions"))
+}

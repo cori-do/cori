@@ -122,16 +122,29 @@ function PendingCard({
   onDecided: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
-  const decide = (approved: boolean) => {
+  const [answer, setAnswer] = useState("");
+  const [note, setNote] = useState("");
+  const decide = (approved: boolean, response?: Record<string, unknown>) => {
     setBusy(true);
     // The watcher event removes the card; on error just re-enable
     // (the item may have expired meanwhile).
-    decideApproval(a.nonce, approved)
+    decideApproval(a.nonce, approved, response)
       .then(() => onDecided())
       .catch(() => {})
       .finally(() => setBusy(false));
   };
   const isAction = a.kind === "reauth_required";
+  // An agent question: the decision carries the answer back to the
+  // blocked request_input call.
+  const isInput = a.kind === "agent_input";
+  const inputOptions: string[] = isInput && Array.isArray(a.payload.options)
+    ? (a.payload.options as unknown[]).filter((o): o is string => typeof o === "string")
+    : [];
+  const inputDefault =
+    typeof a.payload.default === "string" ? a.payload.default : null;
+  // An agent approval: a denial may carry a note — information the
+  // agent reads, not an error.
+  const isAgentApproval = a.kind === "agent_approval";
   const loginCommand =
     typeof a.payload.login_command === "string" ? a.payload.login_command : null;
 
@@ -163,22 +176,83 @@ function PendingCard({
 
       <FactsTable payload={a.payload} />
 
+      {isAgentApproval && (
+        <input
+          className="approval-note"
+          type="text"
+          placeholder="Note to the agent (optional — sent with either decision)"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          disabled={busy}
+        />
+      )}
+
       <div className="approval-card-actions">
         {isAction ? (
           <button type="button" className="btn" disabled={busy} onClick={() => decide(false)}>
             Dismiss
           </button>
+        ) : isInput ? (
+          <>
+            {inputOptions.map((opt) => (
+              <button
+                key={opt}
+                type="button"
+                className={`btn ${opt === inputDefault ? "approval-approve" : ""}`}
+                disabled={busy}
+                onClick={() => decide(true, { answer: opt })}
+              >
+                {opt}
+              </button>
+            ))}
+            {inputOptions.length === 0 && (
+              <>
+                <input
+                  className="approval-note"
+                  type="text"
+                  placeholder={inputDefault ? `Answer (default: ${inputDefault})` : "Answer"}
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                  disabled={busy}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && answer.trim() !== "")
+                      decide(true, { answer: answer.trim() });
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn approval-approve"
+                  disabled={busy || answer.trim() === ""}
+                  onClick={() => decide(true, { answer: answer.trim() })}
+                >
+                  Answer
+                </button>
+              </>
+            )}
+            <button type="button" className="btn" disabled={busy} onClick={() => decide(false)}>
+              Dismiss
+            </button>
+          </>
         ) : (
           <>
             <button
               type="button"
               className="btn approval-approve"
               disabled={busy}
-              onClick={() => decide(true)}
+              onClick={() =>
+                decide(true, isAgentApproval && note.trim() !== "" ? { note: note.trim() } : undefined)
+              }
             >
               Approve
             </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => decide(false)}>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() =>
+                decide(false, isAgentApproval && note.trim() !== "" ? { note: note.trim() } : undefined)
+              }
+            >
               Decline
             </button>
           </>
@@ -213,6 +287,17 @@ function FactsTable({ payload }: { payload: Record<string, unknown> }) {
   push("capability", payload.capability);
   push("failed step", payload.step);
   push("error", payload.error);
+  push("action", payload.action);
+  push("agent", payload.agent);
+  push("default", payload.default);
+  if (payload.effects_diff && typeof payload.effects_diff === "object") {
+    const diff = payload.effects_diff as Record<string, unknown>;
+    for (const key of ["added", "removed"]) {
+      const list = diff[key];
+      if (Array.isArray(list) && list.length > 0)
+        rows.push([`effects ${key}`, list.map((v) => String(v)).join(", ")]);
+    }
+  }
   if (payload.params && typeof payload.params === "object") {
     for (const [k, v] of Object.entries(payload.params as Record<string, unknown>)) {
       rows.push([`param · ${k}`, typeof v === "string" ? v : JSON.stringify(v)]);
@@ -252,11 +337,15 @@ function kindLabel(kind: ApprovalKind): string {
       return "step approval";
     case "reauth_required":
       return "sign-in needed";
+    case "agent_input":
+      return "agent question";
+    case "agent_approval":
+      return "approval request";
   }
 }
 
 function pillFor(kind: ApprovalKind): string {
-  if (kind === "trust_consent") return "bad";
+  if (kind === "trust_consent" || kind === "agent_approval") return "bad";
   if (kind === "reauth_required") return "warn";
   return "warn";
 }

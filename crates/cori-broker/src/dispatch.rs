@@ -44,6 +44,7 @@ pub enum RunnerMode {
     LlmStub,
     OutputStub,
     ValidateOutput,
+    BuiltinEval,
 }
 
 impl RunnerMode {
@@ -57,6 +58,7 @@ impl RunnerMode {
             RunnerMode::LlmStub => "llm_stub",
             RunnerMode::OutputStub => "output_stub",
             RunnerMode::ValidateOutput => "validate_output",
+            RunnerMode::BuiltinEval => "builtin_eval",
         }
     }
 }
@@ -192,14 +194,22 @@ fn decode_envelope(envelope_json: &str) -> crate::Result<JsonValue> {
     }
 }
 
-/// Convenience: invoke with `{ "input": <value> }`.
+/// Convenience: invoke with `{ "input": <value> }`. `selector` addresses a
+/// builtin's nested step (a dot-path such as `then` or `cases.big`); `None`
+/// targets the file's default export directly.
 pub fn invoke_with_input(
     runtime: &Runtime,
     step_file_path: &Path,
     mode: RunnerMode,
     input: &JsonValue,
+    selector: Option<&str>,
 ) -> crate::Result<RunnerCall> {
-    invoke(runtime, step_file_path, mode, &json!({ "input": input }))
+    invoke(
+        runtime,
+        step_file_path,
+        mode,
+        &with_selector(json!({ "input": input }), selector),
+    )
 }
 
 /// Validate and parse an external activity result through the step's optional
@@ -209,13 +219,37 @@ pub fn invoke_validate_output(
     runtime: &Runtime,
     step_file_path: &Path,
     output: &JsonValue,
+    selector: Option<&str>,
 ) -> crate::Result<RunnerCall> {
     invoke(
         runtime,
         step_file_path,
         RunnerMode::ValidateOutput,
-        &json!({ "output": output }),
+        &with_selector(json!({ "output": output }), selector),
     )
+}
+
+/// Evaluate a builtin step's pure selector function (`if` / `on` / `over`
+/// / `until`) against the accumulated input.
+pub fn invoke_builtin_eval(
+    runtime: &Runtime,
+    step_file_path: &Path,
+    eval_fn: &str,
+    input: &JsonValue,
+) -> crate::Result<RunnerCall> {
+    invoke(
+        runtime,
+        step_file_path,
+        RunnerMode::BuiltinEval,
+        &json!({ "input": input, "eval": eval_fn }),
+    )
+}
+
+fn with_selector(mut payload: JsonValue, selector: Option<&str>) -> JsonValue {
+    if let (Some(selector), Some(object)) = (selector, payload.as_object_mut()) {
+        object.insert("selector".to_string(), json!(selector));
+    }
+    payload
 }
 
 /// Find the last `ENVELOPE_PREFIX`-marked line in the runner's stdout and

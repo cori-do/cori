@@ -17,7 +17,7 @@ Cori turns one-off agent conversations into deterministic, executable TypeScript
 Do not re-litigate these without explicit human approval.
 
 1. **One workflow type.** `CoriWorkflow` (in [crates/cori-worker/src/workflow.rs](crates/cori-worker/src/workflow.rs)) handles every compiled DAG. The DAG is data passed in `WorkflowInput`, not code. Mid-run re-auth is **new control flow inside this single workflow** (Phase 6 signal/wait), never a second workflow type.
-2. **Four activity kinds, closed set.** `cori_cli`, `cori_mcp_tool`, `cori_code`, `cori_llm` — all in [crates/cori-worker/src/activities.rs](crates/cori-worker/src/activities.rs). Builtins (`map`, `for_each`, `branch`, `parallel`, `wait`) are workflow code, **not** activities, and are not implemented yet in v1.
+2. **Four activity kinds, closed set.** `cori_cli`, `cori_mcp_tool`, `cori_code`, `cori_llm` — all in [crates/cori-worker/src/activities.rs](crates/cori-worker/src/activities.rs). Builtin control flow (`branch`, `switch`, `for_each`, `loop`, `wait`) is workflow code, **not** a fifth activity kind: selector functions (`if`/`on`/`over`/`until`) ride the pure `cori_code` activity in `builtin_eval` mode, and a builtin's nested steps dispatch as ordinary activities of their own kind addressed by a `nested_slot` selector. Branch/switch paths may also route (`goto("step_name")` / `goto("end")` — forward-only, name-addressed, compile-time resolved; skipped steps get `not_taken` trace rows; see [docs/step-routing-design.md](docs/step-routing-design.md)). `map` and `parallel` remain deferred (compiler-accepted, runtime-skipped).
 3. **Single execution path.** The old in-process executor was deleted during the Temporal migration. Do not reintroduce it, do not feature-flag a parallel path. Temporal is the only runtime.
 4. **DAG and source bundle in `WorkflowInput`.** The full compiled DAG (including per-step `task_queue` assigned by the planner) is serialized into `WorkflowInput.compiled_dag` at workflow start. Every activity-bearing run serializes a bounded, content-addressed copy of the verified source snapshot once into `WorkflowInput.source_bundle` and passes it to activities; task queues have no host affinity, even when the queue name matches the triggering worker. The bundle is part of Temporal event history, so workflow folders are executable source—not a place for credentials, `.env` files, or confidential input data. Known secret-file names are rejected, and real credentials remain broker-managed. The absolute source path remains only as a backward-compatible fallback. The workflow body never reads disk — that would break determinism on replay.
 5. **Broker is the trust boundary.** Every external side effect (`std::process::Command`, HTTP, MCP, OAuth) goes through [crates/cori-broker](crates/cori-broker/src/lib.rs). Activity handlers are thin wrappers over broker functions via `tokio::task::spawn_blocking` (the broker is sync; the Temporal worker is async).
@@ -51,12 +51,39 @@ cori config get|set                                        # ~/.cori/config.toml
 cori mcp                                                   # serve check/run/show/runs/status as MCP tools (stdio)
 ```
 
-`cori mcp` exposes a strict subset of the verbs as MCP tools for agent clients —
-never `login`, `work`, or `config` (machine-trust operations stay human-initiated;
-credentials never transit an MCP client), and never a `save_workflow` tool. Every
-MCP `run` requires a per-run human confirmation — MCP elicitation when the client
-declares it, else a native OS dialog on the host, else refusal — and the server
+`cori mcp` exposes two tool families. The **read/execute** family is a strict
+subset of the verbs — never `login`, `work`, or `config` (machine-trust operations
+stay human-initiated; credentials never transit an MCP client). Every MCP `run`
+requires a per-run human confirmation — MCP elicitation when the client declares
+it, else a native OS dialog on the host, else refusal — and the server
 deliberately ignores `CORI_ASSUME_YES`. See `docs` repo `reference/mcp.mdx`.
+
+The **authoring** family (added by the 2026-08-16 MCP authoring sign-off, which
+amends the earlier "no authoring over MCP" lock) lets agent clients create and
+edit workflow folders through journalled sessions: `workflow_create`,
+`workflow_open`, `workflow_write_file`, `workflow_delete_file`,
+`workflow_rename_step`, `conventions`, `capabilities`, `propose`,
+`session_status`, `session_stop`, `session_rewind` (implementation:
+[crates/cori-cli/src/commands/mcp_authoring.rs](crates/cori-cli/src/commands/mcp_authoring.rs),
+journal store: [crates/cori-run/src/sessions.rs](crates/cori-run/src/sessions.rs),
+`~/.cori/sessions/`). Non-negotiables: every mutation carries a `session_id` and
+is journalled with before/after content (Console-attributable, exactly
+rewindable); writes are confined to user directories (never `~/.cori`, never
+`.git/`); writes surface `check`'s lint warnings at write time; renames renumber
+siblings so orphaned step files are structurally impossible. There is still
+**no one-shot `save_workflow` tool** — authoring is session-scoped and
+inspectable, not a single opaque dump. Irreversible actions are gated two ways:
+`publish` requires a granted `request_approval` (one grant, one publish) and is
+terminal — a successful publish stops the session, exactly like an accepted
+proposal, so the Console never renders a published workflow as a draft (further
+edits open a new session); `propose` ends the session in a `proposed` state — a
+frozen per-step review card
+(kind, effect target, proven access, external reach, net file change; computed
+from the compiled DAG, never agent claims) that the human resolves in the
+Console: accept publishes the next version, reject stops the session with the
+reason, optionally rewinding the folder to its pre-session state
+(proposal store: [crates/cori-run/src/proposals.rs](crates/cori-run/src/proposals.rs)).
+Agents should finish authoring with `propose` rather than leaving sessions open.
 
 The Cori agent skill is installed via `npx skills add cori-do/cori` (not a `cori` subcommand).
 
@@ -195,6 +222,17 @@ cori run <path-or-ref>
          ctx.start_activity(..., ActivityOptions { task_queue: step.task_queue, … })
          merge ActivityOutput into the accumulator
          on ApplicationFailure type=="NeedsReauth": ctx.wait_condition(reauth_completed, 15min)
+       builtin steps run as workflow code instead of one activity:
+         wait   → ctx.timer / event_received signal (no activity at all)
+         branch/switch → cori_code activity in builtin_eval mode evaluates
+                         `if`/`on`, then the chosen nested step (`then`,
+                         `cases.<label>`, `default`) dispatches as a normal
+                         activity with a `nested_slot` selector on the queue
+                         the planner stored in its slot metadata
+         for_each/loop → same pattern, iterated under compile-time bounds
+                         (`max_items` ≤ 1000, `max_iterations` ≤ 100);
+                         one ActivitySummary per builtin step, nested
+                         outcomes folded into output/notes/cost/usage
   → promote WorkflowOutput → RunTrace (with requesting_identity, per-activity
        task_queue + worker_identity)
   → persist to ~/.cori/runs/<key>/<utc>.json (atomic tempfile + rename)
@@ -265,7 +303,7 @@ Activity bodies (`activities.rs`) are free from these constraints — they're th
 | A new CLI auth adapter | [crates/cori-broker/src/cli_auth/](crates/cori-broker/src/cli_auth) — one tiny adapter per known CLI. |
 | A new OAuth flow | [crates/cori-broker/src/oauth/](crates/cori-broker/src/oauth) (`flow/pkce.rs`, `flow/device.rs`, `flow/client_credentials.rs`, `flow/dcr.rs`, `metadata.rs`). |
 | A new known git host for remote workflows | The default allowlist (`github.com`, `gitlab.com`, `bitbucket.org`) is in [crates/cori-run/src/remote/mod.rs](crates/cori-run/src/remote/mod.rs); custom hosts go in `~/.cori/config.toml` under `[remotes].hosts`. |
-| Builtin step support (`map`/`for_each`/`branch`/`parallel`/`wait`) | This is the largest known gap. Implement in workflow code in [workflow.rs](crates/cori-worker/src/workflow.rs); the compiler already accepts the kind but the runtime short-circuits with "deferred" notices. Keep all builtin logic deterministic (no activity dispatch inside `wait`, etc.). |
+| A new builtin control-flow sub-kind | `branch` (if/else), `switch`, `for_each`, `loop`, and `wait` are implemented end to end. Follow their trail: SDK constructor ([packages/sdk](packages/sdk/src/index.ts)), static extraction in [step_parser.rs](crates/cori-compiler/src/step_parser.rs) (`extract_builtin_metadata`), nested capability validation in [cori-compiler/src/lib.rs](crates/cori-compiler/src/lib.rs), per-slot queue assignment in [planner.rs](crates/cori-run/src/planner.rs), workflow-code execution in [workflow.rs](crates/cori-worker/src/workflow.rs) (`run_builtin_step`), runner `selector`/`builtin_eval` support ([packages/runner/runner.ts](packages/runner/runner.ts)), authoring templates in [mcp_authoring.rs](crates/cori-cli/src/commands/mcp_authoring.rs), and the skill reference `activity_kinds.md`. Keep all builtin logic in the workflow body deterministic — timers via `ctx.timer`, events via signals, user-TS evaluation only through recorded activities. `map`/`parallel` remain deferred. |
 
 ---
 
@@ -316,7 +354,7 @@ Push back if asked to add any of these during v1 work:
 - Python `code` activities (TS only)
 - Git sync, `cori push` / `cori pull`
 - A general-purpose secrets vault (the OAuth/CLI token store under `cori-broker::oauth` is scoped to that purpose only)
-- Builtin steps (`map`, `for_each`, `branch`, `parallel`, `wait`) — accepted by the compiler, deferred at runtime
+- Builtin `map` and `parallel` steps — accepted by the compiler, deferred at runtime (`branch`, `switch`, `for_each`, `loop`, and `wait` ARE implemented)
 - Full AST step parsing via swc/oxc — current implementation is regex-based
 - Bundled TypeScript compiler (`tsc --noEmit`) — deferred; preflight uses the already-required Deno checker to validate workflow modules before execution
 - A workflow registry, `cori init`, `cori save`, `cori start`, `cori ls`, `cori rm`, the `cori-default` task queue — removed in the Phase 1 strip and not coming back

@@ -6,6 +6,7 @@ import type {
   ResolvedResultSection,
 } from "../lib/api";
 import { formatDuration } from "../lib/format";
+import { JsonBlock, Markdown, RichText } from "./rich-content";
 
 export function ResultCard({
   result,
@@ -38,7 +39,9 @@ export function ResultCard({
         {result.headline || "Result headline unavailable"}
       </h2>
       {result.description && (
-        <p className="result-card-description">{result.description}</p>
+        <div className="result-card-description">
+          <Markdown source={result.description} />
+        </div>
       )}
 
       {fields.length > 0 && !compact && (
@@ -101,7 +104,7 @@ export function ResultCard({
       {!compact && (
         <details className="result-raw">
           <summary>Raw result JSON</summary>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
+          <JsonBlock value={result} />
         </details>
       )}
     </section>
@@ -139,7 +142,9 @@ function ResultSectionView({ section }: { section: ResolvedResultSection }) {
     <section className="result-section">
       <h3>{section.label}</h3>
       {display === "text" && (
-        <p className="result-prose">{String(section.value)}</p>
+        <div className="result-prose">
+          <RichText value={String(section.value)} />
+        </div>
       )}
       {display === "list" && <ResultList value={section.value} />}
       {display === "table" && <ResultTable value={section.value} />}
@@ -147,7 +152,7 @@ function ResultSectionView({ section }: { section: ResolvedResultSection }) {
       {display === "tree" && (
         <details className="result-tree">
           <summary>Show structured data</summary>
-          <pre>{JSON.stringify(section.value, null, 2)}</pre>
+          <JsonBlock value={section.value} />
         </details>
       )}
     </section>
@@ -250,7 +255,7 @@ function ResultTable({ value }: { value: unknown }) {
   return (
     <details className="result-tree">
       <summary>Show structured data</summary>
-      <pre>{JSON.stringify(value, null, 2)}</pre>
+      <JsonBlock value={value} />
     </details>
   );
 }

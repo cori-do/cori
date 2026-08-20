@@ -64,6 +64,27 @@ error              string?
 notes              string?
 ```
 
+### Builtin step rows
+
+A builtin control-flow step (`branch`, `switch`, `for_each`, `loop`, `wait`)
+produces exactly **one** ActivityTrace row; its nested outcomes fold into that
+row:
+
+- `attempts` counts every internal dispatch — selector evaluations, nested
+  activity dispatches, and reauth retries — not just retries of a single
+  activity.
+- `notes` carries the control-flow decision: "took `then`", "matched
+  `cases.high`", "applied to 12 item(s)", "goal met after 3 iteration(s)",
+  "paused 60s", "resumed by event `approved`".
+- `cost_eur` and `tokens` aggregate any nested `llm` dispatches.
+- Output shapes: `for_each` → `{ items: [...] }`; `loop` → the last
+  body output plus `iterations`; `wait` → `{ waited_ms }` or `{ event }`;
+  a routed branch/switch → `{ routed_to }` with a note like
+  "took `else` → routed to `05_cleanup`".
+- Steps a `goto` route jumped past appear with status **`not_taken`**
+  (duration 0, attempts 0, a note naming the routing step). They never
+  contribute to dataflow and are excluded from median baselines.
+
 ## WorkflowSource
 
 ```json

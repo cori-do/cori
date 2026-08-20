@@ -30,6 +30,30 @@ pub const MAX_WORKFLOW_SOURCE_PATH_DEPTH: usize = 32;
 pub const MAX_ACTIVITY_ATTEMPTS: u32 = 10;
 pub const MAX_ACTIVITY_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
+/// Bounds for builtin control-flow steps. Shared between the compiler
+/// (which validates literals at compile time) and the workflow body
+/// (which enforces them again at run time — history is the source of
+/// truth, so the runtime never trusts un-revalidated metadata).
+///
+/// A `wait` is a Temporal timer, not an activity, so it may exceed
+/// `MAX_ACTIVITY_TIMEOUT_MS`; 30 days keeps a forgotten workflow from
+/// pinning history forever.
+pub const MAX_WAIT_TIMEOUT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub const MAX_FOR_EACH_ITEMS: u64 = 1000;
+pub const DEFAULT_FOR_EACH_ITEMS: u64 = 100;
+pub const MAX_LOOP_ITERATIONS: u64 = 100;
+pub const DEFAULT_LOOP_ITERATIONS: u64 = 10;
+
+/// Parse a `wait.until` timestamp. Accepts RFC 3339 with an explicit
+/// offset (e.g. `2026-09-01T09:00:00Z` or `2026-09-01T09:00:00+02:00`).
+/// Offset-less local timestamps are rejected: the worker that owns the
+/// timer may be in a different timezone than the author.
+pub fn parse_wait_until(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 /// Apply the shared retry bound used by workflow dispatch and source-history
 /// projection. Invalid legacy values fall back to the kind's safe default.
 pub fn bounded_activity_attempts(configured: Option<u64>, default: u32) -> u32 {

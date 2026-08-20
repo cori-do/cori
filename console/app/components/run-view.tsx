@@ -3,25 +3,34 @@
 // `~/.cori/runs/<key>/<utc>.json`). Picks its data source from props.
 //
 //   • Live mode  → `initialTrace` is undefined; we subscribe via a
-//                  Tauri Channel and accumulate plan/steps until the
+//                  Tauri Channel and accumulate plan/steps/log until the
 //                  Completed event lands, at which point we have the
 //                  full trace and the view switches to the rich one.
 //   • Historical → `initialTrace` is provided; state is seeded once
 //                  and no subscription happens. Otherwise identical.
+//
+// The trace body is a scaled timeline plus ONE fixed inspector rail —
+// selecting a step fills the rail; nothing expands, nothing shifts.
 
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import {
   connectCapability,
   isIpcError,
   listCapabilities,
+  listRuns,
+  stepMedians,
   subscribeRun,
+  type ActivityTrace,
   type CapabilityInfo,
   type PlanStep,
   type RunEvent,
+  type RunListEntry,
   type RunTrace,
+  type StepMedianEntry,
 } from "../lib/api";
 import { ResultCard } from "./result-card";
+import { CopyButton, JsonBlock, RichText, looksLikeHtml } from "./rich-content";
 import {
   formatAbsolute,
   formatCost,
@@ -35,17 +44,22 @@ export interface RunViewProps {
   runId: string;
   /** Present iff historical mode. Seeds state and skips the subscription. */
   initialTrace?: RunTrace;
+  /** Run-history directory key — enables median ticks + deltas. */
+  historyKey?: string;
+  /** On-disk trace path, shown (and yankable) in the header. */
+  tracePath?: string;
 }
 
 interface RunState {
   plan: PlanStep[] | null;
   /** activity_id → incremental live state; empty in historical mode. */
   steps: Record<string, LiveStep>;
+  /** Timestamped log lines accumulated from run events (live mode). */
+  log: LogLine[];
   /** Populated post-Completed (live) or up-front (historical). */
   trace: RunTrace | null;
   error: string | null;
-  /** True after Completed / Failed. Distinguishes "still running" from
-   *  "done — no more events coming." Always true in historical mode. */
+  /** True after Completed / Failed. Always true in historical mode. */
   closed: boolean;
 }
 
@@ -56,6 +70,12 @@ interface LiveStep {
   status: "running" | "succeeded" | "failed" | "skipped" | "queued";
   duration_ms?: number;
   error?: string | null;
+}
+
+interface LogLine {
+  ts: string;
+  text: string;
+  tone: "info" | "note" | "error";
 }
 
 type Action =
@@ -74,9 +94,14 @@ type Action =
       status: string;
       duration_ms: number;
       error: string | null;
+      notes: string[];
     }
   | { kind: "completed"; trace: RunTrace }
   | { kind: "failed"; error: string };
+
+function now(): string {
+  return new Date().toISOString().slice(11, 19);
+}
 
 function reducer(state: RunState, a: Action): RunState {
   switch (a.kind) {
@@ -89,7 +114,19 @@ function reducer(state: RunState, a: Action): RunState {
           status: "queued",
         };
       }
-      return { ...state, plan: a.assignments, steps };
+      return {
+        ...state,
+        plan: a.assignments,
+        steps,
+        log: [
+          ...state.log,
+          {
+            ts: now(),
+            text: `plan · ${a.assignments.length} steps`,
+            tone: "info",
+          },
+        ],
+      };
     }
     case "step_start":
       return {
@@ -104,8 +141,30 @@ function reducer(state: RunState, a: Action): RunState {
             status: "running",
           },
         },
+        log: [
+          ...state.log,
+          {
+            ts: now(),
+            text: `▶ ${a.step_name} (${a.step_kind}${a.task_queue ? ` · ${a.task_queue}` : ""})`,
+            tone: "info",
+          },
+        ],
       };
-    case "step_finish":
+    case "step_finish": {
+      const mark = a.status === "failed" ? "✗" : "✓";
+      const lines: LogLine[] = [
+        {
+          ts: now(),
+          text: `${mark} ${a.step_name} · ${a.status} · ${formatDuration(a.duration_ms)}`,
+          tone: a.status === "failed" ? "error" : "info",
+        },
+        ...a.notes.map(
+          (n): LogLine => ({ ts: now(), text: `  ${n}`, tone: "note" }),
+        ),
+      ];
+      if (a.error) {
+        lines.push({ ts: now(), text: `  ${a.error}`, tone: "error" });
+      }
       return {
         ...state,
         steps: {
@@ -118,11 +177,23 @@ function reducer(state: RunState, a: Action): RunState {
             error: a.error,
           },
         },
+        log: [...state.log, ...lines],
       };
+    }
     case "completed":
-      return { ...state, trace: a.trace, closed: true };
+      return {
+        ...state,
+        trace: a.trace,
+        closed: true,
+        log: [...state.log, { ts: now(), text: "run completed", tone: "info" }],
+      };
     case "failed":
-      return { ...state, error: a.error, closed: true };
+      return {
+        ...state,
+        error: a.error,
+        closed: true,
+        log: [...state.log, { ts: now(), text: a.error, tone: "error" }],
+      };
   }
 }
 
@@ -130,18 +201,20 @@ function makeInitial(trace?: RunTrace): RunState {
   return {
     plan: null,
     steps: {},
+    log: [],
     trace: trace ?? null,
     error: trace?.error ?? null,
     closed: trace != null,
   };
 }
 
-export function RunView({ runId, initialTrace }: RunViewProps) {
-  const [state, dispatch] = useReducer(
-    reducer,
-    initialTrace,
-    makeInitial,
-  );
+export function RunView({
+  runId,
+  initialTrace,
+  historyKey,
+  tracePath,
+}: RunViewProps) {
+  const [state, dispatch] = useReducer(reducer, initialTrace, makeInitial);
 
   // Live mode only: subscribe to the per-run RunChannel. Replay buffer
   // on the Rust side covers any events that fired before we attached.
@@ -173,6 +246,7 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
             status: ev.status,
             duration_ms: ev.duration_ms,
             error: ev.error,
+            notes: ev.notes ?? [],
           });
           break;
         case "completed":
@@ -204,6 +278,11 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
         <h1>
           <span className="run-window-title">{title}</span>
           <span className={`pill ${pillFor(status)}`}>{status}</span>
+          {(state.trace?.dry_run ?? false) && (
+            <span className="pill muted" title="Dry run — external steps stubbed">
+              dry run
+            </span>
+          )}
         </h1>
         <div style={{ flex: 1 }} />
         <button
@@ -216,12 +295,17 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
       </header>
       <div className="run-window-body">
         {state.trace ? (
-          <TraceBody trace={state.trace} />
+          <TraceBody
+            trace={state.trace}
+            historyKey={historyKey}
+            tracePath={tracePath}
+          />
         ) : (
           <LiveBody
             runId={runId}
             plan={state.plan}
             steps={state.steps}
+            log={state.log}
             error={state.error}
           />
         )}
@@ -232,96 +316,410 @@ export function RunView({ runId, initialTrace }: RunViewProps) {
 
 // ── Trace body (post-completion or historical) ───────────────────────
 
-function TraceBody({ trace }: { trace: RunTrace }) {
-  // Activity traces deliberately persist outputs and the original run
-  // parameters. Each activity receives the accumulated parameters plus the
-  // successful object outputs before it, so reconstructing here restores the
-  // actual input without expanding the trace schema or writing another copy
-  // of user data to disk.
-  const activityInputs = reconstructActivityInputs(trace);
+function TraceBody({
+  trace,
+  historyKey,
+  tracePath,
+}: {
+  trace: RunTrace;
+  historyKey?: string;
+  tracePath?: string;
+}) {
+  // Per-step medians + run-level history, for ticks and deltas. Both
+  // are best-effort: without a history key the timeline still scales
+  // to this run's own durations.
+  const [medians, setMedians] = useState<Record<string, StepMedianEntry>>({});
+  const [history, setHistory] = useState<RunListEntry[]>([]);
+  useEffect(() => {
+    if (!historyKey) return;
+    let cancelled = false;
+    stepMedians({ history_key: historyKey })
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, StepMedianEntry> = {};
+        for (const r of rows) map[r.activity_id] = r;
+        setMedians(map);
+      })
+      .catch(() => {});
+    listRuns({ history_key: historyKey, limit: 20 })
+      .then((rows) => !cancelled && setHistory(rows))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [historyKey]);
+
+  // One inspector, not ten toggles: the selected step fills the rail.
+  // Default to the failed step, else the most expensive one.
+  const defaultSelection = useMemo(() => {
+    const failed = trace.activities.find((a) => a.status === "failed");
+    if (failed) return failed.activity_id;
+    let best: ActivityTrace | null = null;
+    for (const a of trace.activities) {
+      if (!best || a.duration_ms > best.duration_ms) best = a;
+    }
+    return best?.activity_id ?? null;
+  }, [trace]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const selectedId = selected ?? defaultSelection;
+  const selectedIndex = trace.activities.findIndex(
+    (a) => a.activity_id === selectedId,
+  );
+  const activityInputs = useMemo(
+    () => reconstructActivityInputs(trace),
+    [trace],
+  );
+
+  const baseline = runMedian(history, trace.run_id);
+  const durationDelta =
+    !trace.dry_run && trace.status === "succeeded"
+      ? deltaVsMedian(trace.duration_ms, baseline.durationMs, 500)
+      : null;
+  const costDelta =
+    !trace.dry_run && trace.status === "succeeded" && trace.cost
+      ? deltaVsMedian(trace.cost.total_eur, baseline.costEur, 0.005)
+      : null;
+
+  // Bars scale against the slowest of (this run's steps, their medians),
+  // so a step far over its median visibly overshoots the tick.
+  const scaleMax = Math.max(
+    1,
+    ...trace.activities.map((a) => a.duration_ms),
+    ...trace.activities.map((a) => medians[a.activity_id]?.median_ms ?? 0),
+  );
+
   return (
     <>
+      {/* Identity strip: ids last, one line, no card. */}
+      <div className="trace-identity">
+        <span title="Run id">{trace.run_id}</span>
+        <span className="sep">·</span>
+        <span>{trace.trigger}</span>
+        {trace.workflow_content_hash && (
+          <>
+            <span className="sep">·</span>
+            <span title={`Workflow content hash ${trace.workflow_content_hash}`}>
+              content {trace.workflow_content_hash.slice(0, 8)}
+            </span>
+          </>
+        )}
+        <span className="sep">·</span>
+        <span title={formatAbsolute(trace.started_at)}>
+          {formatRelative(trace.started_at)}
+        </span>
+        {tracePath && (
+          <>
+            <span className="sep">·</span>
+            <button
+              type="button"
+              className="trace-path"
+              title={`${tracePath} — click to copy`}
+              onClick={() =>
+                void navigator.clipboard?.writeText(tracePath).catch(() => {})
+              }
+            >
+              {tracePath}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* The headline numbers, each against this workflow's median. */}
+      <div className="trace-deltas">
+        <span className="trace-delta-item">
+          {formatDuration(trace.duration_ms)}
+          {durationDelta != null && (
+            <DeltaChip delta={durationDelta} format={formatDuration} />
+          )}
+        </span>
+        {trace.cost && trace.cost.total_eur > 0 && (
+          <span className="trace-delta-item">
+            {formatCost(trace.cost.total_eur)}
+            {costDelta != null && (
+              <DeltaChip delta={costDelta} format={formatCost} />
+            )}
+          </span>
+        )}
+        <span className="trace-delta-item">
+          {trace.activities.length} steps
+        </span>
+        {baseline.samples >= 3 && (
+          <span className="trace-delta-note">
+            vs median of {baseline.samples} real runs
+          </span>
+        )}
+      </div>
+
+      {trace.error && (
+        <div className="card error">
+          <strong>Run failed</strong>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{trace.error}</pre>
+          <ConnectOffer error={trace.error} />
+        </div>
+      )}
+
       {trace.result && (
         <ResultCard result={trace.result} partial={trace.status === "failed"} />
       )}
-      <div className="card">
-        <dl className="kv">
-          <dt>Run id</dt>
-          <dd>{trace.run_id}</dd>
-          <dt>Trigger</dt>
-          <dd>{trace.trigger}</dd>
-          {trace.workflow_content_hash && (
-            <>
-              <dt>Content</dt>
-              <dd>{trace.workflow_content_hash.slice(0, 12)}</dd>
-            </>
-          )}
-          <dt>Started</dt>
-          <dd>
-            {formatAbsolute(trace.started_at)} ({formatRelative(trace.started_at)})
-          </dd>
-          <dt>Duration</dt>
-          <dd>{formatDuration(trace.duration_ms)}</dd>
-          {trace.cost && trace.cost.total_eur > 0 && (
-            <>
-              <dt>Cost</dt>
-              <dd>
-                {formatCost(trace.cost.total_eur)} ({trace.cost.input_tokens} in /{" "}
-                {trace.cost.output_tokens} out)
-              </dd>
-            </>
-          )}
-          {trace.error && (
-            <>
-              <dt>Error</dt>
-              <dd style={{ color: "var(--red)" }}>{trace.error}</dd>
-            </>
-          )}
-        </dl>
-        {trace.error && <ConnectOffer error={trace.error} />}
-      </div>
 
       <h2>Steps</h2>
       {trace.activities.length === 0 ? (
         <div className="empty">No activities recorded.</div>
       ) : (
-        <div className="timeline">
-          {trace.activities.map((a, i) => (
-            <div
-              key={a.activity_id}
-              className={`step ${a.status === "failed" ? "failed" : ""}`}
-            >
-              <div className="num">{stepNumber(i)}</div>
-              <div className="step-body">
-                <div className="name">{a.step_name}</div>
-                <div className="meta">
-                  {a.attempts > 1 ? `${a.attempts} attempts` : "1 attempt"}
-                  {a.task_queue ? ` · ${a.task_queue}` : ""}
-                </div>
-                {a.error && (
-                  <div className="meta" style={{ color: "var(--red)" }}>
-                    {a.error}
-                  </div>
-                )}
-                <ActivityInput value={activityInputs[i]} />
-                <details>
-                  <summary>output</summary>
-                  <pre>{JSON.stringify(a.output, null, 2)}</pre>
-                </details>
-              </div>
-              <div className={kindClass(a.kind)}>{a.kind}</div>
-              <div className="right">
-                <span className={`pill ${pillFor(a.status)}`}>{a.status}</span>
-                <span>{formatDuration(a.duration_ms)}</span>
-                {a.cost_eur != null && a.cost_eur > 0 && (
-                  <span className="cost">{formatCost(a.cost_eur)}</span>
-                )}
-              </div>
-            </div>
-          ))}
+        <div className="trace-layout">
+          <div className="trace-timeline" role="listbox" aria-label="Steps">
+            {trace.activities.map((a, i) => (
+              <TimelineRow
+                key={a.activity_id}
+                index={i}
+                activity={a}
+                median={medians[a.activity_id]}
+                scaleMax={scaleMax}
+                selected={a.activity_id === selectedId}
+                onSelect={() => setSelected(a.activity_id)}
+              />
+            ))}
+          </div>
+          <StepInspector
+            activity={
+              selectedIndex >= 0 ? trace.activities[selectedIndex] : null
+            }
+            median={selectedId ? medians[selectedId] : undefined}
+            input={selectedIndex >= 0 ? activityInputs[selectedIndex] : null}
+          />
         </div>
       )}
     </>
+  );
+}
+
+function TimelineRow({
+  index,
+  activity: a,
+  median,
+  scaleMax,
+  selected,
+  onSelect,
+}: {
+  index: number;
+  activity: ActivityTrace;
+  median: StepMedianEntry | undefined;
+  scaleMax: number;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const width = Math.max(1.5, (a.duration_ms / scaleMax) * 100);
+  const tick =
+    median && median.samples >= 3
+      ? Math.min(100, (median.median_ms / scaleMax) * 100)
+      : null;
+  return (
+    <button
+      type="button"
+      className={`trace-row${selected ? " is-selected" : ""}${a.status === "failed" ? " is-failed" : ""}`}
+      role="option"
+      aria-selected={selected}
+      onClick={onSelect}
+    >
+      <span className="trace-row-num">{stepNumber(index)}</span>
+      <span className="trace-row-name">{a.step_name}</span>
+      <span className="trace-row-track" aria-hidden>
+        <span className="trace-row-bar" style={{ width: `${width}%` }} />
+        {tick != null && median && (
+          <span
+            className="trace-row-tick"
+            style={{ left: `${tick}%` }}
+            title={`median ${formatDuration(median.median_ms)} over ${median.samples} runs`}
+          />
+        )}
+      </span>
+      <span className="trace-row-duration">
+        {formatDuration(a.duration_ms)}
+      </span>
+      <span className={kindClass(a.kind)}>{a.kind}</span>
+      <span
+        className={`trace-row-mark ${a.status === "failed" ? "is-bad" : a.status === "ok" ? "is-ok" : "is-muted"}`}
+      >
+        {a.status === "failed" ? "✗" : a.status === "ok" ? "✓" : "–"}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * The fixed right rail. Selecting a step fills it — no accordions, no
+ * layout shift. Shows the numbers, the manifest/broker note, and the
+ * exact input/output the activity saw.
+ */
+function StepInspector({
+  activity: a,
+  median,
+  input,
+}: {
+  activity: ActivityTrace | null;
+  median: StepMedianEntry | undefined;
+  input: unknown;
+}) {
+  if (!a) {
+    return (
+      <aside className="trace-inspector">
+        <div className="empty">Select a step.</div>
+      </aside>
+    );
+  }
+  const display = redactInputForDisplay(input);
+  return (
+    <aside className="trace-inspector">
+      <div className="trace-inspector-title">
+        <span className="trace-inspector-name">{a.step_name}</span>
+        <span className={`pill ${pillFor(a.status)}`}>{a.status}</span>
+      </div>
+      <dl className="kv">
+        <dt>Kind</dt>
+        <dd>{a.kind}</dd>
+        <dt>Duration</dt>
+        <dd>
+          {formatDuration(a.duration_ms)}
+          {median && median.samples >= 3 && (
+            <span className="trace-inspector-median">
+              {" "}
+              · p50 {formatDuration(median.median_ms)}
+            </span>
+          )}
+        </dd>
+        <dt>Attempts</dt>
+        <dd>{a.attempts}</dd>
+        {a.task_queue && (
+          <>
+            <dt>Queue</dt>
+            <dd>{a.task_queue}</dd>
+          </>
+        )}
+        {a.cost_eur != null && a.cost_eur > 0 && (
+          <>
+            <dt>Cost</dt>
+            <dd>
+              {formatCost(a.cost_eur)}
+              {a.tokens
+                ? ` (${a.tokens.input_tokens} in / ${a.tokens.output_tokens} out)`
+                : ""}
+            </dd>
+          </>
+        )}
+      </dl>
+      {a.error && <div className="trace-inspector-error">{a.error}</div>}
+      {a.notes && (
+        <div className="trace-inspector-note" title="Manifest / broker note">
+          {a.notes}
+        </div>
+      )}
+      <div className="trace-inspector-block">
+        <span className="label">Input</span>
+        <div className="step-input-preview" title={inputPreview(display)}>
+          <span>{inputPreview(display)}</span>
+        </div>
+        <details>
+          <summary>full input</summary>
+          <JsonBlock value={display} />
+        </details>
+      </div>
+      <StepOutput output={a.output} />
+    </aside>
+  );
+}
+
+/**
+ * Step output, rendered by shape. A bare string (or a long string field
+ * inside an object — the usual LLM-step shape) gets the rich renderer:
+ * markdown as prose, HTML in the sandboxed frame. The raw JSON stays a
+ * click away, now with a copy button.
+ */
+function StepOutput({ output }: { output: unknown }) {
+  if (typeof output === "string") {
+    return (
+      <div className="trace-inspector-block">
+        <span className="label">
+          Output <CopyButton text={output} />
+        </span>
+        <div className="trace-inspector-rich">
+          <RichText value={output} />
+        </div>
+      </div>
+    );
+  }
+  const rich = isRecord(output)
+    ? Object.entries(output).filter(
+        ([, v]) =>
+          typeof v === "string" && (v.length >= 160 || looksLikeHtml(v)),
+      )
+    : [];
+  return (
+    <div className="trace-inspector-block">
+      <span className="label">Output</span>
+      {rich.map(([key, value], index) => (
+        <details key={key} className="trace-inspector-rendered" open={index === 0}>
+          <summary>{key} · rendered</summary>
+          <div className="trace-inspector-rich">
+            <RichText value={value as string} />
+          </div>
+        </details>
+      ))}
+      <JsonBlock value={output} className="trace-inspector-output" />
+    </div>
+  );
+}
+
+// ── Median helpers ────────────────────────────────────────────────────
+
+function runMedian(
+  history: RunListEntry[],
+  excludeRunId: string,
+): { durationMs: number | null; costEur: number | null; samples: number } {
+  const real = history.filter(
+    (h) => !h.dry_run && h.status === "succeeded" && h.run_id !== excludeRunId,
+  );
+  if (real.length < 3) {
+    return { durationMs: null, costEur: null, samples: real.length };
+  }
+  const med = (ns: number[]): number => {
+    const s = [...ns].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  return {
+    durationMs: med(real.map((h) => h.duration_ms)),
+    costEur: med(real.map((h) => h.cost.total_eur)),
+    samples: real.length,
+  };
+}
+
+function deltaVsMedian(
+  actual: number,
+  median: number | null,
+  minAbs: number,
+): number | null {
+  if (median == null) return null;
+  const delta = actual - median;
+  if (Math.abs(delta) < Math.max(median * 0.05, minAbs)) return null;
+  return delta;
+}
+
+function DeltaChip({
+  delta,
+  format,
+}: {
+  delta: number;
+  format: (n: number) => string;
+}) {
+  const over = delta > 0;
+  return (
+    <span
+      className={`pane-delta ${over ? "is-over" : "is-under"}`}
+      title="vs this workflow's median (real runs)"
+    >
+      {over ? "+" : "−"}
+      {format(Math.abs(delta))}
+    </span>
   );
 }
 
@@ -345,23 +743,6 @@ function reconstructActivityInputs(trace: RunTrace): unknown[] {
     }
     return input;
   });
-}
-
-function ActivityInput({ value }: { value: unknown }) {
-  const display = redactInputForDisplay(value);
-  const preview = inputPreview(display);
-  return (
-    <>
-      <div className="step-input-preview" title={preview}>
-        <span>input</span>
-        <span>{preview}</span>
-      </div>
-      <details>
-        <summary>view input</summary>
-        <pre>{formatInputJson(display)}</pre>
-      </details>
-    </>
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -426,24 +807,38 @@ function describeInputValue(value: unknown): string {
   return String(value);
 }
 
-function formatInputJson(value: unknown): string {
-  const text = JSON.stringify(value, null, 2);
-  return text ?? "null";
-}
-
 // ── Live body (pre-completion only) ──────────────────────────────────
+//
+// A fixed step table on top — rows never move — and the raw event log
+// underneath, dark, following by default. Filtering is a plain text
+// box; grep-and-follow must survive the GUI.
 
 interface LiveBodyProps {
   runId: string;
   plan: PlanStep[] | null;
   steps: Record<string, LiveStep>;
+  log: LogLine[];
   error: string | null;
 }
 
-function LiveBody({ runId, plan, steps, error }: LiveBodyProps) {
+function LiveBody({ runId, plan, steps, log, error }: LiveBodyProps) {
   const ordered = (plan ?? []).map((p) => p.activity_id);
   const extras = Object.keys(steps).filter((id) => !ordered.includes(id));
   const hasAny = ordered.length > 0 || extras.length > 0;
+  const [filter, setFilter] = useState("");
+  const [follow, setFollow] = useState(true);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  const visible = filter.trim()
+    ? log.filter((l) => l.text.toLowerCase().includes(filter.toLowerCase()))
+    : log;
+
+  useEffect(() => {
+    if (!follow) return;
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [visible.length, follow]);
+
   return (
     <>
       <p className="hint">
@@ -475,6 +870,52 @@ function LiveBody({ runId, plan, steps, error }: LiveBodyProps) {
           ))}
         </div>
       )}
+
+      <div className="run-log">
+        <div className="run-log-bar">
+          <span className="label">Log</span>
+          <input
+            type="text"
+            className="run-log-filter"
+            placeholder="filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            spellCheck={false}
+          />
+          <label className="run-log-follow">
+            <input
+              type="checkbox"
+              checked={follow}
+              onChange={(e) => setFollow(e.target.checked)}
+            />
+            follow
+          </label>
+        </div>
+        <div
+          className="run-log-pane"
+          ref={logRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            const atBottom =
+              el.scrollHeight - el.scrollTop - el.clientHeight < 12;
+            // Scrolling up pauses follow; returning to the bottom resumes.
+            setFollow(atBottom);
+          }}
+        >
+          {visible.length === 0 ? (
+            <div className="run-log-empty">
+              {log.length === 0 ? "No events yet." : "No line matches."}
+            </div>
+          ) : (
+            visible.map((l, i) => (
+              <div key={i} className={`run-log-line is-${l.tone}`}>
+                <span className="run-log-ts">{l.ts}</span>
+                <span className="run-log-text">{l.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
     </>
   );
 }
@@ -624,7 +1065,7 @@ function runStatus(s: RunState): string {
 }
 
 function pillFor(status: string): string {
-  if (status === "succeeded") return "ok";
+  if (status === "succeeded" || status === "ok") return "ok";
   if (status === "failed") return "bad";
   if (status === "running") return "warn";
   if (status === "skipped") return "muted";
