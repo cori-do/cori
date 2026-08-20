@@ -1049,25 +1049,25 @@ fn publish_gated_then_ships_and_revert_restores() {
     let versions_root = c.home_path.join("versions");
     assert!(versions_root.is_dir(), "snapshots live in ~/.cori/versions");
 
-    // One grant, one publish: a second publish needs a fresh approval.
-    let resp = c.call_tool(8, "publish", json!({ "session_id": session_id }));
+    // Publishing is terminal: the session stopped with the version in
+    // its reason, and every further call through it is refused.
+    let resp = c.call_tool(8, "session_status", json!({ "session_id": session_id }));
+    let sc = resp.pointer("/result/structuredContent").unwrap();
+    assert_eq!(sc["state"], "stopped", "{resp}");
+    assert!(
+        sc["stop_reason"].as_str().unwrap().contains("published v2"),
+        "{resp}"
+    );
+    let resp = c.call_tool(9, "publish", json!({ "session_id": session_id }));
     assert_eq!(
         resp.pointer("/result/structuredContent/error/code")
             .unwrap(),
-        "approval_required"
+        "session_stopped"
     );
 
-    // Drift the folder, then revert to v2 restores the published state.
-    let resp = c.call_tool(
-        9,
-        "workflow_write_file",
-        json!({
-            "session_id": session_id,
-            "rel_path": "steps/02_extra.ts",
-            "content": VALID_CODE_STEP,
-        }),
-    );
-    assert_eq!(resp.pointer("/result/isError").unwrap(), false);
+    // Drift the folder out-of-band, then revert to v2 restores the
+    // published state.
+    std::fs::write(wf_dir.join("steps/02_extra.ts"), VALID_CODE_STEP).unwrap();
     let resp = c.call_tool(
         10,
         "revert",

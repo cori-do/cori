@@ -73,8 +73,11 @@ rewindable); writes are confined to user directories (never `~/.cori`, never
 siblings so orphaned step files are structurally impossible. There is still
 **no one-shot `save_workflow` tool** — authoring is session-scoped and
 inspectable, not a single opaque dump. Irreversible actions are gated two ways:
-`publish` requires a granted `request_approval` (one grant, one publish), and
-`propose` ends the session in a `proposed` state — a frozen per-step review card
+`publish` requires a granted `request_approval` (one grant, one publish) and is
+terminal — a successful publish stops the session, exactly like an accepted
+proposal, so the Console never renders a published workflow as a draft (further
+edits open a new session); `propose` ends the session in a `proposed` state — a
+frozen per-step review card
 (kind, effect target, proven access, external reach, net file change; computed
 from the compiled DAG, never agent claims) that the human resolves in the
 Console: accept publishes the next version, reject stops the session with the

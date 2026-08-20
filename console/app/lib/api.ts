@@ -369,6 +369,10 @@ export interface WorkflowPreflight {
   /** True only for builtins the runtime still defers (`map` / `parallel`).
    *  Executable control flow (branch/switch/for_each/loop/wait) runs. */
   has_builtin_step: boolean;
+  /** Best-effort draft parse of a folder an agent is mid-writing — the
+   *  full compile failed, so capability/effect data is absent and the
+   *  workflow is never runnable in this state. */
+  draft?: boolean;
 }
 
 // ---------- Run events (Channel<RunEvent>) -----------------------------

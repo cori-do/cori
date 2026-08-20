@@ -150,12 +150,20 @@ export function WorkflowPane({
 
   // While an agent session journals into this folder, re-resolve quietly
   // on every journal bump so nodes land on the canvas as they are
-  // written. Quiet: the current preflight stays on screen; a folder that
-  // does not compile mid-edit keeps the last good plan (or the canvas's
-  // "thinking" state when there was none).
+  // written (the backend serves a draft parse while the folder cannot
+  // fully compile). Quiet: the current preflight stays on screen; a
+  // resolve that fails outright keeps the last good plan (or the
+  // canvas's "thinking" state when there was none). One more refresh
+  // fires when the session ends — a publish or accept just changed the
+  // folder, and the draft view must give way to the compiled one.
   const sessionSeq = session?.current_seq;
+  const sessionState = session?.state ?? null;
+  const hadSessionRef = useRef(false);
   useEffect(() => {
-    if (!source || sessionSeq == null) return;
+    const hadSession = hadSessionRef.current;
+    hadSessionRef.current = sessionSeq != null;
+    if (!source) return;
+    if (sessionSeq == null && !hadSession) return;
     // Observe (never bump) the request counter: a quiet refresh must not
     // cancel a real resolve, and must discard itself if one starts.
     const id = requestId.current;
@@ -179,7 +187,7 @@ export function WorkflowPane({
         });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [source, sessionSeq]);
+  }, [source, sessionSeq, sessionState]);
 
   // A quick cache hit should feel instant, not flash a one-frame status.
   // Slower resolves earn a quiet loader after a short threshold; keeping the

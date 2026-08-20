@@ -14,7 +14,7 @@ use cori_run::{
 };
 use cori_worker::workflow::ActivitySummary;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tauri::State;
 use tauri::ipc::Channel;
 use tracing::warn;
@@ -49,6 +49,10 @@ pub struct WorkflowPreflight {
     /// (`map` / `parallel`). Executable control flow (`branch`,
     /// `switch`, `for_each`, `loop`, `wait`) does not set this.
     pub has_builtin_step: bool,
+    /// True when this payload is a best-effort draft parse of a folder an
+    /// agent is mid-writing (full compile failed). Display-only: never
+    /// runnable, capability and effect data absent.
+    pub draft: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,10 +107,27 @@ pub async fn resolve_workflow(
 ) -> IpcResult<WorkflowPreflight> {
     let update = update.unwrap_or(false);
     let error_source = source.clone();
-    let outcome = tokio::task::spawn_blocking(move || preflight(&source, update, false))
+    let blocking_source = source.clone();
+    let result = tokio::task::spawn_blocking(move || preflight(&blocking_source, update, false))
         .await
-        .map_err(|e| IpcError::Internal(anyhow::anyhow!("preflight task join: {e}")))?
-        .map_err(|error| classify_preflight_error(error, error_source))?;
+        .map_err(|e| IpcError::Internal(anyhow::anyhow!("preflight task join: {e}")))?;
+
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A folder an agent is mid-writing rarely compiles (steps
+            // arrive one at a time, routes point at steps not written
+            // yet). Fall back to a best-effort draft parse so the canvas
+            // grows live instead of sitting on the last good plan.
+            let draft = tokio::task::spawn_blocking(move || draft_preflight_payload(&source))
+                .await
+                .map_err(|e| IpcError::Internal(anyhow::anyhow!("draft task join: {e}")))?;
+            if let Some(pf) = draft {
+                return Ok(pf);
+            }
+            return Err(classify_preflight_error(error, error_source));
+        }
+    };
 
     if let Some(cr) = outcome.consent_required {
         return Err(IpcError::ConsentRequired(ConsentDetails {
@@ -119,6 +140,70 @@ pub async fn resolve_workflow(
     }
 
     Ok(build_preflight_payload(outcome))
+}
+
+/// Draft fallback for `resolve_workflow`: only for a local folder that an
+/// authoring session is actively writing into. Anything else keeps the
+/// real resolve error — a broken workflow with no agent behind it is a
+/// failure, not a draft.
+fn draft_preflight_payload(source: &str) -> Option<WorkflowPreflight> {
+    let abs = std::fs::canonicalize(source).ok()?;
+    if !abs.is_dir() {
+        return None;
+    }
+    let writing = cori_run::sessions::list().ok()?.into_iter().any(|s| {
+        s.state == cori_run::sessions::SessionState::Writing
+            && std::fs::canonicalize(&s.workflow_dir)
+                .map(|d| d == abs)
+                .unwrap_or(s.workflow_dir == abs)
+    });
+    if !writing {
+        return None;
+    }
+
+    let draft = cori_compiler::draft(&abs);
+    let folder_name = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workflow".to_string());
+    let manifest = match &draft.manifest {
+        Some(m) => serde_json::to_value(m).unwrap_or(Value::Null),
+        // The frontend needs the summary's shape even before manifest.md
+        // parses; the folder name is the only identity there is yet.
+        None => json!({
+            "id": folder_name,
+            "name": folder_name,
+            "description": "",
+            "parameters": [],
+            "tools_required": [],
+            "mcp_servers": [],
+            "body": "",
+        }),
+    };
+    let (steps, has_builtin) = step_summaries(&draft.steps, &abs);
+    let (tools, servers) = draft
+        .manifest
+        .as_ref()
+        .map(|m| (m.tools_required.clone(), m.mcp_servers.clone()))
+        .unwrap_or_default();
+
+    Some(WorkflowPreflight {
+        manifest,
+        content_hash: cori_compiler::workflow_content_hash(&abs).unwrap_or_default(),
+        history_key: cori_run::workflow_loader::run_history_key(&abs, &folder_name),
+        absolute_path: abs,
+        steps,
+        required_cli_binaries: tools,
+        required_mcp_servers: servers,
+        required_llm_providers: Vec::new(),
+        capabilities: Value::Null,
+        missing_capabilities: Vec::new(),
+        undeclared_capabilities: Vec::new(),
+        effects: Value::Null,
+        ready: false,
+        has_builtin_step: has_builtin,
+        draft: true,
+    })
 }
 
 /// Keep expected, recoverable workflow failures out of the Console's generic
@@ -160,21 +245,21 @@ fn classify_preflight_error(error: anyhow::Error, source: String) -> IpcError {
     IpcError::Internal(error)
 }
 
-fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
-    let compiled = &outcome.loaded.compiled;
-    let manifest = serde_json::to_value(&compiled.manifest).unwrap_or(Value::Null);
-    let history_key = cori_run::workflow_loader::loaded_run_history_key(&outcome.loaded);
-
+/// Map compiled (or draft-parsed) steps to their display summaries.
+/// Returns the summaries plus whether any step uses a builtin the
+/// runtime still defers.
+fn step_summaries(
+    compiled_steps: &[cori_protocol::CompiledStep],
+    workflow_root: &std::path::Path,
+) -> (Vec<StepSummary>, bool) {
     let mut has_builtin = false;
     // Built once per workflow, not once per step: resolving credentials
     // reads the OS keychain.
-    let llm_preview = compiled
-        .steps
+    let llm_preview = compiled_steps
         .iter()
         .any(|s| matches!(s.kind, StepKind::Llm))
         .then(crate::llm_cmd::PreviewContext::new);
-    let steps: Vec<StepSummary> = compiled
-        .steps
+    let steps: Vec<StepSummary> = compiled_steps
         .iter()
         .map(|s| {
             let builtin = s
@@ -214,7 +299,7 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
                 description: s.description.clone(),
                 placement: serde_json::to_value(&s.placement).unwrap_or(Value::Null),
                 source_path: s.source_path.clone(),
-                source: read_step_source(&outcome.loaded.absolute_path, &s.source_path),
+                source: read_step_source(workflow_root, &s.source_path),
                 binary: meta_string("binary"),
                 server: meta_string("server"),
                 tool: meta_string("tool"),
@@ -225,6 +310,15 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
             }
         })
         .collect();
+    (steps, has_builtin)
+}
+
+fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
+    let compiled = &outcome.loaded.compiled;
+    let manifest = serde_json::to_value(&compiled.manifest).unwrap_or(Value::Null);
+    let history_key = cori_run::workflow_loader::loaded_run_history_key(&outcome.loaded);
+
+    let (steps, has_builtin) = step_summaries(&compiled.steps, &outcome.loaded.absolute_path);
 
     let capabilities = serde_json::to_value(&outcome.cap_report).unwrap_or(Value::Null);
     let ready = outcome.missing_caps.is_empty();
@@ -265,6 +359,7 @@ fn build_preflight_payload(outcome: PreflightOutcome) -> WorkflowPreflight {
             .unwrap_or(Value::Null),
         ready,
         has_builtin_step: has_builtin,
+        draft: false,
     }
 }
 

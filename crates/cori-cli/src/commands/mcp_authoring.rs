@@ -217,7 +217,10 @@ pub fn tool_definitions() -> Vec<JsonValue> {
                 hold a granted request_approval(action: \"publish\") — one grant, one \
                 publish (`approval_required` otherwise). Keeps the previous version \
                 for `revert` and reports every schedule that will pick the new \
-                version up. Cluster reachability is a run concern, not a publish gate.",
+                version up. Cluster reachability is a run concern, not a publish gate. \
+                Publishing ends the session — it is the terminal act of authoring, \
+                like an accepted proposal. Open a new session with workflow_open to \
+                edit further.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1146,6 +1149,12 @@ fn tool_publish(args: &JsonValue) -> Result<(JsonValue, bool)> {
         );
     }
 
+    // Publishing is the terminal act of authoring, exactly like an
+    // accepted proposal: stop the session so the Console's canvas leaves
+    // the writing phase. (Left open, a published workflow renders as an
+    // unfinished draft forever.) Further edits start a new session.
+    sessions::stop(&session_id, Some(&format!("published v{next_version}")))?;
+
     let mut result = json!({
         "version": next_version,
         "previous_version": current_version,
@@ -1154,6 +1163,7 @@ fn tool_publish(args: &JsonValue) -> Result<(JsonValue, bool)> {
             "remote_consumers": [],
         },
         "warnings": warnings,
+        "session": "stopped — published; open a new session to edit further",
     });
     if let Some(nonce) = grant.nonce {
         result["ledger_id"] = json!(nonce);

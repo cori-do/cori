@@ -624,6 +624,133 @@ pub fn source_sha256(source: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Draft view — best-effort parse for live authoring display
+// ---------------------------------------------------------------------------
+
+/// Best-effort view of a workflow folder mid-authoring. Never an error:
+/// whatever parses is returned, whatever doesn't is skipped or stubbed.
+#[derive(Debug)]
+pub struct DraftWorkflow {
+    /// `None` when `manifest.md` is missing or does not parse yet.
+    pub manifest: Option<cori_manifest::Manifest>,
+    /// Per-file parses in step order. No routing resolution, no
+    /// reachability check, no manifest cross-validation — steps written
+    /// so far render even while the folder as a whole cannot compile.
+    pub steps: Vec<CompiledStep>,
+}
+
+/// Lenient, per-file parse of a workflow folder for the Console's live
+/// authoring canvas. [`compile`] rejects every intermediate authoring
+/// state by design (missing steps, declared-but-unused tools, forward
+/// routes to steps not written yet); this function accepts them all so
+/// the graph can grow as the agent writes. Draft output is display-only:
+/// it must never feed the planner, the runner, or a proposal — those go
+/// through [`compile`], whose cross-checks are the execution boundary.
+pub fn draft(workflow_dir: &Path) -> DraftWorkflow {
+    let manifest = std::fs::read_to_string(workflow_dir.join("manifest.md"))
+        .ok()
+        .and_then(|src| parse_manifest(&src).ok());
+
+    let steps_dir = workflow_dir.join("steps");
+    let re = step_filename_re();
+    let mut files: Vec<StepFile> = Vec::new();
+    if let Ok(read) = std::fs::read_dir(&steps_dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(filename) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned)
+            else {
+                continue;
+            };
+            let Some(caps) = re.captures(&filename) else {
+                continue; // draft tolerates stray files; compile flags them
+            };
+            let number: u32 = caps[1].parse().unwrap_or(u32::MAX);
+            let name = caps[2].to_string();
+            files.push(StepFile {
+                path,
+                filename,
+                number,
+                name,
+            });
+        }
+    }
+    // Duplicates and gaps render in file order; compile rejects them later.
+    files.sort_by(|a, b| (a.number, &a.filename).cmp(&(b.number, &b.filename)));
+
+    let mut steps: Vec<CompiledStep> = Vec::with_capacity(files.len());
+    for (idx, sf) in files.iter().enumerate() {
+        let rel = format!("steps/{}", sf.filename);
+        let Ok(src) = std::fs::read_to_string(&sf.path) else {
+            continue;
+        };
+        let (kind, description, route, metadata) = match step_parser::parse(&src) {
+            Ok(parsed) => (
+                parsed.kind,
+                parsed.description,
+                parsed.route,
+                parsed.metadata,
+            ),
+            // A half-written file still earns a node: sniff the kind from
+            // the SDK call so the canvas can at least color it right.
+            Err(_) => {
+                let (kind, metadata) = sniff_step_kind(&src);
+                (kind, String::new(), None, metadata)
+            }
+        };
+        let placement = compute_placement(kind, &metadata);
+        let depends_on = steps
+            .last()
+            .map(|step: &CompiledStep| vec![step.activity_id.clone()])
+            .unwrap_or_default();
+        steps.push(CompiledStep {
+            activity_id: format!("{:02}_{}", sf.number, sf.name),
+            index: idx as u32,
+            source_path: rel,
+            source_sha256: Some(source_sha256(src.as_bytes())),
+            kind,
+            name: sf.name.clone(),
+            description,
+            route,
+            depends_on,
+            metadata,
+            placement,
+            task_queue: None,
+        });
+    }
+
+    DraftWorkflow { manifest, steps }
+}
+
+/// Guess a step file's kind from its `step.<kind>(` call when the full
+/// parse fails. Defaults to `code` — the most neutral node.
+fn sniff_step_kind(source: &str) -> (StepKind, serde_json::Map<String, serde_json::Value>) {
+    let re = Regex::new(
+        r"step\s*\.\s*(cli|code|llm|mcp_tool|branch|switch|for_each|loop|wait|map|parallel)\s*\(",
+    )
+    .expect("static regex");
+    let mut metadata = serde_json::Map::new();
+    let kind = match re.captures(source).map(|c| c[1].to_string()).as_deref() {
+        Some("cli") => StepKind::Cli,
+        Some("llm") => StepKind::Llm,
+        Some("mcp_tool") => StepKind::McpTool,
+        Some(
+            builtin @ ("branch" | "switch" | "for_each" | "loop" | "wait" | "map" | "parallel"),
+        ) => {
+            metadata.insert(
+                "builtin".to_string(),
+                serde_json::Value::String(builtin.to_string()),
+            );
+            StepKind::Builtin
+        }
+        _ => StepKind::Code,
+    };
+    (kind, metadata)
+}
+
+// ---------------------------------------------------------------------------
 // Step routing (`goto`) — see docs/step-routing-design.md
 // ---------------------------------------------------------------------------
 
@@ -1592,6 +1719,66 @@ export default step.branch({
         );
         let errs = compile(tmp.path()).unwrap_err();
         assert!(errs.iter().any(|e| e.reason.contains("unknown")));
+    }
+
+    // ----- Draft view (live authoring) -----
+
+    #[test]
+    fn draft_renders_states_compile_rejects() {
+        // The exact mid-authoring shape from the field: the manifest
+        // declares a tool no step uses yet, and a branch routes forward
+        // to steps that are not written yet. `compile` rejects both;
+        // `draft` must render every step written so far.
+        let tmp = tempdir();
+        make_workflow(
+            tmp.path(),
+            "---\nid: hi\nname: Hi\ndescription: greet\ncreated: 2026-05-25\nversion: 1\ntools_required: [echo, python3]\n---\n# body\n",
+            &[
+                (
+                    "01_fetch.ts",
+                    "import { step } from \"@cori-do/sdk\";\nexport default step.cli({ description: \"fetch\", command: () => [\"echo\", \"hi\"] });\n",
+                ),
+                ("02_route.ts", &goto_branch("render_report", None)),
+            ],
+        );
+        compile(tmp.path()).expect_err("intermediate state must not compile");
+
+        let d = draft(tmp.path());
+        assert_eq!(d.manifest.as_ref().map(|m| m.id.as_str()), Some("hi"));
+        assert_eq!(d.steps.len(), 2);
+        assert_eq!(d.steps[0].activity_id, "01_fetch");
+        assert_eq!(d.steps[0].kind, StepKind::Cli);
+        assert_eq!(d.steps[1].kind, StepKind::Builtin);
+        assert_eq!(d.steps[1].metadata.get("builtin").unwrap(), "branch");
+    }
+
+    #[test]
+    fn draft_survives_missing_manifest_and_broken_steps() {
+        let tmp = tempdir();
+        // No manifest.md at all; one valid step, one half-written file.
+        fs::create_dir_all(tmp.path().join("steps")).unwrap();
+        fs::write(tmp.path().join("steps/01_ok.ts"), CODE_STEP).unwrap();
+        fs::write(
+            tmp.path().join("steps/02_wip.ts"),
+            "import { step } from \"@cori-do/sdk\";\nexport default step.llm({\n  description: \"unfinished",
+        )
+        .unwrap();
+
+        let d = draft(tmp.path());
+        assert!(d.manifest.is_none());
+        assert_eq!(d.steps.len(), 2);
+        assert_eq!(d.steps[0].kind, StepKind::Code);
+        // The broken file still earns a node, kind sniffed from the call.
+        assert_eq!(d.steps[1].activity_id, "02_wip");
+        assert_eq!(d.steps[1].kind, StepKind::Llm);
+    }
+
+    #[test]
+    fn draft_of_empty_folder_is_empty_not_an_error() {
+        let tmp = tempdir();
+        let d = draft(tmp.path());
+        assert!(d.manifest.is_none());
+        assert!(d.steps.is_empty());
     }
 
     // ----- Small tempdir helper (no external dep on `tempfile`). -----
