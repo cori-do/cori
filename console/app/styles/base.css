@@ -77,6 +77,8 @@
    the token instead of re-typing channels. */
 
 :root {
+  color-scheme: light;
+
   --brand-rgb: 66 47 207;
   --accent-rgb: 66 47 207;
 
@@ -136,6 +138,8 @@
 
 /* The site is dark-only, so its palette lands here verbatim. */
 .dark {
+  color-scheme: dark;
+
   --accent-rgb: 120 101 255;
 
   --background: #141a26; /* cards, raised rows */
@@ -2611,42 +2615,25 @@ table.runs td strong {
 }
 
 /* ─── Custom scrollbars (desktop polish) ─────────────────────────── */
-.results::-webkit-scrollbar,
-.launcher-detail::-webkit-scrollbar,
-.run-window-body::-webkit-scrollbar,
-.manage-body::-webkit-scrollbar,
-.modal::-webkit-scrollbar { width: 10px; height: 10px; }
-.results::-webkit-scrollbar-thumb,
-.launcher-detail::-webkit-scrollbar-thumb,
-.run-window-body::-webkit-scrollbar-thumb,
-.manage-body::-webkit-scrollbar-thumb,
-.modal::-webkit-scrollbar-thumb {
+/* Theme every scroll container, including tables, code blocks, and modals
+   introduced after this stylesheet. `color-scheme` above also keeps native
+   platform scrollbars dark where WebKit styling is unavailable. */
+* {
+  scrollbar-color: var(--rule-strong) var(--surface-2);
+  scrollbar-width: thin;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
   background: var(--rule-strong);
   border-radius: 10px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
-.results::-webkit-scrollbar-thumb:hover,
-.launcher-detail::-webkit-scrollbar-thumb:hover,
-.run-window-body::-webkit-scrollbar-thumb:hover,
-.manage-body::-webkit-scrollbar-thumb:hover,
-.modal::-webkit-scrollbar-thumb:hover {
+*::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
   background-clip: content-box;
 }
-.results::-webkit-scrollbar-track,
-.launcher-detail::-webkit-scrollbar-track,
-.run-window-body::-webkit-scrollbar-track,
-.manage-body::-webkit-scrollbar-track,
-.modal::-webkit-scrollbar-track { background: var(--surface-2); }
-.results,
-.launcher-detail,
-.run-window-body,
-.manage-body,
-.modal {
-  scrollbar-color: var(--rule-strong) var(--surface-2);
-  scrollbar-width: thin;
-}
+*::-webkit-scrollbar-track { background: var(--surface-2); }
 
 /* ─── Responsive (narrow windows) ────────────────────────────────── */
 @media (max-width: 640px) {
