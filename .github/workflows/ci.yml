@@ -70,6 +70,10 @@ jobs:
         ports: ["5432:5432"]
         options: --health-cmd "pg_isready -U cori -d postgres" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
+      - name: free disk space (the runner's preinstalled .NET, Android, GHC and CodeQL; every suite's builds and a restored cache need the room)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
         with: { path: cori }
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
@@ -159,6 +163,9 @@ jobs:
       - name: e2e-template (the starter template deployed as init ships it, on a real store and the starter model)
         working-directory: cori
         run: ./scripts/e2e-template.sh
+      - name: disk left (the headroom a large dependency bump eats into)
+        if: always()
+        run: df -h / && du -sh cori/target ~/.cargo/registry || true
 
   packages:
     name: packages (client, sdk, runner, cli)
