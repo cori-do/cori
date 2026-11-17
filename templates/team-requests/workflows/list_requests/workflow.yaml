@@ -1,0 +1,13 @@
+id: list_requests
+name: List requests
+description: The latest requests the caller may see; their own, or every member's for a manager.
+parameters:
+  - { name: status, type: enum, values: [all, pending, approved, declined], default: all, description: Status }
+connectors: [requests]
+steps: [latest]
+endpoint:
+  auth: sso
+  allow: { roles: [member, manager] }
+  mode: sync
+  idempotency: none                          # a read: every call runs, never replays an earlier list
+tags: [requests]

@@ -1,0 +1,24 @@
+id: support_ticket_triage
+name: Triage support ticket
+description: Classify an incoming ticket, load the customer's plan, decide priority deterministically, ask a lead before escalating, draft a reply.
+parameters:
+  - { name: ticket_id, type: string, description: Helpdesk ticket id }
+connectors: [helpdesk, tickets, slack]
+steps: [load_ticket, classify, lookup_customer, decide_priority, escalate_gate, notify, draft_reply]
+endpoint:
+  auth: sso
+  allow: { roles: [support_agent, support_lead] }
+  mode: sync
+  idempotency: parameters
+  rate_limit: 30/min/principal
+result:
+  headline: "Ticket {{ params.ticket_id }} → {{ steps.classify.category }} ({{ steps.decide_priority.priority }})"
+  fields:
+    - { label: Category, path: steps.classify.category }
+    - { label: Priority, path: steps.decide_priority.priority }
+    - { label: Escalated, path: steps.approve_escalation.escalated, optional: true }
+  sections:
+    - { label: Draft reply, path: steps.draft_reply.reply_draft, display: text }
+budget: { llm_eur_per_run: 0.02, max_duration: 5m }
+redact: [steps.load_ticket.ticket.body]
+tags: [support]

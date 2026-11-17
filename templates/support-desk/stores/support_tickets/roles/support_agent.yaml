@@ -1,0 +1,25 @@
+name: support_agent
+description: Support agents — role taken from the JWT claim resource_access.store-support-tickets.roles
+approvals: { group: support_leads }
+tables:
+  customers:
+    readable: [id, name, plan, arr_eur]          # no email: pii stays out of the workflow lineage
+  tickets:
+    readable: [ticket_number, subject, department, status, created_at]
+    updatable:
+      status:
+        only_when:
+          - { old.status: open, new.status: [in_progress, pending_customer] }
+          - { old.status: in_progress, new.status: [pending_customer, resolved] }
+  refund_requests:
+    readable: [id, ticket_id, invoice_id, amount_eur, status, requested_by]
+    creatable:
+      ticket_id: { required: true }
+      invoice_id: { required: true }
+      amount_eur: { required: true }
+      requested_by: { guidance: "the requesting agent's email" }
+      status: { restrict_to: [pending] }
+    updatable:
+      status:
+        only_when: [{ old.status: pending, new.status: [approved] }]
+        requires_approval: true                  # store-level gate, complements the workflow's human step

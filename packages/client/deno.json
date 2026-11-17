@@ -1,0 +1,1 @@
+{ "name": "@cori-do/client", "version": "2.0.0-alpha", "exports": { ".": "./index.ts", "./react": "./react.ts" }, "compilerOptions": { "lib": ["deno.window", "dom", "dom.iterable"] } }

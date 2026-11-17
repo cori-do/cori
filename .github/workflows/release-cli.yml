@@ -1,0 +1,124 @@
+# The cori command line on npm, on a tag v<version> (the workspace's version, which packages/cli/package.json and the
+# plugin's manifests, plugin.json and .claude-plugin/plugin.json, repeat):
+# a binary per platform, built here, then @cori-do/cli-<os>-<cpu> (one binary each) and @cori-do/cli (the launcher, which
+# lists them all as optional dependencies), each with the licence, its NOTICE and the third-party notices (scripts/cli-notices.sh).
+# Run by hand (Actions › release-cli › Run workflow), it is a dry run: everything but the publishing.
+#
+# Needs the repository secret NPM_TOKEN: an npm token that may publish the @cori-do packages (a granular access token,
+# read and write on the scope). Published from the public repository, the packages carry npm provenance (signed through
+# GitHub OIDC); npm attaches none from a private one.
+name: release-cli
+
+on:
+  push: { tags: ["v*"] }
+  workflow_dispatch:
+
+permissions: { contents: read }
+
+concurrency: { group: release-cli, cancel-in-progress: false }
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.98.1"
+
+jobs:
+  version:
+    name: one version (tag, workspace, npm package)
+    runs-on: ubuntu-24.04
+    outputs: { version: "${{ steps.v.outputs.version }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          ws=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
+          npm=$(node -p 'require("./packages/cli/package.json").version')
+          [ "$ws" = "$npm" ] || { echo "::error::Cargo.toml is at $ws, packages/cli/package.json at $npm"; exit 1; }
+          # the plugin's version pins what its installs get: it moves with every release
+          for p in plugin.json .claude-plugin/plugin.json; do
+            v=$(node -p "require('./$p').version"); [ "$ws" = "$v" ] || { echo "::error::Cargo.toml is at $ws, $p at $v"; exit 1; }
+          done
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$ws" ]; then echo "::error::the tag is $GITHUB_REF_NAME, the workspace at $ws"; exit 1; fi
+          echo "version=$ws" >> "$GITHUB_OUTPUT"
+
+  binary:
+    name: binary (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: both on Apple silicon, x86_64 cross-built (Apple's toolchain builds either)
+          - { target: aarch64-apple-darwin, runner: macos-15, cargo: build }
+          - { target: x86_64-apple-darwin, runner: macos-15, cargo: build }
+          # Linux: static (musl), zig compiling the C (aws-lc includes Linux headers musl-gcc does not reach); each on
+          # its own architecture, so that it runs here
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, cargo: zigbuild }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, cargo: zigbuild }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: protoc
+        run: if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev; else brew install protobuf; fi
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "${{ env.RUST_TOOLCHAIN }}", targets: "${{ matrix.target }}" }
+      - if: matrix.cargo == 'zigbuild'
+        uses: mlugg/setup-zig@v2
+        with: { version: 0.14.1 }
+      - if: matrix.cargo == 'zigbuild'
+        uses: taiki-e/install-action@v2
+        with: { tool: cargo-zigbuild }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: "${{ matrix.target }}" }
+      - name: build
+        run: cargo ${{ matrix.cargo }} --release --locked -p cori-cli --target ${{ matrix.target }}
+      - name: it runs, and on Linux is linked statically
+        run: |
+          B=target/${{ matrix.target }}/release/cori
+          file "$B"
+          if [ "${{ matrix.target }}" = x86_64-apple-darwin ]; then
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then arch -x86_64 "$B" --version; else echo "::notice::no Rosetta on this runner: the x86_64 binary was built, not run"; fi
+          else
+            "$B" --version
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then file "$B" | grep -qE 'statically linked|static-pie linked'; fi
+      - uses: actions/upload-artifact@v4
+        with: { name: "cori-${{ matrix.target }}", path: "target/${{ matrix.target }}/release/cori", if-no-files-found: error, retention-days: 7 }
+
+  npm:
+    name: npm packages
+    needs: [version, binary]
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, id-token: write }   # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "${{ env.RUST_TOOLCHAIN }}" }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-about }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
+      - uses: actions/download-artifact@v4
+        with: { path: bins, pattern: "cori-*" }
+      - name: the notices, then the packages (a binary for every platform)
+        run: |
+          scripts/cli-notices.sh THIRD-PARTY-NOTICES.md
+          node packages/cli/pack.mjs --release --out npm --notices THIRD-PARTY-NOTICES.md $(for d in bins/cori-*; do echo "${d#bins/cori-}=$d/cori"; done)
+          for p in npm/*; do (cd "$p" && npm pack --dry-run 2>&1 | grep -E 'name:|version:|package size|unpacked size|total files'); done
+      - name: publish (the platforms' packages, then the launcher), or a dry run when started by hand
+        env:
+          NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}"
+          VERSION: "${{ needs.version.outputs.version }}"
+          PROVENANCE: "${{ github.event.repository.private == false && '--provenance' || '' }}"
+        run: |
+          # a pre-release (0.2.0-rc.1) goes to `next`, so `npm install @cori-do/cli` keeps the latest release
+          tag=latest; case "$VERSION" in *-*) tag=next ;; esac
+          # ./ or npm takes npm/cli-<os>-<cpu> for the GitHub repository github.com/npm/cli-<os>-<cpu>, not a folder
+          for p in ./npm/cli-* ./npm/cli; do
+            name=$(node -p "require('$p/package.json').name")
+            if [ "$GITHUB_REF_TYPE" != tag ]; then npm publish "$p" --access public --tag "$tag" --dry-run; continue; fi
+            # a run started again after a failure skips what it published already
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then echo "$name@$VERSION is published already"; continue; fi
+            npm publish "$p" --access public --tag "$tag" $PROVENANCE
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: npm-packages, path: npm, retention-days: 7 }

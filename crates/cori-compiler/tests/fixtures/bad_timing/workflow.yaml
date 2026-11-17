@@ -1,0 +1,10 @@
+id: bad_timing
+name: Fixture
+parameters:
+  - { name: x, type: string }
+connectors: []
+steps: [gate]
+endpoint: { mode: sync, timeout: "2 hours", rate_limit: "30/fortnight" }
+budget: { max_duration: "30" }
+schedule: "every morning"
+schedule_tz: Mars/Olympus

@@ -1,0 +1,7 @@
+id: good_parallel
+name: Fixture
+parameters:
+  - { name: x, type: string }
+connectors: [api]
+steps: [a, b, c, d]
+endpoint: true

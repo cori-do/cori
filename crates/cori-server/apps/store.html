@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cori store</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb; --warn: #b45309; --panel: #f9fafb; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --warn: #fbbf24; --panel: #181b22; } }
+  :root[data-theme="dark"] { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --warn: #fbbf24; --panel: #181b22; }
+  body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg); }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  select, input, textarea, button { font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 5px 8px; }
+  button { border-color: var(--accent); color: var(--accent); cursor: pointer; background: transparent; } button.primary { background: var(--accent); color: #fff; }
+  .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; } th, td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; } th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  .muted { color: var(--muted); } .warn { color: var(--warn); }
+  textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-height: 56px; }
+  details { margin-top: 8px; } summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="bar">
+  <strong>Store</strong> <select id="store"></select>
+  <strong>Table</strong> <select id="table"></select>
+  <button id="prev">‹</button><span id="page" class="muted"></span><button id="next">›</button>
+  <span id="status" class="muted"></span>
+</div>
+<div class="wrap"><table id="grid"><thead></thead><tbody></tbody></table></div>
+<details><summary>SQL (read-only, limited to what your role may read)</summary>
+  <textarea id="sql" placeholder="SELECT id, status FROM tickets WHERE status = 'open' LIMIT 50"></textarea>
+  <div class="bar" style="margin-top:6px"><button class="primary" id="run">Run</button><span class="muted">rows go to this table only; the assistant sees a count, not the data</span></div>
+</details>
+<script>
+const H = (() => {
+  const pending = new Map(); let seq = 1; const listeners = {};
+  function send(msg) { window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, msg), "*"); }
+  function call(method, params) { return new Promise((resolve, reject) => { const id = seq++; pending.set(id, { resolve, reject }); send({ id, method, params: params || {} }); }); }
+  window.addEventListener("message", (ev) => {
+    const m = ev.data; if (!m || m.jsonrpc !== "2.0") return;
+    if (m.id !== undefined && m.method === undefined) { const p = pending.get(m.id); if (!p) return; pending.delete(m.id); m.error ? p.reject(m.error) : p.resolve(m.result); return; }
+    if (m.method === "ui/resource-teardown") { send({ id: m.id, result: {} }); return; }
+    (listeners[m.method] || []).forEach(f => f(m.params || {}));
+  });
+  function on(method, f) { (listeners[method] = listeners[method] || []).push(f); }
+  function applyContext(ctx) { if (!ctx) return; if (ctx.theme) document.documentElement.dataset.theme = ctx.theme; const vars = ctx.styles && ctx.styles.variables; if (vars) for (const k in vars) document.documentElement.style.setProperty(k, vars[k]); }
+  async function init(name) { let r = null; try { r = await call("ui/initialize", { protocolVersion: "2026-01-26", clientInfo: { name, version: "0.1" }, capabilities: {}, appCapabilities: {} }); } catch (e) {} send({ method: "ui/notifications/initialized" }); applyContext(r && r.hostContext); on("ui/notifications/host-context-changed", applyContext); return r; }
+  function tool(name, args) { return call("tools/call", { name, arguments: args || {} }); }
+  function sized() { send({ method: "ui/notifications/size-changed", params: { width: document.documentElement.scrollWidth, height: Math.min(document.documentElement.scrollHeight, 720) } }); }
+  return { init, on, tool, sized };
+})();
+const $ = (id) => document.getElementById(id);
+let state = { app: null, version: null, stores: [], store: null, table: null, limit: 50, offset: 0 };
+function options(sel, items, current) { sel.innerHTML = ""; items.forEach(i => { const o = document.createElement("option"); o.value = i; o.textContent = i; if (i === current) o.selected = true; sel.appendChild(o); }); }
+function grid(columns, rows) {
+  const thead = $("grid").querySelector("thead"), tbody = $("grid").querySelector("tbody");
+  const cols = columns && columns.length ? columns : (rows[0] ? Object.keys(rows[0]) : []);
+  thead.innerHTML = "<tr>" + cols.map(c => `<th>${esc(c)}</th>`).join("") + "</tr>";
+  tbody.innerHTML = rows.map(r => "<tr>" + cols.map(c => `<td title="${esc(fmt(r[c]))}">${esc(fmt(r[c]))}</td>`).join("") + "</tr>").join("") || `<tr><td class="muted" colspan="${Math.max(cols.length, 1)}">no rows</td></tr>`;
+}
+function fmt(v) { return v === null || v === undefined ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v)); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function render(d) {
+  state.app = d.app || state.app; state.stores = d.stores || []; state.store = d.store || state.store; state.table = d.table || state.table; if (d.limit) state.limit = d.limit; if (d.offset !== undefined) state.offset = d.offset;
+  options($("store"), state.stores.map(s => s.name), state.store);
+  const st = state.stores.find(s => s.name === state.store); options($("table"), (st && st.tables) || [], state.table);
+  grid(d.columns || [], d.rows || []);
+  $("page").textContent = state.table ? `${state.offset + 1}–${state.offset + (d.rows || []).length}` : "";
+  $("status").textContent = state.stores.length ? (d.target && d.target !== "live" ? `sandbox ${String(d.target).replace("sha256:", "").slice(0, 12)} of ${state.app}` : `live · ${state.app}`) : "no store database yet"; H.sized();
+}
+async function browse() { $("status").textContent = "loading…"; try { const r = await H.tool("store_browse", { app: state.app, version: state.version || undefined, store: state.store, table: state.table, limit: state.limit, offset: state.offset }); if (r.isError) throw new Error(r.content && r.content[0] && r.content[0].text); render(r.structuredContent); } catch (e) { $("status").innerHTML = `<span class="warn">${esc(e.message || JSON.stringify(e))}</span>`; } }
+$("store").onchange = () => { state.store = $("store").value; state.table = null; state.offset = 0; browse(); };
+$("table").onchange = () => { state.table = $("table").value; state.offset = 0; browse(); };
+$("prev").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); browse(); };
+$("next").onclick = () => { state.offset += state.limit; browse(); };
+$("run").onclick = async () => { $("status").textContent = "running…"; try { const r = await H.tool("store_query", { app: state.app, version: state.version || undefined, store: state.store, sql: $("sql").value }); if (r.isError) throw new Error(r.content && r.content[0] && r.content[0].text); const d = r.structuredContent || {}; grid(d.columns || [], d.rows || []); $("page").textContent = `${(d.rows || []).length} row(s)`; $("status").textContent = ""; } catch (e) { $("status").innerHTML = `<span class="warn">${esc(e.message || JSON.stringify(e))}</span>`; } H.sized(); };
+H.on("ui/notifications/tool-input", (p) => { const a = p.arguments || {}; if (a.app) state.app = a.app; if (a.version) state.version = a.version; if (a.store) state.store = a.store; if (a.table) state.table = a.table; });
+H.on("ui/notifications/tool-result", (p) => { const d = p.structuredContent; if (d && d.stores) render(d); else if (d && d.rows) { grid(d.columns || [], d.rows); $("page").textContent = `${d.rows.length} row(s)`; H.sized(); } });
+H.init("cori-store");
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+name: member
+description: Anyone on the team; files requests and follows their own
+writes: workflows          # rows change only through submit_request, which applies the approval rule
+tables:
+  requests:
+    readable: [id, title, details, amount_eur, category, summary, status, requester, decided_by, decision_note, created_at]
+    creatable:
+      title: { required: true }
+      details: {}
+      amount_eur: { required: true }
+      category: {}
+      summary: {}
+      requester: {}
+      status: { restrict_to: [pending] }
+    updatable:
+      status:
+        only_when: [{ old.status: pending, new.status: [approved, declined] }]
+      decided_by: {}
+      decision_note: {}

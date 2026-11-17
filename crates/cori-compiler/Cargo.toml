@@ -1,0 +1,34 @@
+[package]
+name = "cori-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Cori workflow compiler: typed dataflow DAGs from TypeScript step declarations"
+readme = "../../README.md"
+keywords = ["workflow", "temporal", "mcp", "agents"]
+categories = ["development-tools"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+hex.workspace = true
+dirs.workspace = true
+walkdir.workspace = true
+toml.workspace = true
+# schedule: and schedule_tz: are checked as the server's scheduler reads them (timing.rs)
+cron.workspace = true
+chrono-tz.workspace = true
+sqlparser = { version = "0.63", features = ["visitor"] }
+oxc_parser = "0.150.0"
+oxc_ast = "0.150.0"
+oxc_allocator = "0.150.0"
+oxc_span = "0.150.0"
+oxc_ast_visit = "0.150.0"
+# role files parsed with the Store's own types (serde only); tool generation is ported in stores/tools.rs
+cori-store-core.workspace = true
+

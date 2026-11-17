@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = ["crates/cori-compiler", "crates/cori-engine", "crates/cori-cli", "crates/cori-server", "crates/cori-store", "crates/cori-store-core", "crates/cori-store-engine", "crates/cori-vault"]
+
+[workspace.package]
+version = "0.11.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/cori-do/cori"
+rust-version = "1.98"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.11"
+hex = "0.4"
+walkdir = "2"
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "io-util", "io-std", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+# S3 request signing for the bundle store (`cori_server::bundles`); requests go through reqwest
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+toml = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "webpki-roots"] }
+prost-wkt-types = "0.7"
+temporalio-sdk = "1.0"
+temporalio-sdk-core = "0.9"
+temporalio-client = "1.0"
+temporalio-common = "1.0"
+temporalio-macros = "1.0"
+temporalio-workflow = "1.0"   # the workflow macros expand to ::temporalio_workflow
+axum = "0.8"
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+tower = { version = "0.5", default-features = false }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "json", "chrono"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+base64 = "0.23"
+dirs = "7"
+aes-gcm = "0.11"
+rand = "0.10"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.33"
+include_dir = "0.7"
+tar = "0.4"
+zstd = "0.13"
+cron = "0.17"
+chrono-tz = "0.10"
+cori-compiler = { path = "crates/cori-compiler" }
+cori-server = { path = "crates/cori-server" }
+cori-store = { path = "crates/cori-store" }
+cori-store-core = { path = "crates/cori-store-core" }
+cori-store-engine = { path = "crates/cori-store-engine" }
+cori-engine = { path = "crates/cori-engine" }
+cori-vault = { path = "crates/cori-vault" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# the released binary (packages/cli) carries no symbols: a smaller download
+[profile.release]
+strip = true

@@ -1,0 +1,12 @@
+{
+  "name": "@cori-do/cli",
+  "version": "0.11.0",
+  "description": "The cori command line (init, workflow new, check, run, deploy, login, up…) as a prebuilt binary for macOS and Linux: `npm install -g @cori-do/cli`, or `npx @cori-do/cli` in a sandbox or CI, with no Rust toolchain.",
+  "license": "Apache-2.0",
+  "homepage": "https://cori.do",
+  "repository": { "type": "git", "url": "git+https://github.com/cori-do/cori.git", "directory": "packages/cli" },
+  "keywords": ["cori", "workflows", "temporal", "mcp", "agents", "cli"],
+  "bin": { "cori": "bin/cori.js" },
+  "files": ["bin/cori.js", "README.md", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"],
+  "engines": { "node": ">=18" }
+}

@@ -1,0 +1,19 @@
+# Owned by the billing team, registered as connector "billing-activities" in the org.
+name: billing-activities
+task_queue: cori.acme.native.billing
+namespace: acme
+auth: { principal: jwt, audience: billing-activities }
+activities:
+  - name: IssueRefund
+    version: 2
+    description: Issue a refund on an invoice
+    input:  { $ref: schemas/IssueRefundInput.json }
+    output: { $ref: schemas/IssueRefundOutput.json }
+    effects: { destructive: true, idempotent: true }
+    timeouts: { start_to_close: 120s, heartbeat: 20s }
+    retry: { max_attempts: 3, non_retryable: [InvoiceNotFound, AlreadyRefunded, Forbidden] }
+  - name: GetInvoice
+    version: 1
+    input:  { $ref: schemas/GetInvoiceInput.json }
+    output: { $ref: schemas/GetInvoiceOutput.json }
+    effects: { read_only: true }

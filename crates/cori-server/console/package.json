@@ -1,0 +1,29 @@
+{
+  "name": "cori-console",
+  "private": true,
+  "type": "module",
+  "description": "The Cori console, built into one self-contained dist/index.html that cori-server embeds (include_str!) and serves at /, and the apps portal, its second page (dist-portal/portal.html).",
+  "scripts": {
+    "dev": "vite",
+    "mock": "vite --mode mock",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "tsc --noEmit -p . && vite build && vite build --mode portal && node notices.mjs",
+    "build:demo": "vite build --mode mock --outDir dist-demo"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.47.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

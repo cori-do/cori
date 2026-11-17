@@ -1,0 +1,92 @@
+[app]
+id = "support-desk"
+name = "Support Desk"
+
+[front]
+root = "dist"
+allow = { roles = ["support_agent", "support_lead", "it_admin"] }
+
+[auth]
+principal_claims = ["email", "department"]      # the token claims ctx.user carries besides sub, roles and email
+
+# the app's roles, which the organization's identity provider grants per user (it_admin, a platform role, needs none),
+# strongest first: a person holding several acts in the stores as the first listed, so a lead's role file grants
+# everything an agent's does
+[auth.roles.support_lead]
+description = "Decides escalations and refunds over the threshold"
+note = "group:support-leads"
+
+[auth.roles.support_agent]
+description = "Files and triages tickets, asks for refunds"
+note = "group:support-agents"
+
+[parallel]
+max_concurrency = 8
+
+# Connectors are declared at org level by the company's developers; listing one here means the app uses it.
+# Each `[connectors.<name>.dev]` block answers the connector from fixtures under `cori run` / `cori up`.
+
+[connectors.helpdesk]
+kind = "mcp"
+ref = "helpdesk-mcp"
+audience = "helpdesk-mcp"                      # Keycloak token exchange to this client; tools: getTicket, listTickets, addReply, closeTicket
+command = ["deno", "run", "fixtures/helpdesk_mcp.ts"]   # stdio MCP (a real server would use `url = "https://…/mcp"`)
+[connectors.helpdesk.dev]
+mock = "fixtures/helpdesk.json"
+
+[connectors.billing]
+kind = "activity"
+ref = "billing-activities"
+audience = "billing-activities"                 # native Temporal activities (C#) on the billing team worker
+task_queue = "cori.acme.native.billing"
+[connectors.billing.dev]
+mock = "fixtures/billing.json"
+
+[connectors.slack]
+kind = "http"
+ref = "slack-bot"                               # OpenAPI + bot token, auth = service
+base_url = "https://slack.com"
+auth_env = "SLACK_BOT_TOKEN"
+[connectors.slack.dev]
+mock = "fixtures/slack.json"
+
+[connectors.tickets]
+kind = "store"
+ref = "support_tickets"
+audience = "store-support-tickets"              # the Store verifies the exchanged JWT
+[connectors.tickets.dev]
+mock = "fixtures/tickets.json"
+
+[connectors.gws]
+kind = "cli"
+ref = "gws"
+worker = "sandbox"                              # cli day one, runs on the sandbox worker
+[connectors.gws.dev]
+mock = { argv0 = "gws", stdout = "{\"updates\":{\"updatedRows\":2}}" }
+
+[llm]
+provider = "mock"                               # prod: openai | vllm (api_key_env = "OPENAI_API_KEY") with tiers; dev keeps the fixture below
+mock = "fixtures/llm.json"                      # answers `llm` steps by step name
+tiers = { small = "gpt-5-mini", medium = "gpt-5-mini", large = "gpt-5" }
+[llm.dev]
+provider = "mock"                               # what `cori run` and `cori up` use whatever `[llm] provider` says (dropped in production)
+mock = "fixtures/llm.json"
+
+# `cori up` only: the users the dev widget lets you be (the first is the default identity), matching the fixtures
+[[dev.personas]]
+sub = "alice"
+roles = ["support_agent"]
+name = "Alice"
+title = "agent"
+
+[[dev.personas]]
+sub = "sam"
+roles = ["support_lead"]
+name = "Sam"
+title = "lead"
+
+[[dev.personas]]
+sub = "ivy"
+roles = ["it_admin"]
+name = "Ivy"
+title = "IT admin"

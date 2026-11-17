@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Support Desk</title>
+<style>body{font-family:system-ui;margin:2rem;max-width:720px}pre{background:#f4f4f4;padding:1rem;overflow:auto}button{padding:.5rem 1rem}</style></head>
+<body>
+<h1>Support Desk</h1>
+<p>Minimal front served by Cori. It reads <code>__cori/config.json</code> next to the app, calls the sync triage endpoint, and shows the typed result.</p>
+<label>Ticket id <input id="t" value="T-1042"></label> <button id="go">Triage</button>
+<pre id="out">idle</pre>
+<script type="module">
+  // Hosted under /apps/<app>/ (or at a domain root): the config lives next to the app, not at the site root.
+  const base = (location.pathname.match(/^\/apps\/[^/]+\/(@[^/]+\/)?/) || ["/"])[0];
+  const cfg = await (await fetch(`${base}__cori/config.json`)).json();
+  // dev auth: the identity chosen in the dev widget (bottom right, injected by `cori up`), kept per app in localStorage `cori.tok.<app>`; a real deployment uses the SSO JWT
+  const token = () => { try { return localStorage.getItem(`cori.tok.${cfg.app}`) || "dev:alice:support_agent"; } catch { return "dev:alice:support_agent"; } };
+  document.getElementById("go").onclick = async () => {
+    const out = document.getElementById("out"); out.textContent = "running…";
+    // served from a version's preview url (`preview: true`): run that version's workflows, on its sandbox stores
+    const wf = cfg.preview && cfg.version ? `${cfg.baseUrl}/v1/apps/${cfg.app}/versions/${cfg.version}/wf/support_ticket_triage/runs` : `${cfg.baseUrl}/v1/apps/${cfg.app}/wf/support_ticket_triage/runs`;
+    const r = await fetch(wf, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token()}` }, body: JSON.stringify({ ticket_id: document.getElementById("t").value }) });
+    const j = await r.json();
+    out.textContent = r.status === 200 && j.status === "failed" ? `failed at ${j.error_detail?.step ?? "?"}: ${j.error}` : r.status === 200 ? `${j.result?.headline}\n\n${JSON.stringify(j.result?.values, null, 2)}\n\nsteps: ${j.steps.map(s => `${s.name}:${s.status}`).join("  ")}` : JSON.stringify(j, null, 2);
+  };
+</script>
+</body></html>

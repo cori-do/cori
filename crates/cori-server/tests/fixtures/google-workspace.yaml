@@ -1,0 +1,64 @@
+# Google Workspace's remote MCP servers as the deployment's connectors (CORI_CONNECTORS_FILE): every organization's
+# registry shows them, and each run calls them with its person's own Google account (or the app's: `account = "app"` on
+# the connector in cori.toml), which that person connects once in the console (Connected accounts).
+#
+# The client is the deployment's: a Google Cloud project enrolled in the Workspace Developer Preview Program (while the
+# servers are a preview), with the ten APIs enabled (gmail, drive, docs, sheets, slides and each one's `…mcp`), an OAuth
+# client of type "Web application" marked "Use this client for an AI-powered agent", the scopes below under Data Access,
+# and `<public URL>/v1/connections/callback` among its redirect URIs. Its id and secret come from the environment.
+# The servers answer `tools/list` without a token: the server reads their tools when it starts.
+oauth:
+  google:
+    label: Google
+    authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    revoke_url: https://oauth2.googleapis.com/revoke
+    client_id_env: CORI_OAUTH_GOOGLE_CLIENT_ID
+    client_secret_env: CORI_OAUTH_GOOGLE_CLIENT_SECRET
+    # whose account it is (the console shows the address)
+    scopes: [openid, email]
+    # a refresh token (offline), every time (consent), and the scopes granted before kept with new ones
+    params: { access_type: offline, prompt: consent, include_granted_scopes: "true" }
+
+connectors:
+  gmail:
+    description: "Gmail: search and read threads, write drafts, label messages in each person's own mailbox"
+    url: https://gmailmcp.googleapis.com/mcp/v1
+    oauth: google
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.compose
+  google-drive:
+    description: "Google Drive: search, read, create and copy each person's files"
+    url: https://drivemcp.googleapis.com/mcp/v1
+    oauth: google
+    scopes:
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+  google-docs:
+    description: "Google Docs: read and edit documents"
+    url: https://docsmcp.googleapis.com/mcp/v1
+    oauth: google
+    scopes:
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/documents.readonly
+      - https://www.googleapis.com/auth/documents
+  google-sheets:
+    description: "Google Sheets: read and write values, formulas and sheets"
+    url: https://sheetsmcp.googleapis.com/mcp/v1
+    oauth: google
+    scopes:
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/spreadsheets.readonly
+      - https://www.googleapis.com/auth/spreadsheets
+  google-slides:
+    description: "Google Slides: read and edit presentations"
+    url: https://slidesmcp.googleapis.com/mcp/v1
+    oauth: google
+    scopes:
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/presentations.readonly
+      - https://www.googleapis.com/auth/presentations

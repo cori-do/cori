@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cori app settings</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb; --ok: #15803d; --warn: #b45309; --panel: #f9fafb; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --panel: #181b22; } }
+  :root[data-theme="dark"] { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --panel: #181b22; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); }
+  h1 { font-size: 16px; margin: 0 0 4px; } .sub { color: var(--muted); margin-bottom: 12px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; background: var(--panel); }
+  legend { padding: 0 6px; font-weight: 600; }
+  label { display: block; margin: 6px 0 2px; color: var(--muted); font-size: 12px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 90px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; } .row > * { flex: 1 1 160px; }
+  button { padding: 7px 12px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  .status { margin-top: 10px; min-height: 1.4em; } .ok { color: var(--ok); } .warn { color: var(--warn); }
+  a { color: var(--accent); } code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; } td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; } th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .hook input { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1 id="title">App settings</h1>
+<div class="sub" id="sub">Waiting for the app…</div>
+<div id="form" hidden>
+  <div class="sub">The settings of the version's <code>cori.toml</code>. They change in the app folder: edit <code>cori.toml</code>, then <code>cori deploy</code>; a person promotes the new version.</div>
+  <fieldset><legend>App</legend>
+    <div class="row"><div><label>Id</label><input id="app_id" disabled></div><div><label>Name</label><input id="app_name" disabled></div></div>
+  </fieldset>
+  <fieldset><legend>Roles</legend>
+    <div class="sub">One role per line as <code>role = group</code> (auth.roles). Front access: roles allowed to open the hosted front.</div>
+    <label>auth.roles</label><textarea id="roles" readonly></textarea>
+    <label>front.allow.roles</label><input id="front_roles" disabled>
+  </fieldset>
+  <fieldset><legend>LLM</legend>
+    <div class="row"><div><label>Provider</label><input id="llm_provider" disabled></div><div><label>Model</label><input id="llm_model" disabled></div><div><label>Mock fixture</label><input id="llm_mock" disabled></div></div>
+  </fieldset>
+  <fieldset><legend>Webhooks</legend>
+    <table id="hooks"><thead><tr><th>url</th><th>events</th><th>format</th><th>secret</th></tr></thead><tbody></tbody></table>
+  </fieldset>
+  <details><summary>Advanced: raw cori.toml of the version</summary><textarea id="raw" readonly></textarea></details>
+  <div class="row" style="margin-top:12px"><button type="button" class="ghost" id="reload">Reload</button></div>
+  <div class="status" id="status"></div>
+</div>
+<script>
+const H = (() => {
+  const pending = new Map(); let seq = 1; const listeners = {};
+  function send(msg) { window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, msg), "*"); }
+  function call(method, params) { return new Promise((resolve, reject) => { const id = seq++; pending.set(id, { resolve, reject }); send({ id, method, params: params || {} }); }); }
+  window.addEventListener("message", (ev) => {
+    const m = ev.data; if (!m || m.jsonrpc !== "2.0") return;
+    if (m.id !== undefined && m.method === undefined) { const p = pending.get(m.id); if (!p) return; pending.delete(m.id); m.error ? p.reject(m.error) : p.resolve(m.result); return; }
+    if (m.method === "ui/resource-teardown") { send({ id: m.id, result: {} }); return; }
+    (listeners[m.method] || []).forEach(f => f(m.params || {}));
+  });
+  function on(method, f) { (listeners[method] = listeners[method] || []).push(f); }
+  function applyContext(ctx) { if (!ctx) return; if (ctx.theme) document.documentElement.dataset.theme = ctx.theme; const vars = ctx.styles && ctx.styles.variables; if (vars) for (const k in vars) document.documentElement.style.setProperty(k, vars[k]); }
+  async function init(name) { let r = null; try { r = await call("ui/initialize", { protocolVersion: "2026-01-26", clientInfo: { name, version: "0.1" }, capabilities: {}, appCapabilities: {} }); } catch (e) {} send({ method: "ui/notifications/initialized" }); applyContext(r && r.hostContext); on("ui/notifications/host-context-changed", applyContext); return r; }
+  function tool(name, args) { return call("tools/call", { name, arguments: args || {} }); }
+  function sized() { send({ method: "ui/notifications/size-changed", params: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight } }); }
+  return { init, on, tool, sized, call };
+})();
+
+let state = { app: null, settings: {}, version: null };
+const $ = (id) => document.getElementById(id);
+function rolesText(r) { return Object.entries(r || {}).map(([k, v]) => `${k} = ${v}`).join("\n"); }
+function hookRow(h) {
+  const tr = document.createElement("tr");
+  for (const v of [h.url || "", (h.events || []).join(", "), h.format || "json", h.secret || ""]) { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); }
+  return tr;
+}
+function render(d) {
+  state = { app: d.app, settings: d.settings || {}, version: d.version, raw: d.cori_toml };
+  const s = state.settings;
+  $("title").textContent = `${d.name || d.app} · settings`;
+  $("sub").textContent = d.version ? `from version ${String(d.version).replace("sha256:", "").slice(0, 12)}${d.promoted === d.version ? " (promoted)" : " (latest, not promoted)"} · owner ${d.owner || "-"}` : "no version deployed yet: `cori deploy .` from the app folder";
+  $("app_id").value = (s.app && s.app.id) || d.app; $("app_name").value = (s.app && s.app.name) || d.name || "";
+  $("roles").value = rolesText(s.auth && s.auth.roles); $("front_roles").value = ((s.front && s.front.allow && s.front.allow.roles) || []).join(", ");
+  $("llm_provider").value = (s.llm && s.llm.provider) || "mock"; $("llm_model").value = (s.llm && s.llm.model) || ""; $("llm_mock").value = (s.llm && s.llm.mock) || "";
+  const tb = $("hooks").querySelector("tbody"); tb.innerHTML = ""; (s.webhooks || []).forEach(h => tb.appendChild(hookRow(h)));
+  $("raw").value = d.cori_toml || "";
+  $("form").hidden = false; $("status").textContent = ""; H.sized();
+}
+async function load() { if (!state.app) return; $("status").textContent = "loading…"; try { const r = await H.tool("app_settings", { app: state.app }); if (r.isError) throw new Error(r.content && r.content[0] && r.content[0].text); render(r.structuredContent); } catch (e) { $("status").innerHTML = `<span class="warn">${e.message || JSON.stringify(e)}</span>`; } }
+$("reload").onclick = load;
+H.on("ui/notifications/tool-input", (p) => { const a = p.arguments || {}; if (a.app) state.app = a.app; });
+H.on("ui/notifications/tool-result", (p) => { const d = p.structuredContent; if (d && d.settings) render(d); });
+H.init("cori-settings");
+</script>
+</body>
+</html>

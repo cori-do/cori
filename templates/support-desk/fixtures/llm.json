@@ -1,0 +1,5 @@
+{
+  "classify": { "category": "billing", "confidence": 0.93 },
+  "draft_reply": { "reply_draft": "Hello, thank you for flagging the double charge on INV-42. We are reviewing it now and will confirm the refund shortly." },
+  "summarise_department": { "department": "{{item.department}}", "summary": "Two tickets are waiting: an SSO login loop and a laptop delivery." }
+}

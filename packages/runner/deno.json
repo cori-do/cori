@@ -1,0 +1,1 @@
+{ "imports": { "zod": "npm:zod@4.4.3" }, "compilerOptions": { "strict": true }, "unstable": ["sloppy-imports"], "nodeModulesDir": "none" }

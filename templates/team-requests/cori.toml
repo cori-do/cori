@@ -1,0 +1,39 @@
+[app]
+id = "team-requests"
+name = "Team Requests"
+description = "Ask for something, get it triaged, and let a manager decide when it needs one"
+
+[front]
+root = "dist"
+allow = { roles = ["member", "manager"] }
+
+[auth]
+# the app's roles (keys), strongest first: a person holding both (the app's owner) acts in the store as the first listed,
+# so manager's role file grants everything member's does; values note the IdP group
+roles = { manager = "group:managers", member = "group:members" }
+
+# The app's own data: stores/requests/ (tables, rules, one role file per app role)
+[connectors.requests]
+kind = "store"
+ref = "requests"
+[connectors.requests.dev]
+mock = "fixtures/requests.json"                 # `cori run` without a Postgres; `cori up` uses the real store
+
+# No [llm] provider: on a server, `llm` steps get the organization's model for their tier, or the server's starter
+# model while the organization has none. `cori run` and `cori up` answer them from the fixture.
+[llm.dev]
+provider = "mock"
+mock = "fixtures/llm.json"
+
+# `cori up` only: the users the dev widget lets you be (the first is the default identity), matching the store's seed
+[[dev.personas]]
+sub = "alice"
+roles = ["member"]
+name = "Alice"
+title = "member"
+
+[[dev.personas]]
+sub = "sam"
+roles = ["manager"]
+name = "Sam"
+title = "manager"

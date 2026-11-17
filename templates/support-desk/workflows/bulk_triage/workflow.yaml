@@ -1,0 +1,21 @@
+id: bulk_triage
+name: Bulk triage
+description: Triage a list of tickets by running the triage workflow as a child per ticket, then summarise.
+parameters:
+  - { name: ticket_ids, type: list, description: Helpdesk ticket ids }
+connectors: []
+steps: [triage, summary]
+endpoint:
+  auth: sso
+  allow: { roles: [support_lead] }
+  mode: sync
+  idempotency: none
+  rate_limit: 3/min/principal
+result:
+  headline: "{{ steps.summary.count }} tickets triaged, {{ steps.summary.p1 }} P1"
+  fields:
+    - { label: Count, path: steps.summary.count }
+    - { label: P1, path: steps.summary.p1 }
+  sections:
+    - { label: By category, path: steps.summary.by_category, display: json }
+tags: [support]

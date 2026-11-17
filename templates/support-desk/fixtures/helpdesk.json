@@ -1,0 +1,7 @@
+{
+  "tools": {
+    "getTicket": { "id": "T-1042", "subject": "Invoice charged twice", "body": "Hi, my card was charged twice for invoice INV-42 this month. Please refund one of them.", "customer_id": "C-77" },
+    "addReply": { "reply_id": "R-9001" },
+    "closeTicket": { "ok": true }
+  }
+}

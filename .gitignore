@@ -1,0 +1,7 @@
+/target
+**/.cori/
+node_modules/
+.DS_Store
+sdks/dotnet/**/bin/
+sdks/dotnet/**/obj/
+skills/*.zip

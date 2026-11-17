@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cori app preview</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb; --ok: #15803d; --warn: #b45309; --panel: #f9fafb; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --panel: #181b22; } }
+  :root[data-theme="dark"] { --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --panel: #181b22; }
+  body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg); }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .pill { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); } .pill.ok { color: var(--ok); border-color: var(--ok); } .pill.warn { color: var(--warn); border-color: var(--warn); }
+  a { color: var(--accent); } button { font: inherit; border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .frame { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); min-height: 120px; position: relative; }
+  iframe { width: 100%; height: 520px; border: 0; display: block; background: #fff; }
+  img { max-width: 100%; display: block; }
+  .note { padding: 10px 12px; color: var(--muted); }
+  ul { margin: 6px 0 0; padding-left: 18px; } code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="bar"><strong id="title">Preview</strong> <span id="state" class="pill"></span> <a id="open" href="#" target="_blank" rel="noopener">open in a new tab</a> <button id="reload">reload</button> <span id="status" class="note" style="padding:0"></span></div>
+<div class="frame" id="frame"><div class="note">Waiting for the app…</div></div>
+<div id="meta" class="note"></div>
+<script>
+const H = (() => {
+  const pending = new Map(); let seq = 1; const listeners = {};
+  function send(msg) { window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, msg), "*"); }
+  function call(method, params) { return new Promise((resolve, reject) => { const id = seq++; pending.set(id, { resolve, reject }); send({ id, method, params: params || {} }); }); }
+  window.addEventListener("message", (ev) => {
+    const m = ev.data; if (!m || m.jsonrpc !== "2.0") return;
+    if (m.id !== undefined && m.method === undefined) { const p = pending.get(m.id); if (!p) return; pending.delete(m.id); m.error ? p.reject(m.error) : p.resolve(m.result); return; }
+    if (m.method === "ui/resource-teardown") { send({ id: m.id, result: {} }); return; }
+    (listeners[m.method] || []).forEach(f => f(m.params || {}));
+  });
+  function on(method, f) { (listeners[method] = listeners[method] || []).push(f); }
+  function applyContext(ctx) { if (!ctx) return; if (ctx.theme) document.documentElement.dataset.theme = ctx.theme; const vars = ctx.styles && ctx.styles.variables; if (vars) for (const k in vars) document.documentElement.style.setProperty(k, vars[k]); if (ctx.hostCapabilities) caps = ctx.hostCapabilities; }
+  let caps = {};
+  async function init(name) { let r = null; try { r = await call("ui/initialize", { protocolVersion: "2026-01-26", clientInfo: { name, version: "0.1" }, capabilities: {}, appCapabilities: {} }); } catch (e) {} send({ method: "ui/notifications/initialized" }); if (r && r.hostCapabilities) caps = r.hostCapabilities; applyContext(r && r.hostContext); on("ui/notifications/host-context-changed", applyContext); return r; }
+  function tool(name, args) { return call("tools/call", { name, arguments: args || {} }); }
+  function sized() { send({ method: "ui/notifications/size-changed", params: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight } }); }
+  function openLink(url) { return call("ui/open-link", { url }); }
+  function framesAllowed() { const c = caps && caps.sandbox && caps.sandbox.csp; return !c || !Array.isArray(c.frameDomains) || c.frameDomains.length > 0; }
+  return { init, on, tool, sized, openLink, framesAllowed };
+})();
+const $ = (id) => document.getElementById(id);
+let state = { app: null, hash: null, shot: null };
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+// the screenshot comes with the tool result, in `_meta` (a data url): an <img> pointing at the server could not authenticate
+function render(d, meta) {
+  state.app = d.app; state.hash = d.version; state.shot = (meta && meta["cori.dev/screenshot"]) || null;
+  $("title").textContent = `${d.app} · ${d.short}`;
+  $("state").textContent = d.promoted ? "promoted" : (d.status === "deployed" ? "deployed · sandbox" : (d.status || "deployed")); $("state").className = "pill " + (d.promoted ? "ok" : (d.needs_approval ? "warn" : ""));
+  $("open").href = d.url; $("open").onclick = (ev) => { ev.preventDefault(); H.openLink(d.url).catch(() => window.open(d.url, "_blank", "noopener")); };
+  const f = $("frame"); f.innerHTML = "";
+  let framed = false;
+  if (H.framesAllowed()) {
+    const ifr = document.createElement("iframe"); ifr.src = d.url; ifr.title = `${d.app} preview`; ifr.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups");
+    let loaded = false; ifr.onload = () => { loaded = true; $("status").textContent = ""; };
+    f.appendChild(ifr); framed = true;
+    setTimeout(() => { if (!loaded) fallback(d, "this host did not let the front load in a nested frame"); }, 4000);
+  } else { fallback(d, "this host does not allow nested frames"); }
+  $("meta").innerHTML = `${d.workflows && d.workflows.length ? `<strong>workflows</strong><ul>${d.workflows.map(w => `<li><code>${esc(w.id)}</code> ${w.endpoint ? `endpoint ${esc(w.endpoint.mode || "sync")}` : ""} ${w.schedule ? `schedule <code>${esc(w.schedule)}</code>` : ""}</li>`).join("")}</ul>` : "no workflow in this version"}` +
+    `<div>version <code>${esc(d.version || "")}</code>${d.git_commit ? ` · commit <code>${esc(String(d.git_commit).slice(0, 12))}</code>` : ""}${d.created_by ? ` · by ${esc(d.created_by)}` : ""}${d.needs_approval ? ` · <span class="pill warn">adds writes: needs an approver</span>` : ""} · <a href="${esc(d.console_url)}" target="_blank" rel="noopener">console</a></div>`;
+  if (!framed) H.sized(); else setTimeout(H.sized, 300);
+}
+function fallback(d, why) {
+  const f = $("frame"); f.innerHTML = "";
+  if (state.shot) { const img = document.createElement("img"); img.src = state.shot; img.alt = `${d.app} screenshot`; img.onload = H.sized; f.appendChild(img); }
+  const n = document.createElement("div"); n.className = "note"; n.innerHTML = `${esc(why)}: <a href="${esc(d.url)}" target="_blank" rel="noopener">open ${esc(d.url)}</a>${state.shot ? " (screenshot above)" : ""}`; f.appendChild(n); H.sized();
+}
+async function load() { if (!state.app) return; $("status").textContent = "loading…"; try { const r = await H.tool("preview", { app: state.app, hash: state.hash || undefined }); if (r.isError) throw new Error(r.content && r.content[0] && r.content[0].text); render(r.structuredContent, r._meta); } catch (e) { $("status").textContent = e.message || JSON.stringify(e); } }
+$("reload").onclick = load;
+H.on("ui/notifications/tool-input", (p) => { const a = p.arguments || {}; if (a.app) state.app = a.app; if (a.hash) state.hash = a.hash; });
+H.on("ui/notifications/tool-result", (p) => { const d = p.structuredContent; if (d && d.url) render(d, p._meta); });
+H.init("cori-preview");
+</script>
+</body>
+</html>

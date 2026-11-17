@@ -1,0 +1,20 @@
+{
+  "name": "cori",
+  "owner": {
+    "name": "Cori",
+    "url": "https://cori.do"
+  },
+  "metadata": {
+    "description": "Cori for your AI agent."
+  },
+  "plugins": [
+    {
+      "name": "cori",
+      "source": "./",
+      "description": "Build your team's internal apps with Cori: requests, approvals and records, from a conversation with your AI agent.",
+      "category": "productivity",
+      "homepage": "https://cori.do",
+      "license": "Apache-2.0"
+    }
+  ]
+}

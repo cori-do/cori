@@ -1,0 +1,10 @@
+# Column rules shared by every role. Rows belong to the person who filed them: members list and read their own,
+# a role with `scope: all` in its file (manager) sees everyone's.
+version: "1.0.0"
+tables:
+  requests:
+    tenant: requested_by
+    columns:
+      status:   { allowed_values: [pending, approved, declined] }
+      category: { allowed_values: [equipment, software, travel, training, other] }
+      decided_by: { allowed_values: [rule, manager] }

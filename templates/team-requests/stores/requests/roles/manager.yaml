@@ -1,0 +1,22 @@
+name: manager
+description: Decides the requests the rule does not approve; sees every member's requests
+writes: workflows
+tables:
+  requests:
+    scope: all             # every member's rows, not only their own
+    readable: [id, title, details, amount_eur, category, summary, status, requester, decided_by, decision_note, created_at]
+    # a manager files requests too: a person with both roles acts in the store as the first cori.toml lists (manager),
+    # so this role may do everything a member's may
+    creatable:
+      title: { required: true }
+      details: {}
+      amount_eur: { required: true }
+      category: {}
+      summary: {}
+      requester: {}
+      status: { restrict_to: [pending] }
+    updatable:
+      status:
+        only_when: [{ old.status: pending, new.status: [approved, declined] }]
+      decided_by: {}
+      decision_note: {}

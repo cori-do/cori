@@ -1,0 +1,18 @@
+# Produced by the Cori Store admin tools (RulesDefinition). Single-company app (R6): no
+# tenancy, no injected columns; only the tables and rules the app needs.
+version: "1.0.0"
+tables:
+  customers:
+    global: true
+    columns:
+      email: { type: email, tags: [pii] }
+      plan:  { allowed_values: [free, pro, enterprise] }
+  tickets:
+    global: true
+    columns:
+      status: { allowed_values: [open, in_progress, pending_customer, resolved, closed] }
+      body:   { tags: [pii] }
+  refund_requests:
+    global: true
+    columns:
+      status: { allowed_values: [pending, approved, declined, refunded] }

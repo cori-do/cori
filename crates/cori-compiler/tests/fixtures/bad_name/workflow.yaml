@@ -1,0 +1,7 @@
+id: bad_name
+name: Fixture
+parameters:
+  - { name: x, type: string }
+connectors: [api]
+steps: [first]
+endpoint: true

@@ -1,0 +1,2 @@
+{ "type": "object", "required": ["invoice_id", "amount_eur", "reason"],
+  "properties": { "invoice_id": { "type": "string" }, "amount_eur": { "type": "number", "minimum": 1 }, "reason": { "type": "string" } } }

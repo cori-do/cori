@@ -1,0 +1,21 @@
+id: refund_request
+name: Refund request
+description: Record a refund request in the store, get a support lead's approval above a threshold, issue the refund through a native C# Temporal activity owned by the billing team, and confirm on the ticket.
+parameters:
+  - { name: ticket_id, type: string, description: Helpdesk ticket id }
+  - { name: invoice_id, type: string, description: Invoice to refund }
+  - { name: amount_eur, type: number, min: 1, description: Amount to refund }
+connectors: [helpdesk, billing, tickets, slack]
+steps: [record_request, needs_approval, refund_try, confirm_on_ticket, outcome]
+endpoint:
+  auth: sso
+  allow: { roles: [support_agent, support_lead] }
+  mode: async
+  idempotency: header
+result:
+  headline: "Refund {{ params.amount_eur }} € on {{ params.invoice_id }}: {{ steps.outcome.status }}"
+  fields:
+    - { label: Status, path: steps.outcome.status }
+    - { label: Refund id, path: steps.issue_refund.refund_id, optional: true }
+budget: { max_duration: 3d }
+tags: [support, billing]

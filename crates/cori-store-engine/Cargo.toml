@@ -1,0 +1,25 @@
+[package]
+name = "cori-store-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Cori Store runtime: validation, execution under a role, parked changes, Postgres grants and introspection"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1.10"
+bigdecimal = "0.4"
+sqlx = { workspace = true, features = ["bigdecimal", "uuid"] }
+cori-store-core.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

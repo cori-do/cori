@@ -1,0 +1,22 @@
+{
+  "cori": {
+    "attempt": 1,
+    "idempotency_key": "refund_request-0001:refund",
+    "principal_token": "cori-sealed.v1.oKGio6Slpqeoqaqrg2E2RSeMYdYtDM2AUgCJ7z7FEym80nFcsm0U6hE_QT5YC51eIOYdnM5S-JWf",
+    "run_id": "refund_request-0001",
+    "step": "refund",
+    "user": {
+      "email": "alice@acme.example",
+      "platform_roles": [],
+      "roles": ["support_agent"],
+      "sub": "alice"
+    },
+    "version": "sha256:3f9a0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccdd",
+    "workflow": "refund_request"
+  },
+  "input": {
+    "amount_eur": 15.5,
+    "invoice_id": "INV-42",
+    "reason": "charged twice"
+  }
+}

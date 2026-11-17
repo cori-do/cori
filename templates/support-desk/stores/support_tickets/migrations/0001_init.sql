@@ -1,0 +1,3 @@
+CREATE TABLE customers (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, plan TEXT NOT NULL DEFAULT 'free', arr_eur NUMERIC NOT NULL DEFAULT 0);
+CREATE TABLE tickets (ticket_number TEXT PRIMARY KEY, subject TEXT NOT NULL, body TEXT, department TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', priority TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE refund_requests (id TEXT PRIMARY KEY DEFAULT ('RR-' || floor(random() * 90000 + 10000)::text), ticket_id TEXT NOT NULL, invoice_id TEXT NOT NULL, amount_eur NUMERIC NOT NULL, status TEXT NOT NULL DEFAULT 'pending', requested_by TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());

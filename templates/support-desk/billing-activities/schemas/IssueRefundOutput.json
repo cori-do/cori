@@ -1,0 +1,1 @@
+{ "type": "object", "required": ["refund_id"], "properties": { "refund_id": { "type": "string" } } }

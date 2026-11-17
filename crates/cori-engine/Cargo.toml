@@ -1,0 +1,45 @@
+[package]
+name = "cori-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Cori workflow engine: one generic Temporal workflow executing compiled DAGs"
+readme = "../../README.md"
+keywords = ["workflow", "temporal", "mcp", "agents"]
+categories = ["development-tools"]
+
+[dependencies]
+# the #[workflow_methods] macro of temporalio-sdk expands to paths in temporalio-workflow
+temporalio-workflow.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+futures.workspace = true
+chrono.workspace = true
+toml.workspace = true
+reqwest.workspace = true
+prost-wkt-types.workspace = true
+temporalio-sdk.workspace = true
+temporalio-sdk-core.workspace = true
+temporalio-client.workspace = true
+temporalio-common.workspace = true
+temporalio-macros.workspace = true
+cori-compiler.workspace = true
+dirs.workspace = true
+axum.workspace = true
+libc = "0.2"
+# files an llm step gives its model travel as base64 (documents, images)
+base64.workspace = true
+
+[dev-dependencies]
+# the billing_worker example opens the run's token sealed for it
+aes-gcm.workspace = true
+hex.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["temporalio-workflow"]   # used by macro expansions only

@@ -1,0 +1,21 @@
+# Third-party notices
+
+The `cori` binary is built from Cori's own code (Apache-2.0, see LICENSE and NOTICE) and the open source software
+below. The Rust crates come first, each licence text followed by the crates under it; then the JavaScript the binary
+embeds (the console).
+Crates under the MPL-2.0 are used unmodified, and their source is at the repository listed with them.
+
+## Rust crates
+
+{{#each licenses}}
+### {{{name}}}
+
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

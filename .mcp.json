@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "cori": { "type": "http", "url": "https://app.cori.do/mcp" }
+  }
+}

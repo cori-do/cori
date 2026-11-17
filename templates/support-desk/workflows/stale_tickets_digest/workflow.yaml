@@ -1,0 +1,12 @@
+id: stale_tickets_digest
+name: Stale tickets digest
+description: Every morning, list tickets open for more than 5 days per department, summarise each department in one paragraph, post to Slack, and append a row to the team's Google Sheet.
+parameters: []
+connectors: [tickets, slack, gws]
+steps: [stale_tickets, by_department, summarise, post_digest, append_sheet]
+schedule: "0 7 * * 1-5"
+schedule_tz: Europe/Paris
+schedule_as: { client_id: schedule-support-digest }   # Keycloak client with service account, roles: [support_lead]
+budget: { llm_eur_per_run: 0.10, max_duration: 15m }
+parallel: { max_concurrency: 4 }
+tags: [support, digest]

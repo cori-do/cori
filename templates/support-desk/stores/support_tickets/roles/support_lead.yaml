@@ -1,0 +1,17 @@
+name: support_lead
+description: Support leads (SSO group support-leads); also the schedule's service role
+tables:
+  customers: { readable: [id, name, plan, arr_eur] }
+  tickets:
+    readable: [ticket_number, subject, department, status, created_at, body]
+    updatable: { status: {}, priority: {} }
+  refund_requests:
+    readable: [id, ticket_id, invoice_id, amount_eur, status, requested_by]
+    # everything an agent may do, as a lead holding both roles acts as the lead (listed first in cori.toml)
+    creatable:
+      ticket_id: { required: true }
+      invoice_id: { required: true }
+      amount_eur: { required: true }
+      requested_by: { guidance: "the requesting lead's email" }
+      status: { restrict_to: [pending] }
+    updatable: { status: {} }

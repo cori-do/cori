@@ -1,0 +1,9 @@
+# When this repository is another build's named context (`--build-context core=<this checkout>`).
+**/target
+**/node_modules
+**/.git
+**/.DS_Store
+**/.cori
+skills/*.zip
+sdks/dotnet/**/bin
+sdks/dotnet/**/obj

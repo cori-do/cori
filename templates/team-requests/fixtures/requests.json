@@ -1,0 +1,12 @@
+{
+  "tools": {
+    "createRequest": { "id": "6f1c2a9e-1d4b-4f0e-9a51-3c2d7b8e0f11" },
+    "updateRequest": { "id": "6f1c2a9e-1d4b-4f0e-9a51-3c2d7b8e0f11", "status": "approved" }
+  },
+  "query": {
+    "latest": [
+      { "id": "6f1c2a9e-1d4b-4f0e-9a51-3c2d7b8e0f11", "title": "Second monitor", "details": "For design reviews", "amount_eur": 180, "category": "equipment", "summary": "A second monitor for design reviews.", "status": "pending", "requester": "alice@example.com", "decided_by": null, "decision_note": null, "created_at": "2025-10-10T09:12:00Z" },
+      { "id": "0b7e5d3c-8a2f-4c61-b9d4-5e6f7a8b9c0d", "title": "USB-C dock", "details": "For the desk by the window", "amount_eur": 89, "category": "equipment", "summary": "A USB-C dock for a second desk.", "status": "approved", "requester": "alice@example.com", "decided_by": "rule", "decision_note": "Up to 100 €: approved by the rule", "created_at": "2025-10-05T14:30:00Z" }
+    ]
+  }
+}

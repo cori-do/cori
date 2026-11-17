@@ -1,0 +1,24 @@
+id: submit_request
+name: Submit a request
+description: File a request; a model sorts and summarises it, a rule approves small amounts, a manager decides the rest.
+parameters:
+  - { name: title, type: string, description: What you need }
+  - { name: details, type: string, required: false, description: Why, and anything a manager should know }
+  - { name: amount_eur, type: number, min: 0, description: Estimated cost in euros }
+connectors: [requests]
+steps: [triage, route, record, approval, decide, close]
+endpoint:
+  auth: sso
+  allow: { roles: [member, manager] }
+  mode: async
+  idempotency: header
+result:
+  headline: "{{ params.title }}: {{ steps.decide.status }}"
+  fields:
+    - { label: Status, path: steps.decide.status }
+    - { label: Category, path: steps.triage.category }
+    - { label: Summary, path: steps.triage.summary }
+    - { label: Decided by, path: steps.decide.decided_by }
+    - { label: Note, path: steps.decide.note }
+budget: { max_duration: 8d }
+tags: [requests]

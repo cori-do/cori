@@ -1,0 +1,27 @@
+[package]
+name = "cori-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Cori Store: governed Postgres data with role-scoped generated tools"
+readme = "../../README.md"
+keywords = ["workflow", "temporal", "mcp", "agents"]
+categories = ["development-tools"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+sqlx.workspace = true
+sqlparser = { version = "0.63", features = ["visitor"] }
+cori-store-core.workspace = true
+cori-store-engine.workspace = true

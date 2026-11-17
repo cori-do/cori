@@ -1,0 +1,254 @@
+# Cori CI: the repository is checked out under cori/ (the steps run there).
+name: ci
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
+
+permissions: { contents: read }
+
+env:
+  CARGO_TERM_COLOR: always
+  DENO_VERSION: v2.8.1
+
+jobs:
+  rust:
+    name: tests (unit + store on Postgres)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: cori, POSTGRES_PASSWORD: cori, POSTGRES_DB: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U cori -d postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: cori }
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev postgresql-client
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.98.1", components: clippy }
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: "${{ env.DENO_VERSION }}" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: cori }
+      - name: store admin without superuser (as on a managed Postgres)
+        run: psql "postgres://cori:cori@127.0.0.1:5432/postgres" -c "CREATE ROLE store_admin LOGIN CREATEDB CREATEROLE PASSWORD 'store_admin'"
+      - name: cargo test (superuser store admin)
+        working-directory: cori
+        env: { CORI_STORE_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: cargo test --workspace --locked
+      - name: store tests with a CREATEDB/CREATEROLE admin
+        working-directory: cori
+        # one store admin credential per cluster: the runtime login belongs to whoever created it
+        run: |
+          psql "postgres://cori:cori@127.0.0.1:5432/postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT format('DROP DATABASE %I WITH (FORCE)', datname) FROM pg_database WHERE datname LIKE 'cori_store_%' OR datname = 'cori_executor_test' \gexec
+          SELECT format('DROP OWNED BY %I CASCADE', rolname) FROM pg_roles WHERE rolname LIKE 'cs\_%' OR rolname LIKE 'cori\_extest\_%' OR rolname LIKE 'cori_store_%' OR rolname IN ('cori_runtime', 'cori_test_admin') \gexec
+          SELECT format('DROP ROLE %I', rolname) FROM pg_roles WHERE rolname LIKE 'cs\_%' OR rolname LIKE 'cori\_extest\_%' OR rolname LIKE 'cori_store_%' OR rolname IN ('cori_runtime', 'cori_test_admin') \gexec
+          SQL
+          CORI_STORE_DATABASE_URL="postgres://store_admin:store_admin@127.0.0.1:5432/postgres" cargo test -p cori-store -p cori-store-engine --locked
+      - name: clippy (report only)
+        working-directory: cori
+        continue-on-error: true
+        run: cargo clippy --workspace --locked -- -W clippy::all
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-about }
+      - name: the binary's crates are under licences the release accepts (packages/cli/about.toml)
+        working-directory: cori
+        run: scripts/cli-notices.sh "$RUNNER_TEMP/THIRD-PARTY-NOTICES.md"
+
+  e2e:
+    name: end to end (Temporal dev server, Postgres)
+    runs-on: ubuntu-24.04
+    needs: rust
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: cori, POSTGRES_PASSWORD: cori, POSTGRES_DB: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U cori -d postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: cori }
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.98.1" }
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: "${{ env.DENO_VERSION }}" }
+      - name: Temporal CLI
+        run: |
+          curl -sSfL https://temporal.download/cli.sh | sh -s -- --dir "$HOME/.temporalio"
+          echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: cori }
+      - name: git identity (`cori init` commits)
+        run: git config --global user.email ci@cori.invalid && git config --global user.name "cori ci"
+      - name: build
+        working-directory: cori
+        run: cargo build --locked -p cori-cli -p cori-server --bins --examples
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: a generated front builds (its typed client, the vendored @cori-do/client, Vite)
+        working-directory: cori
+        run: |
+          HOME_DIR=$(mktemp -d); APP="$HOME_DIR/app"
+          env -u CORI_SERVER -u CORI_TOKEN HOME="$HOME_DIR" ./target/debug/cori init "$APP" --no-register --no-git
+          cd "$APP/front" && npm install --no-audit --no-fund && PATH="$GITHUB_WORKSPACE/cori/target/debug:$PATH" npm run build
+      - name: the starter template ships the build of its front (dist/, its generated client), as its sources make it
+        working-directory: cori
+        env: { CORI_BIN: "${{ github.workspace }}/cori/target/debug/cori" }
+        run: ./scripts/template-front.sh --check
+      - name: e2e-logins (one login per server; each app folder with its own server, a token never sent to another)
+        working-directory: cori
+        run: ./scripts/e2e-logins.sh
+      - name: e2e (hosted flow)
+        working-directory: cori
+        run: ./scripts/e2e.sh
+      - name: e2e-store
+        working-directory: cori
+        env: { CORI_STORE_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-store.sh
+      - name: e2e-auth (OIDC, token exchange, leases; the platform database on Postgres)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-auth.sh
+      - name: e2e-replicas (two server replicas, one platform database, one bundle store)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-replicas.sh
+      - name: e2e-s3 (the bundle store on an S3 server that checks signatures, then the replicas on it)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-s3.sh
+      - name: "e2e-vault (each app's credentials under a key of its own in a Vault container: Transit, then a master key per app in KV)"
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-vault.sh
+      - name: e2e-identity (the client hook's outbox, a client made later, role events, strict and confirmed roles; a provider listing every app's roles in one claim, its scopes, resource and agents' client)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-identity.sh
+      - name: e2e-people (people and access through the identity hook; requests, questions, notifications, who may)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-people.sh
+      - name: e2e-fronts (each front on a host of its own, probed in Chrome; the console under its policy)
+        working-directory: cori
+        run: ./scripts/e2e-fronts.sh
+      - name: e2e-portal (the organization's apps portal, signed in through the console in Chrome, each person's apps, its own host and session)
+        working-directory: cori
+        env: { CORI_E2E_DATABASE_URL: "postgres://cori:cori@127.0.0.1:5432/postgres" }
+        run: ./scripts/e2e-portal.sh
+      - name: e2e-sandbox (builders' code in a sandbox; its door, its lease, starting over)
+        working-directory: cori
+        run: ./scripts/e2e-sandbox.sh
+      - name: e2e-usage (limits, the usage ledger, LLM calls priced by the server and budgets set aside, the export)
+        working-directory: cori
+        run: ./scripts/e2e-usage.sh
+      - name: e2e-files (uploads for file parameters and their limits, the model reading a PDF, downloads, a release's files, a local run)
+        working-directory: cori
+        run: ./scripts/e2e-files.sh
+      - name: e2e-starter (the deployment's starter model, for an organization without a provider of its own)
+        working-directory: cori
+        run: ./scripts/e2e-starter.sh
+      - name: e2e-connections (the deployment's connectors, each person's own account at an OAuth provider)
+        working-directory: cori
+        run: ./scripts/e2e-connections.sh
+      - name: e2e-template (the starter template deployed as init ships it, on a real store and the starter model)
+        working-directory: cori
+        run: ./scripts/e2e-template.sh
+
+  packages:
+    name: packages (client, sdk, runner, cli)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: "${{ env.DENO_VERSION }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: "@cori-do/client: tests and types (react.ts is checked by the front build, where react resolves)"
+        working-directory: packages/client
+        run: deno test && deno check index.ts
+      - name: "@cori-do/sdk and the step runner: types"
+        run: (cd packages/sdk && deno check index.ts) && (cd packages/runner && deno check runner.ts schema.ts schemas.ts)
+      - name: "@cori-do/cli: its packages as npm installs them, install scripts off (a stand-in binary)"
+        run: packages/cli/test.sh
+
+  plugin:
+    name: the plugin for AI agents (manifests, marketplace, skills)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: one version everywhere, one server, each skill named after its folder (strict YAML, as `npx skills add` reads it)
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y --no-install-recommends python3-yaml
+          python3 - <<'PY'
+          import json, pathlib, re, yaml
+          ws = re.search(r'^\[workspace\.package\][^\[]*?^version = "([^"]+)"', open("Cargo.toml").read(), re.M | re.S).group(1)
+          for p in ("plugin.json", ".claude-plugin/plugin.json", "packages/cli/package.json"):
+              v = json.load(open(p))["version"]; assert v == ws, f"{p} is at {v}, Cargo.toml at {ws}"
+          names = [e["name"] for e in json.load(open(".claude-plugin/marketplace.json"))["plugins"]]
+          assert names == [json.load(open(".claude-plugin/plugin.json"))["name"]] == [json.load(open("plugin.json"))["name"]], names
+          urls = {json.load(open(p))["mcpServers"]["cori"]["url"] for p in (".mcp.json", "mcp.json")}
+          assert len(urls) == 1, urls
+          skills = sorted(pathlib.Path("skills").glob("*/SKILL.md"))
+          for s in skills:
+              front = yaml.safe_load(s.read_text().split("---")[1])
+              assert front["name"] == s.parent.name and front["description"], s
+          print("plugin", ws, "skills", [s.parent.name for s in skills], "server", urls)
+          PY
+      - name: plugin.json and mcp.json against the Agent Plugins 1.0 schemas
+        run: scripts/validate-agent-plugin.sh
+
+  console:
+    name: console bundle is up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: crates/cori-server/console/package-lock.json }
+      - working-directory: crates/cori-server/console
+        run: npm ci && npm run build
+      - name: dist/ and dist-portal/ match the sources (they are embedded in the binary), and so do their third-party notices
+        run: git diff --exit-code -- crates/cori-server/console/dist crates/cori-server/console/dist-portal crates/cori-server/console/THIRD-PARTY-NOTICES.md
+
+  sdks:
+    name: native activity SDKs decode the engine's envelope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: sdks/go/go.mod, cache-dependency-path: sdks/go/go.sum }
+      # sdks/testdata/native_envelope.json: the engine's tests check they produce it, these check the SDKs decode it and
+      # open its sealed token with sdks/testdata/connector_key.hex (the server's own test seals it the same way)
+      - name: go (sdks/go)
+        working-directory: sdks/go
+        run: go test ./...
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "9.0.x" }
+      - name: dotnet (sdks/dotnet)
+        run: dotnet run --project sdks/dotnet/Cori.Activities.Check -- sdks/testdata/native_envelope.json
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-audit }
+      # a vulnerability fails, an unmaintained or unsound crate is only listed (.cargo/audit.toml: the ignored advisories).
+      # Not rustsec/audit-check: once a warning shows, it reports through a check run it creates then updates, and GitHub
+      # sometimes answers that update with a 404 (the job then fails on a clean audit)
+      - run: cargo audit
+      # the console's runtime dependencies are what the binary embeds: a high advisory there fails. Its build tools (vite,
+      # tailwind, the single-file plugin) only ever read our own sources, in CI: only a critical advisory there fails.
+      # Runs even when cargo audit failed
+      - working-directory: crates/cori-server/console
+        if: ${{ !cancelled() }}
+        run: npm audit --omit=dev --audit-level=high && npm audit --audit-level=critical

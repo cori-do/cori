@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cori",
+  "version": "0.11.0",
+  "description": "Build your team's internal apps with Cori: requests, approvals and records, from a conversation with your AI agent.",
+  "author": {
+    "name": "Cori",
+    "url": "https://cori.do"
+  },
+  "homepage": "https://cori.do",
+  "repository": "https://github.com/cori-do/cori",
+  "license": "Apache-2.0",
+  "keywords": ["cori", "internal apps", "workflows", "approvals", "mcp"]
+}

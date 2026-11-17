@@ -1,0 +1,1 @@
+{ "name": "@cori-do/sdk", "version": "2.0.0-alpha", "exports": "./index.ts", "imports": { "zod": "npm:zod@4.4.3" } }
